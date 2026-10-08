@@ -56,7 +56,8 @@ const requestedDtype = process.env.FOREXPLORE_EMBEDDING_DTYPE?.trim();
 let extractor;
 let device;
 let dtype;
-for (const candidate of requestedDevice ? [requestedDevice] : ['dml', 'cpu']) {
+const defaultDevices = process.platform === 'win32' ? ['dml', 'cpu'] : ['cuda', 'cpu'];
+for (const candidate of requestedDevice ? [requestedDevice] : defaultDevices) {
   const candidateDtype = requestedDtype ?? (candidate === 'cpu' ? 'q8' : 'fp16');
   try {
     extractor = await pipeline('feature-extraction', model, { dtype: candidateDtype, device: candidate, revision });

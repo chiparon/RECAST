@@ -2,6 +2,7 @@ import type { BoundTestRunner } from "../test-runner.js";
 import type {
   FunctionGroupVerificationInput,
   FunctionGroupFunctionResult,
+  RequirementFunctionGroupVerificationInput,
   TargetFunctionCoverage,
   VerificationFunction,
   VerificationReason,
@@ -91,7 +92,7 @@ export type AgentTaskContext = {
   targetPath: string;
   targetFunction: VerificationFunction;
   /** Present only for the function-group strategy. */
-  functionGroup?: FunctionGroupVerificationInput;
+  functionGroup?: FunctionGroupVerificationInput | RequirementFunctionGroupVerificationInput;
 };
 
 export type ToolRuntimeContext = AgentTaskContext & {

@@ -62,8 +62,9 @@ export function bindFunctionGroupTestRunner(context: RunnerContext): FunctionGro
           : coverage?.status !== "available"
             ? "coverage-unavailable"
             : executed ? "verified" : "not-executed";
+        const source = ("source" in mapping ? mapping.source : undefined) as VerificationFunction | undefined;
         return {
-          source: { ...mapping.source },
+          ...(source ? { source: { ...source } } : {}),
           target: { ...mapping.target },
           status: executed ? "passed" as const : "unverified" as const,
           executed,

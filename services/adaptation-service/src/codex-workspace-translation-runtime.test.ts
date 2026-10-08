@@ -40,6 +40,8 @@ const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
 if (!existsSync('CODEX_IMPLEMENTATION_PLAN.json')) {
   writeFileSync(output, JSON.stringify({ summary:'implement answer', mappings:[{source:'Legacy.Answer',targetPath:'src.cs',targetSymbol:'Answer'}], dependencies:[], steps:[{id:'answer',description:'implement answer',files:['src.cs'],dependsOn:[]}] }));
 } else {
+  writeFileSync('patch.txt', 'temporary unified diff artifact\\n');
+  writeFileSync('.agent-tmp/translator.tmp', 'scratch\\n');
   writeFileSync('target/src.cs', 'class Target { public int Answer() => ' + (history.includes('42') && manifest.includes('Legacy.Tests.cs') && !hiddenWasVisible ? '42' : '0') + '; }\\n');
   writeFileSync(output, 'done');
 }

@@ -41,6 +41,11 @@ export type FunctionGroupVerificationFunction = {
   target: VerificationFunction;
 };
 
+/** A target-only function subject used when no trustworthy source mapping exists. */
+export type RequirementFunctionGroupVerificationFunction = {
+  target: VerificationFunction;
+};
+
 export type FunctionGroupVerificationInput = {
   schemaVersion: "3.1";
   sourceLanguage: string;
@@ -51,6 +56,16 @@ export type FunctionGroupVerificationInput = {
   functions: FunctionGroupVerificationFunction[];
   /** Target functions for which no trustworthy source reference was found. */
   unmatchedFunctions?: VerificationFunction[];
+};
+
+export type RequirementFunctionGroupVerificationInput = {
+  schemaVersion: "3.1";
+  mode: "requirement";
+  sourceLanguage: string;
+  targetLanguage: string;
+  targetProjectPath: string;
+  requirement: string;
+  functions: RequirementFunctionGroupVerificationFunction[];
 };
 
 export type VerificationIssueKind =
@@ -90,7 +105,8 @@ export type VerificationResult = {
 };
 
 export type FunctionGroupFunctionResult = {
-  source: VerificationFunction;
+  /** Present for translation-fidelity verification; omitted for requirement-only verification. */
+  source?: VerificationFunction;
   target: VerificationFunction;
   status: "passed" | "unverified";
   executed: boolean;

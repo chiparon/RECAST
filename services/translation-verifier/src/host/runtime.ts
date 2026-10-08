@@ -108,7 +108,7 @@ export function createAgentHost<Result = unknown>(
         const tools = bindTools(task, context);
         const result = await runAgentLoop({
           client: options.modelClient,
-          task,
+          task: withRuntimeTestInstructions(task, resolvedContext.runtime),
           tools,
           budget,
           limits,
@@ -160,6 +160,28 @@ export function createAgentHost<Result = unknown>(
       }
     },
   };
+}
+
+/**
+ * The test root can be Host-created (for example the disposable C# harness),
+ * so it is not available when a strategy builds its task.  Put the exact
+ * project-relative roots into the user message after the Host has resolved
+ * them.  This prevents the model from guessing `tests/` and repeatedly
+ * submitting paths rejected by the allowlist.
+ */
+function withRuntimeTestInstructions(
+  task: AgentTask,
+  runtime: ToolRuntimeContext,
+): AgentTask {
+  const roots = runtime.testRoots.join(", ");
+  const instruction = [
+    "Host test setup (authoritative):",
+    `- Test framework: ${runtime.testRunner}`,
+    `- Authorized test roots: ${roots}`,
+    "- Every test path passed to write_target_test and run_function_group_tests must start with one of those exact roots.",
+    "- Use one test file and one test class for this verification whenever possible; after writing it, run it immediately and use the Host diagnostics to fix it.",
+  ].join("\n");
+  return { ...task, userPrompt: `${task.userPrompt}\n\n${instruction}` };
 }
 
 type BoundTool = HostTool<any, any>;

@@ -90,8 +90,8 @@ export class RecallKernel {
 
     // One channel per (plan, view) pair, merged in a fixed plan-major order so
     // the fused result stays deterministic. A store that can batch the views is
-    // asked once per plan: the same documents come back, with one embedding and
-    // a quarter of the statements.
+    // asked once per plan: it can share one embedding and bounded hydration
+    // while retaining an independent candidate budget for each view.
     const perPlan = await Promise.all(request.plans.map(async (plan) => {
       if (searchByViews) {
         const batched = await searchByViews.call(this.store, request.scope, plan.query,

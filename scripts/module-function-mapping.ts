@@ -25,6 +25,88 @@ export type ModuleFunctionMapping = {
   diagnostics: FunctionMappingDiagnostic[];
 };
 
+/**
+ * Some language indexers emit an exported class as a module's core API (for
+ * example `TraceFactory`) while the coverage report can only attribute an
+ * executed method (`TraceFactory.Start`). Expand those class-level subjects
+ * using the target source before handing them to the verifier. The helper is
+ * intentionally conservative: it only expands a class when its source has
+ * one or more public/protected/internal methods, and leaves all other symbols
+ * untouched.
+ */
+export function expandClassLevelFunctions(
+  functions: readonly VerificationFunction[],
+  readSource: (path: string) => string | undefined,
+): VerificationFunction[] {
+  const expanded: VerificationFunction[] = [];
+  for (const target of functions) {
+    if (target.name.includes(".") || target.signature?.includes("(")) {
+      // Indexers often store a fully-qualified symbol as the signature but
+      // omit its parameter list (`Namespace.Type.Method`). Coverage reports
+      // provide the real method signature; retaining the incomplete indexer
+      // text would make an otherwise unique method look unmatched.
+      expanded.push(target.signature && !target.signature.includes("(")
+        ? { path: target.path, name: target.name }
+        : { ...target });
+      continue;
+    }
+    const source = readSource(target.path);
+    const methods = source ? publicMethodsOfClass(source, target.name) : [];
+    if (methods.length === 0) {
+      expanded.push(target.signature && !target.signature.includes("(")
+        ? { path: target.path, name: target.name }
+        : { ...target });
+      continue;
+    }
+    for (const method of methods) {
+      expanded.push({
+        path: target.path,
+        name: method.name,
+        signature: `${target.name}.${method.name}(${method.parameters})`,
+      });
+    }
+  }
+  return deduplicateFunctions(expanded);
+}
+
+type ParsedMethod = { name: string; parameters: string };
+
+function publicMethodsOfClass(source: string, className: string): ParsedMethod[] {
+  const declaration = new RegExp(`\\b(?:class|interface|record)\\s+${escapeRegExp(className)}\\b`);
+  const match = declaration.exec(source);
+  if (!match) return [];
+  const open = source.indexOf("{", match.index + match[0].length);
+  if (open < 0) return [];
+  const close = matchingBrace(source, open);
+  if (close < 0) return [];
+  const body = source.slice(open + 1, close);
+  const methodPattern = /\b(?:public|protected|internal)\s+(?:(?:static|virtual|override|abstract|async|sealed|partial|final)\s+)*(?:[\w.?<>\[\],]+\s+)+([A-Za-z_]\w*)\s*\(([^()]*)\)/g;
+  const methods: ParsedMethod[] = [];
+  for (const item of body.matchAll(methodPattern)) {
+    const name = item[1];
+    if (!name || name === className) continue;
+    methods.push({ name, parameters: (item[2] ?? "").trim() });
+  }
+  return [...new Map(methods.map((method) => [`${method.name}(${method.parameters})`, method])).values()];
+}
+
+function matchingBrace(source: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function deduplicateFunctions(functions: readonly VerificationFunction[]): VerificationFunction[] {
+  return [...new Map(functions.map((item) => [`${item.path}\\0${item.name}\\0${item.signature ?? ""}`, item])).values()];
+}
+
 type ApiDescriptor = {
   raw: string;
   name: string;

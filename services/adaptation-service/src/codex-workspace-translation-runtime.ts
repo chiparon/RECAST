@@ -481,6 +481,15 @@ export class CodexWorkspaceTranslationRuntime {
     const startedAt = new Date().toISOString();
     const started = Date.now();
     const childEnvironment = { ...process.env, ...this.environment };
+    // Keep ordinary translator scratch files out of the host and project
+    // directories. The staging root is disposable, so these files are safe
+    // to discard after the allow-listed target diff has been collected.
+    if (sandbox === "workspace-write") {
+      const scratch = join(root, ".agent-tmp");
+      childEnvironment.TMPDIR = scratch;
+      childEnvironment.TMP = scratch;
+      childEnvironment.TEMP = scratch;
+    }
     // CODEX_MODEL is a project-local compatibility variable, not part of the
     // Codex runtime contract. Never let a user's shell setting override the
     // explicit ADAPTATION_CODEX_MODEL (or the Codex config selected by HOME).
@@ -530,6 +539,7 @@ export class CodexWorkspaceTranslationRuntime {
     try {
       const targetRoot = join(root, "target");
       await mkdir(targetRoot, { recursive: true });
+      if (!analyzer) await mkdir(join(root, ".agent-tmp"), { recursive: true, mode: 0o700 });
       await copyVisibleTree(this.files.root, targetRoot, this.options.verification?.protectedFiles ?? [], baseline, signal);
       const historyRoot = join(root, "history-view");
       await this.copyHistoryView(request.historyView, historyRoot, signal);
@@ -611,7 +621,9 @@ export class CodexWorkspaceTranslationRuntime {
   }
 
   private async diffStaging(stage: { root: string; baseline: Map<string, string>; historyBaseline: Map<string, string>; planHash?: string }, writeFiles: readonly string[]): Promise<Array<{ path: string; before: string | null; after: string }>> {
-    await this.assertControlFilesUnchanged(stage);
+    // Translator scratch artifacts (for example a unified diff saved as
+    // patch.txt) are disposable and must not block a valid target diff.
+    await this.assertControlFilesUnchanged(stage, true);
     const after = new Map<string, string>();
     await collectTargetFiles(stage.root, after);
     const allowed = new Set(writeFiles);
@@ -719,15 +731,21 @@ export class CodexWorkspaceTranslationRuntime {
     for (const [path, content] of stage.baseline) if (after.get(path) !== content) throw new Error(`Codex Analyzer modified target file: ${path}`);
   }
 
-  private async assertControlFilesUnchanged(stage: { root: string; baseline: Map<string, string>; historyBaseline: Map<string, string>; planHash?: string }): Promise<void> {
+  private async assertControlFilesUnchanged(stage: { root: string; baseline: Map<string, string>; historyBaseline: Map<string, string>; planHash?: string }, allowTransientRootFiles = false): Promise<void> {
     const entries = await readdir(stage.root, { withFileTypes: true });
     // Codex CLI may create its empty local agent metadata directory in the
     // staging root. It is outside both visible trees and is never copied back
     // to the target; keep the scope check strict for every other root entry.
-    const allowed = new Set(["target", "history-view", "CODEX_IMPLEMENTATION_PLAN.json", "CODEX_ANALYZER_SCHEMA.json", ".codex-last-message.txt", ...codexMetadataDirectories]);
+    const allowed = new Set(["target", "history-view", "CODEX_IMPLEMENTATION_PLAN.json", "CODEX_ANALYZER_SCHEMA.json", ".codex-last-message.txt", ...(allowTransientRootFiles ? [".agent-tmp"] : []), ...codexMetadataDirectories]);
     for (const entry of entries) {
-      if (!allowed.has(entry.name)) throw new Error(`Codex created an out-of-scope staging entry: ${entry.name}`);
       if (entry.isSymbolicLink()) throw new Error(`Codex created a symbolic link in staging: ${entry.name}`);
+      // A translator may leave a regular temporary artifact at the staging
+      // root. It is never copied back; only target/ is diffed below. Keep
+      // rejecting unknown directories so a new tree cannot hide writes.
+      if (!allowed.has(entry.name)) {
+        if (allowTransientRootFiles && entry.isFile()) continue;
+        throw new Error(`Codex created an out-of-scope staging entry: ${entry.name}`);
+      }
       if (codexMetadataDirectories.has(entry.name) && !entry.isDirectory()) throw new Error(`Codex metadata entry must be a directory: ${entry.name}`);
     }
     const history = join(stage.root, "history-view");

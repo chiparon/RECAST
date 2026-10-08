@@ -58,6 +58,22 @@ function defaultToolsDirectory() {
 
 const tools = process.env.FOREXPLORE_EMBEDDING_TOOLS ?? defaultToolsDirectory();
 const cache = process.env.FOREXPLORE_MODEL_CACHE ?? path.join(homedir(), '.cache', 'forexplore-model-cache');
+// CUDA's driver is supplied by WSL, but CUDA/cuDNN user libraries belong to
+// the isolated inference runtime, alongside the optional ONNX provider.
+function cudaLibraryEnvironment() {
+  if (process.platform !== 'linux') return {};
+  const libraries = [];
+  const nvidiaRoot = path.join(homedir(), '.cache', 'recast', 'cuda-runtime', 'nvidia');
+  if (existsSync(nvidiaRoot)) {
+    for (const name of readdirSync(nvidiaRoot).sort()) {
+      const directory = path.join(nvidiaRoot, name, 'lib');
+      if (existsSync(directory)) libraries.push(directory);
+    }
+  }
+  if (existsSync('/usr/lib/wsl/lib')) libraries.push('/usr/lib/wsl/lib');
+  if (process.env.LD_LIBRARY_PATH) libraries.push(process.env.LD_LIBRARY_PATH);
+  return libraries.length ? { LD_LIBRARY_PATH: libraries.join(':') } : {};
+}
 const logDir = process.env.RECAST_SERVICES_LOG_DIR ?? path.join(tmpdir(), 'recast-services');
 const waitMs = Number(process.env.RECAST_SERVICES_WAIT_MS ?? 180_000);
 const maxLogBytes = 10 * 1024 * 1024;
@@ -156,6 +172,13 @@ async function serviceReady(label, port) {
       if (health.model !== model || (label === 'embedding' && health.ready !== true)) {
         throw new Error(`port ${port} is not serving the configured ${label} model ${model}`);
       }
+      if (label === 'embedding') {
+        const device = process.env.FOREXPLORE_EMBEDDING_DEVICE?.trim();
+        const dtype = process.env.FOREXPLORE_EMBEDDING_DTYPE?.trim();
+        if ((device && health.device !== device) || (dtype && health.dtype !== dtype)) {
+          throw new Error(`port ${port} serves ${health.device}/${health.dtype}, expected ${device || 'automatic'}/${dtype || 'automatic'}`);
+        }
+      }
     }
     return { ready: true };
   } catch (error) { return { ready: false, detail: error.message }; }
@@ -175,7 +198,7 @@ function launch(label, script, env) {
   }
   const handle = openSync(log, 'a');
   const child = spawn(process.execPath, [script], { detached: true, stdio: ['ignore', handle, handle], cwd: process.cwd(),
-    env: { ...process.env, ...env } });
+    env: { ...process.env, ...cudaLibraryEnvironment(), ...env } });
   closeSync(handle);
   const launched = { child, log, error: undefined };
   child.once('error', error => { launched.error = error.message; });

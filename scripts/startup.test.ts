@@ -8,6 +8,9 @@ vi.mock('node:child_process', () => ({ spawn: mocks.spawn, spawnSync: mocks.spaw
 vi.mock('node:net', () => ({ createConnection: mocks.connect }));
 vi.mock('mysql2/promise', () => ({ createConnection: mocks.database }));
 vi.mock('node:http', () => ({ get: mocks.get }));
+// The launcher tests exercise service startup; workspace mapping has its own
+// tests and must not read real platform files through the mocked filesystem.
+vi.mock('./check-platform-workspace.mjs', () => ({ checkPlatformWorkspace: vi.fn() }));
 vi.mock('node:fs', () => ({
   existsSync: () => true, readdirSync: () => ['cached-model'],
   closeSync: vi.fn(), mkdirSync: vi.fn(), openSync: vi.fn(), renameSync: vi.fn(), statSync: vi.fn(), writeFileSync: vi.fn(),
@@ -76,6 +79,17 @@ it('honors skip-seek-db while waiting for an externally managed local database',
   await import('./start-recast-services.mjs');
   expect(mocks.database).toHaveBeenCalled();
   expect(mocks.spawnSync).not.toHaveBeenCalled();
+});
+
+it('rejects an occupied CPU service when CUDA was explicitly requested', async () => {
+  vi.stubEnv('FOREXPLORE_EMBEDDING_DEVICE', 'cuda');
+  const previousExitCode = process.exitCode;
+  try {
+    await import('./start-recast-services.mjs');
+    expect(process.exitCode).toBe(1);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('expected cuda/automatic'));
+  } finally { process.exitCode = previousExitCode; }
 });
 
 it('forwards skip-seek-db through the launcher npm separator', async () => {

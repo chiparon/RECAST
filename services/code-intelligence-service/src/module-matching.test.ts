@@ -11,12 +11,13 @@ afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).
 const target: ModuleTarget = { id: 'target', kind: 'module', name: 'Payment', path: 'Payment.cs', language: 'C#',
   signature: 'SubmitPayment, RecoverPayment', module: { sourceFiles: ['Payment.cs'], coreApis: ['SubmitPayment', 'RecoverPayment'], dependsOn: [] } };
 
-async function setup() {
+async function setup(extraSources: Record<string, string> = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'module-matching-'));
   roots.push(root);
   await writeFile(path.join(root, 'package.json'), '{"name":"payment"}');
   await writeFile(path.join(root, 'payment.ts'), 'export function submitPayment() { return true; }');
   await writeFile(path.join(root, 'receipt.ts'), 'export function receipt() { return "accepted"; }');
+  await Promise.all(Object.entries(extraSources).map(([file, source]) => writeFile(path.join(root, file), source)));
   const store = new InMemoryIndexStore();
   const runtime = await createCodeIntelligenceRuntime({ store });
   await runtime.registry.register({ repositoryId: 'history', localPath: root, role: 'history', displayName: 'History' });
@@ -36,7 +37,83 @@ async function setup() {
   return { runtime, store, scope, index };
 }
 
+async function competingModules() {
+  const { store, scope, index } = await setup(Object.fromEntries([
+    ...Array.from({ length: 12 }, (_, i) => [`decoy${i}.ts`, `export function decoy${i}() { return ${i}; }`]),
+    ['blank.ts', ' \n\t '],
+  ]));
+  const base = { kind: 'feature', language: 'TypeScript', description: 'Implementation', coreApis: [], symbolKeys: [],
+    dependsOn: [], evidenceIds: [`project:${scope.projectId}`] };
+  const proposal: ProjectModuleProposal = { ...scope, analysisHash: index.analysisHash, objective: projectAnalysisObjective,
+    summary: 'Competing retrieval signals', modules: [
+      { ...base, id: 'parent', name: 'Payment subsystem', nodeKind: 'subsystem', sourceFiles: [],
+        refinement: { state: 'split', reason: 'Implementation leaf', decisionSource: 'structural' } },
+      ...index.files.map((file) => ({ ...base, id: file.relativePath, name: file.relativePath, nodeKind: 'module' as const,
+        parentId: file.relativePath === 'payment.ts' ? 'parent' : null, sourceFiles: [file.relativePath],
+        refinement: { state: 'leaf' as const, reason: 'Single responsibility', decisionSource: 'structural' as const } })),
+    ] };
+  const analysis = new ProjectAnalysisCoordinator({ store, plan: async () => ({ proposal,
+    evidence: { ...scope, analysisHash: index.analysisHash, planHash: projectPlanHash(proposal), evidenceIds: [`project:${scope.projectId}`] } }) });
+  await analysis.ensure(scope, true);
+  expect((await analysis.read(scope)).state).toBe('ready');
+  const summaries = (await store.listSearchDocuments(scope)).filter((doc) => doc.kind === 'summary' &&
+    !JSON.parse(doc.text).view && doc.title !== 'blank.ts');
+  vi.spyOn(store, 'searchSearchDocuments').mockImplementation(async (_scope, _query, limit, kind) => {
+    if (kind === 'source-fragment') return [{ ...scope, searchDocumentId: 'blank-gap', kind, relativePath: 'blank.ts',
+      title: 'Payment health implementation', text: ' \n\t ', contentHash: 'blank',
+      retrievalScore: { semantic: 1, lexical: 100, fusion: 2 / 61 } }];
+    if (kind !== 'summary') return [];
+    return summaries.map((doc, i) => ({ ...doc, retrievalScore: {
+      semantic: doc.title === 'receipt.ts' ? 0.99 : doc.title === 'payment.ts' ? 0.6 : 0.98 - i / 1000,
+      lexical: doc.title === 'payment.ts' ? 10 : 0,
+      fusion: doc.title === 'payment.ts' ? 2 / 61 : 1 / (90 + i),
+    } })).slice(0, limit);
+  });
+  return { store };
+}
+
 describe('module-to-module matching', () => {
+  it('keeps lexical/vector agreement ahead of a higher cosine score and ignores blank evidence', async () => {
+    const { store } = await competingModules();
+    const results = await searchModules(store, { target: { ...target, module: { ...target.module!, coreApis: [] } },
+      requirement: 'payment', topK: 1, repositoryIds: ['history'] });
+    expect(results[0]!.sourceModule?.moduleId).toBe('payment.ts');
+    expect(results[0]!.score.semantic).toBe(0.6);
+    expect(results[0]!.score.overall).toBeCloseTo(0.8);
+  });
+
+  it('gives the model both ranking signals, deduplicates parent manifests and bounds the shortlist', async () => {
+    const { store } = await competingModules();
+    let documents: readonly string[] = [];
+    const reranker = { model: 'test-model', rank: async (_query: string, supplied: readonly string[]) => {
+      documents = supplied;
+      const chosen = supplied.findIndex((doc) => doc.startsWith('payment.ts\n'));
+      expect(chosen).toBeGreaterThanOrEqual(0);
+      return [chosen, ...supplied.map((_, index) => index).filter((index) => index !== chosen)]
+        .map((index, rank) => ({ index, score: 1 - rank / supplied.length }));
+    } };
+    const results = await searchModules(store, { target: { ...target, module: { ...target.module!, coreApis: [] } },
+      requirement: 'payment', topK: 4, repositoryIds: ['history'] }, undefined, reranker);
+    expect(results[0]!.sourceModule?.moduleId).toBe('payment.ts');
+    expect(documents.some((doc) => doc.startsWith('receipt.ts\n'))).toBe(true);
+    expect(documents.filter((doc) => doc.includes('// payment.ts\n'))).toHaveLength(1);
+    expect(documents.some((doc) => doc.startsWith('blank.ts\n'))).toBe(false);
+    expect(documents.length).toBeLessThanOrEqual(16);
+    expect(documents.length).toBeGreaterThan(8);
+  });
+
+  it.each([[], [{ index: 0, score: NaN }], [{ index: 3, score: 0.5 }], [{ index: 0, score: 2 }],
+    [{ index: 0, score: 0.5 }, { index: 0, score: 0.5 }]].map((ordering) => ({ ordering })))('retains valid candidates on malformed model output $ordering', async ({ ordering }) => {
+    const { store } = await setup();
+    let timing: Readonly<ModuleSearchTiming> | undefined;
+    const results = await searchModules(store, { target, requirement: 'payment', topK: 1, repositoryIds: ['history'] },
+      undefined, { model: 'malformed', rank: async () => ordering }, undefined, (value) => { timing = value; });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.sourceModule?.moduleId).toBe('payments');
+    expect(timing).toMatchObject({ outcome: 'success', rerankFallback: true });
+    expect(timing!.rerankError).toContain('invalid candidate ordering');
+  });
+
   it('retains partial timings when model reranking fails', async () => {
     const { store } = await setup();
     let timing: Readonly<ModuleSearchTiming> | undefined;

@@ -89,7 +89,7 @@ export interface WorkspaceVerificationFeedback {
   reason?: string;
   issue?: { kind: "translation" | "test" | "environment" | "unknown"; description: string };
   functions?: Array<{
-    source: { path: string; name: string; signature?: string };
+    source?: { path: string; name: string; signature?: string };
     target: { path: string; name: string; signature?: string };
     status: "passed" | "unverified";
     executed: boolean;

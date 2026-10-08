@@ -34,20 +34,23 @@
  * build file. Behavioural verification is active only when
  * ADAPTATION_WORKSPACE_VERIFICATION is set, exactly as in production, where the host
  * declares criteria and the runtime may never supply its own; without it the module
- * is compilation-gated only and the report says so. The hidden acceptance suites are
- * deliberately *not* wired here: they run after translation, as the outer gate.
+ * is compilation-gated only and the report says so. Every real module run is
+ * snapshotted before rollback, so the target returns to its skeleton after the
+ * module-level verifier and its repair loop. The global hidden acceptance suite
+ * is therefore deliberately skipped for this mode; evaluate the immutable
+ * module snapshots instead of scoring an empty skeleton.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { chmod, cp, mkdir, readdir, rm, writeFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import mysql from 'mysql2/promise';
 import type { RowDataPacket } from 'mysql2';
 import { parse as parseEnvironmentFile } from 'dotenv';
-import type { Language, ModuleTarget, ProjectModule, ProjectModuleProposal, SearchCandidate, WorkspaceCompileCommand, WorkspaceTranslationRun } from '@forexplore/contracts';
+import type { Language, ModuleTarget, ProjectModule, ProjectModuleProposal, SearchCandidate, WorkspaceCompileCommand, WorkspaceTranslationPlan, WorkspaceTranslationRun } from '@forexplore/contracts';
 import {
   CodeIntelligenceHost,
   codeIntelligenceRuntimeOptionsFromEnvironment,
@@ -66,7 +69,7 @@ import { createTranslationVerifierModelClient } from '../services/translation-ve
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
 import type { SingleAgentFunctionGroupTerminalResult } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
 import type { FunctionGroupVerificationInput, FunctionGroupVerificationResult } from '../services/translation-verifier/src/types.js';
-import { buildModuleFunctionMapping, type ModuleFunctionMapping } from './module-function-mapping.js';
+import { buildModuleFunctionMapping, expandClassLevelFunctions, type ModuleFunctionMapping } from './module-function-mapping.js';
 
 const argument = (name: string, fallback?: string): string | undefined => {
   const index = process.argv.indexOf(`--${name}`);
@@ -95,6 +98,20 @@ const outputPath = resolve(argument('out', 'results/target-module-pipeline.json'
 const adaptationApiUrl = argument('adaptation', process.env.ADAPTATION_API_URL ?? 'http://127.0.0.1:8788')!;
 const semanticPort = Number(argument('semantic-port', process.env.FOREXPLORE_SEMANTIC_QUERY_PORT ?? '8790'));
 const assetRoot = resolve('experiments/enterprise-asset-upgrade/source-repositories');
+
+function classifyVerifierFailure(description: string): {
+  reason: 'agent-timeout' | 'model-failure' | 'test-environment-failure';
+  kind: 'environment' | 'unknown';
+} {
+  const text = description.toLowerCase();
+  if (text.includes('exhausted its') || text.includes('turn budget') || text.includes('tool-call budget') || text.includes('time budget')) {
+    return { reason: 'agent-timeout', kind: 'unknown' };
+  }
+  if (text.includes('model request') || text.includes('invalid completion') || text.includes('api key')) {
+    return { reason: 'model-failure', kind: 'unknown' };
+  }
+  return { reason: 'test-environment-failure', kind: 'environment' };
+}
 
 /** History views are intentionally read-only while an Agent can see them. */
 async function removeReadOnlyTree(root: string): Promise<void> {
@@ -287,7 +304,113 @@ interface ModuleReport {
   functionMapping?: Pick<ModuleFunctionMapping, 'functions' | 'unmatchedFunctions' | 'diagnostics'>;
   translationVerification?: FunctionGroupVerificationResult;
   translationVerificationAttempts?: FunctionGroupVerificationResult[];
+  verificationMode?: 'translation-fidelity' | 'requirement';
   agent?: WorkspaceTranslationRun['agent'];
+  /** Analyzer's structured plan, retained for completeness review. */
+  plan?: WorkspaceTranslationPlan;
+  /** Immutable translated result captured before the workspace is restored. */
+  snapshot?: {
+    directory: string;
+    manifest: string;
+    codeDirectory: string;
+    changedPaths: string[];
+  };
+  /** Host rollback state. A false value is a hard stop for the module loop. */
+  rollback?: {
+    requested: boolean;
+    status?: WorkspaceTranslationRun['status'];
+    restored: boolean;
+    baselineMatches?: boolean;
+    error?: string;
+  };
+  baselineHashes?: Record<string, string | null>;
+}
+
+function safeSnapshotSegment(value: string): string {
+  const normalized = value.trim().replaceAll(/[^a-zA-Z0-9._-]+/g, '-').replaceAll(/^-+|-+$/g, '');
+  return normalized || 'module';
+}
+
+function targetFilePath(root: string, relativePath: string): string {
+  const normalized = relativePath.replaceAll('\\', '/');
+  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:[\\/]/.test(normalized) || normalized.split('/').includes('..')) {
+    throw new Error(`不安全的目标文件路径：${relativePath}`);
+  }
+  const absolute = resolve(root, normalized);
+  const rootPrefix = root.endsWith(sep) ? root : `${root}${sep}`;
+  if (absolute !== root && !absolute.startsWith(rootPrefix)) throw new Error(`目标文件越界：${relativePath}`);
+  return absolute;
+}
+
+function fileHash(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+async function captureBaselineHashes(root: string, files: readonly string[]): Promise<Record<string, string | null>> {
+  const result: Record<string, string | null> = {};
+  for (const relativePath of files) {
+    const absolute = targetFilePath(root, relativePath);
+    result[relativePath] = existsSync(absolute) ? fileHash(absolute) : null;
+  }
+  return result;
+}
+
+async function compareBaselineHashes(root: string, baseline: Record<string, string | null>): Promise<string[]> {
+  const mismatches: string[] = [];
+  for (const [relativePath, expected] of Object.entries(baseline)) {
+    const absolute = targetFilePath(root, relativePath);
+    const actual = existsSync(absolute) ? fileHash(absolute) : null;
+    if (actual !== expected) mismatches.push(`${relativePath} expected=${expected ?? '<missing>'} actual=${actual ?? '<missing>'}`);
+  }
+  return mismatches;
+}
+
+async function captureModuleSnapshot(args: {
+  root: string;
+  snapshotRoot: string;
+  index: number;
+  module: ProjectModule;
+  entry: ModuleReport;
+  run: WorkspaceTranslationRun;
+  baselineHashes: Record<string, string | null>;
+}): Promise<NonNullable<ModuleReport['snapshot']>> {
+  const directory = join(args.snapshotRoot, `${String(args.index + 1).padStart(2, '0')}-${safeSnapshotSegment(args.module.name || args.module.id)}`);
+  const codeDirectory = join(directory, 'code');
+  await mkdir(codeDirectory, { recursive: true });
+  const copied: string[] = [];
+  for (const relativePath of args.entry.writeFiles ?? []) {
+    const source = targetFilePath(args.root, relativePath);
+    if (!existsSync(source)) continue;
+    const destination = join(codeDirectory, relativePath.replaceAll('\\', '/'));
+    await mkdir(dirname(destination), { recursive: true });
+    await cp(source, destination);
+    copied.push(relativePath);
+  }
+  const afterHashes = await captureBaselineHashes(args.root, Object.keys(args.baselineHashes));
+  const manifestPath = join(directory, 'manifest.json');
+  const manifest = {
+    schemaVersion: 1,
+    moduleId: args.entry.moduleId,
+    module: args.entry.module,
+    requirement: args.entry.requirement,
+    language: args.entry.language,
+    writeFiles: args.entry.writeFiles ?? [],
+    changedPaths: args.entry.changedPaths ?? [],
+    copiedPaths: copied,
+    runId: args.run.id,
+    createdAt: new Date().toISOString(),
+    status: args.entry.status,
+    error: args.entry.error,
+    baselineHashes: args.baselineHashes,
+    afterHashes,
+    compile: args.run.compilations,
+    plan: args.run.plan,
+    verifier: args.entry.translationVerification,
+    verifierAttempts: args.entry.translationVerificationAttempts,
+    agent: args.entry.agent,
+  };
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return { directory, manifest: manifestPath, codeDirectory, changedPaths: [...(args.entry.changedPaths ?? [])] };
 }
 
 const report = {
@@ -300,6 +423,9 @@ const report = {
   target: {} as { repositoryId?: string; analysisRevision?: string; projectId?: string; project?: string; modules?: number; hierarchy?: unknown },
   modules: [] as ModuleReport[],
 };
+const snapshotRoot = resolve(`${outputPath}.snapshots`);
+await rm(snapshotRoot, { recursive: true, force: true });
+await mkdir(snapshotRoot, { recursive: true });
 
 await waitForSeekDb(Number(argument('wait-db', '600')) * 1000);
 const pool = mysql.createPool({ host: '127.0.0.1', port: 2881, user: 'root', password: '', database, connectionLimit: 2 });
@@ -472,9 +598,9 @@ try {
   const verification = resolveVerification();
   report.gates = { compile: `${compileCommand.executable} ${compileCommand.args.join(' ')}`,
     verification: verification ? `${verification.command.executable} ${verification.command.args.join(' ')}` : undefined,
-    hiddenSuite: 'run after translation: experiments/enterprise-asset-upgrade/evaluation/run-hidden-evaluation.sh' };
+    hiddenSuite: 'skipped: each module is snapshotted and rolled back; evaluate module snapshots separately' };
   console.log(`\n  编译门槛: ${report.gates.compile}`);
-  console.log(`  行为验证: ${report.gates.verification ?? '未配置（本轮只做编译门槛；隐藏验收套件在翻译后单独跑）'}`);
+  console.log(`  行为验证: ${report.gates.verification ?? '未配置（使用模块级 verifier；每个模块结束后恢复骨架）'}`);
 
   // The translation side is built once and reused, exactly like the backend the
   // extension owns; it is only created for a real run.
@@ -499,6 +625,12 @@ try {
       codexHome: codexHome.path,
       maxModelTurns: Number(process.env.ADAPTATION_WORKSPACE_MAX_TURNS ?? 4),
       timeoutMs: Number(process.env.ADAPTATION_WORKSPACE_TIMEOUT_MS ?? 1_800_000),
+      // A verifier run consists of one test-generation attempt plus repair
+      // attempts. Keep the runtime repair budget aligned with the pipeline's
+      // five-round verifier cap.
+      maxVerificationRepairs: Number.isInteger(Number(process.env.TRANSLATION_VERIFIER_MAX_ATTEMPTS ?? 5))
+        ? Math.max(0, Math.min(4, Number(process.env.TRANSLATION_VERIFIER_MAX_ATTEMPTS ?? 5) - 1))
+        : 4,
     });
     cleanups.push(() => runtime.shutdown());
     const token = randomBytes(32).toString('hex');
@@ -510,6 +642,7 @@ try {
   }
 
   console.log(`\n=== module pipeline（${dryRun ? 'dry-run' : 'real'}，topK=${topK}，模块 ${selected.length}）===`);
+  let stopAfterRollbackFailure = false;
   for (const [index, module] of selected.entries()) {
     const started = Date.now();
     const language = targetLanguage(module.language, module.sourceFiles);
@@ -570,6 +703,7 @@ try {
 
       let verifierSourceRoot: string | undefined;
       let historyViewRoot: string | undefined;
+      let activeRun: WorkspaceTranslationRun | undefined;
       try {
         let scope: Awaited<ReturnType<typeof prepareModuleTranslationScope>>;
         if (top) {
@@ -640,6 +774,12 @@ try {
       entry.writeFiles = scope.profile.writeFiles;
       if (entry.writeFiles.length === 0) { entry.status = 'skipped'; entry.error = 'empty write scope'; console.log('  ✗ 写范围为空'); continue; }
 
+      // Capture the exact pre-translation state. The runtime journal is the
+      // authoritative rollback mechanism, while these hashes prove that the
+      // next module starts from the same skeleton.
+      const baselineHashes = await captureBaselineHashes(targetRoot, entry.writeFiles);
+      entry.baselineHashes = baselineHashes;
+
       if (dryRun) {
         entry.wallMs = Date.now() - started;
         console.log(`  ✓ 范围已准备：writeFiles=${entry.writeFiles.join(', ')}`);
@@ -655,6 +795,7 @@ try {
         moduleScopeId, profileId: described.profile.profileId });
       if (startedRun.type !== 'WORKSPACE_TRANSLATION_RESULT' || !startedRun.run) throw new Error(`start failed: ${JSON.stringify(startedRun)}`);
       let run = startedRun.run;
+      activeRun = run;
       const deadline = Date.now() + Number(process.env.ADAPTATION_WORKSPACE_TIMEOUT_MS ?? 1_800_000);
       // The runtime records every tool choice, tool failure and no-tool-call nudge in
       // run.events, but nothing surfaced them, so a zero-change run could only be read
@@ -667,6 +808,7 @@ try {
         const polled = await host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: `read-${index}`, action: 'read', runId: run.id });
         if (polled.type !== 'WORKSPACE_TRANSLATION_RESULT' || !polled.run) throw new Error(`read failed: ${JSON.stringify(polled)}`);
         run = polled.run;
+        activeRun = run;
         const progress = `${run.status} turns=${run.modelTurns} changes=${run.changes.length}${run.plan ? ` plan=${run.plan.steps.length}` : ''}`;
         if (progress !== lastProgress) { console.log(`    ${progress}`); lastProgress = progress; }
         if (noProgressTurns > 0 && run.modelTurns >= noProgressTurns && !run.plan && run.changes.length === 0) {
@@ -683,6 +825,7 @@ try {
       entry.acceptance = run.acceptance;
       entry.changedPaths = [...new Set(run.changes.map((change) => change.path))];
       entry.agent = run.agent;
+      entry.plan = run.plan;
       // The runtime marks a run completed only after its host compile gate, but
       // keep the explicit check here so a verifier can never run on a record
       // with a missing or failed compilation.
@@ -691,20 +834,41 @@ try {
         entry.error = '翻译运行状态已完成，但没有成功的宿主编译记录；跳过函数组验证。';
         console.log(`    ! ${entry.error}`);
       }
-      if (run.status === 'completed' && lastCompilation?.success && verifierSourceRoot && modelApiKey && top?.sourceModule) {
-        const mapping = buildModuleFunctionMapping(module, top.sourceModule);
+      if (run.status === 'completed' && lastCompilation?.success && modelApiKey) {
+        // Prefer source/target fidelity verification when at least one safe
+        // mapping exists. Otherwise verify the target directly against the
+        // requirement instead of disabling the verifier altogether.
+        const mapping = buildModuleFunctionMapping(module, top?.sourceModule);
+        // Indexers may expose an exported class as a core API. Coverage is
+        // method-based, so expand those target-only subjects before creating
+        // the requirement verifier input.
+        const expandedUnmatched = expandClassLevelFunctions(
+          mapping.unmatchedFunctions,
+          (path) => {
+            try { return readFileSync(join(targetRoot, path), 'utf8'); } catch { return undefined; }
+          },
+        );
+        // Assign even when only the signature changed (for example a
+        // qualified `Type.Method` name with no parameter list). Coverage
+        // matching depends on that normalization too.
+        mapping.unmatchedFunctions = expandedUnmatched;
         entry.functionMapping = mapping;
         console.log(`    函数映射：matched=${mapping.functions.length} unmatched=${mapping.unmatchedFunctions.length}`);
         for (const diagnostic of mapping.diagnostics.slice(0, 12)) {
           console.log(`      ! ${diagnostic.targetApi}: ${diagnostic.reason}`);
         }
-        if (mapping.functions.length === 0) {
+        const useTranslationVerification = mapping.functions.length > 0 && Boolean(verifierSourceRoot && top?.sourceModule);
+        entry.verificationMode = useTranslationVerification ? 'translation-fidelity' : 'requirement';
+        const requirementFunctions = mapping.unmatchedFunctions.length > 0
+          ? mapping.unmatchedFunctions
+          : mapping.functions.map(({ target }) => target);
+        if (!useTranslationVerification && requirementFunctions.length === 0) {
           entry.translationVerification = {
             status: 'failure', reason: 'mapping-invalid',
-            issue: { kind: 'translation', description: '没有能同时由 API 名称和文件归属可靠确认的 source/target 函数映射。' },
+            issue: { kind: 'translation', description: '目标模块没有可用于需求验证的函数清单。' },
             functions: [],
           };
-          console.log('    函数组验证：跳过（没有可靠的匹配函数）');
+          console.log('    函数组验证：跳过（目标模块没有可验证函数）');
         } else {
         const verificationHost = createAgentHost<SingleAgentFunctionGroupTerminalResult>({
           modelClient: createTranslationVerifierModelClient({
@@ -714,37 +878,60 @@ try {
           }),
           limits: {
             maxDurationMs: Number(process.env.TRANSLATION_VERIFIER_MAX_DURATION_MS ?? 300_000),
-            maxTurns: Number(process.env.TRANSLATION_VERIFIER_MAX_TURNS ?? 20),
-            maxToolCalls: Number(process.env.TRANSLATION_VERIFIER_MAX_TOOL_CALLS ?? 80),
+            maxTurns: Number(process.env.TRANSLATION_VERIFIER_MAX_TURNS ?? 32),
+            // A verifier may need a compile/fix/re-run cycle.  Keep this
+            // bounded, but leave enough room for one focused test file and
+            // its diagnostics instead of cutting the Agent off mid-repair.
+            maxToolCalls: Number(process.env.TRANSLATION_VERIFIER_MAX_TOOL_CALLS ?? 160),
             maxToolCallsPerTurn: 8,
           },
         });
         const verifyFunctionGroup = createFunctionGroupVerifier(verificationHost);
-        const verificationInput: FunctionGroupVerificationInput = {
-          schemaVersion: '3.1', sourceLanguage: top.language, targetLanguage: language,
-          sourceProjectPath: verifierSourceRoot, targetProjectPath: targetRoot, requirement,
-          functions: mapping.functions,
-          ...(mapping.unmatchedFunctions.length ? { unmatchedFunctions: mapping.unmatchedFunctions } : {}),
-        };
-        const configuredRepairs = Number(process.env.TRANSLATION_VERIFIER_MAX_REPAIRS ?? 2);
-        const maxRepairs = Number.isInteger(configuredRepairs) && configuredRepairs >= 0 ? Math.min(configuredRepairs, 5) : 2;
-        for (let verifierAttempt = 1; verifierAttempt <= maxRepairs + 1; verifierAttempt++) {
+        const verificationInput: FunctionGroupVerificationInput | import('../services/translation-verifier/src/types.js').RequirementFunctionGroupVerificationInput = useTranslationVerification
+          ? {
+            schemaVersion: '3.1', sourceLanguage: top!.language, targetLanguage: language,
+            sourceProjectPath: verifierSourceRoot!, targetProjectPath: targetRoot, requirement,
+            functions: mapping.functions,
+            ...(mapping.unmatchedFunctions.length ? { unmatchedFunctions: mapping.unmatchedFunctions } : {}),
+          }
+          : {
+            schemaVersion: '3.1', mode: 'requirement', sourceLanguage: language, targetLanguage: language,
+            targetProjectPath: targetRoot, requirement,
+            functions: requirementFunctions.map((target) => ({ target })),
+          };
+        const verificationStrategy = useTranslationVerification ? 'single-agent-function-group' as const : 'requirement-function-group' as const;
+        const configuredAttempts = Number(process.env.TRANSLATION_VERIFIER_MAX_ATTEMPTS ?? 5);
+        const maxAttempts = Number.isInteger(configuredAttempts) && configuredAttempts >= 1 ? Math.min(configuredAttempts, 5) : 5;
+        for (let verifierAttempt = 1; verifierAttempt <= maxAttempts; verifierAttempt++) {
           try {
-            entry.translationVerification = await verifyFunctionGroup(verificationInput, 'single-agent-function-group', 'verify');
+            entry.translationVerification = await verifyFunctionGroup(verificationInput, verificationStrategy, 'verify');
           } catch (error) {
             const description = error instanceof Error ? error.message : String(error);
+            const classification = classifyVerifierFailure(description);
             entry.translationVerification = {
-              status: 'failure', reason: 'test-environment-failure',
-              issue: { kind: 'environment', description: `函数组验证器未能完成：${description.slice(0, 600)}` },
-              functions: verificationInput.functions.map(({ source, target }) => ({ source, target, status: 'unverified', executed: false, lineCoverage: null, branchCoverage: null, reason: 'test-environment-failure' as const })),
-            };
+              status: 'failure', reason: classification.reason,
+              issue: { kind: classification.kind, description: `函数组验证器未能完成：${description.slice(0, 600)}` },
+              functions: verificationInput.functions.map((mapping) => ({
+                ...('source' in mapping ? { source: mapping.source } : {}),
+                target: mapping.target, status: 'unverified' as const, executed: false,
+                lineCoverage: null, branchCoverage: null, reason: classification.reason,
+              })),
+          };
           }
           (entry.translationVerificationAttempts ??= []).push(entry.translationVerification);
           console.log(`    #44 函数组验证第${verifierAttempt}轮：${entry.translationVerification.status}`);
-          if (entry.translationVerification.status === 'success' || verifierAttempt > maxRepairs) break;
+          if (entry.translationVerification.status === 'success' || verifierAttempt >= maxAttempts) break;
           if (entry.translationVerification.issue?.kind === 'environment' || entry.translationVerification.reason === 'test-environment-failure') {
             console.log('    ! verifier 环境不可用，不把环境故障误交给 Translator 修改');
             break;
+          }
+          // A verifier Agent budget/model failure has no test evidence and
+          // must not be sent to the Translator as a code defect. Retry the
+          // verifier with a fresh test harness; only Host-observed test
+          // failures are valid Translator feedback.
+          if (entry.translationVerification.reason === 'agent-timeout' || entry.translationVerification.reason === 'model-failure') {
+            console.log('    ↻ verifier Agent 未产出可用测试证据，重新启动 verifier');
+            continue;
           }
           const feedback = {
             attempt: verifierAttempt,
@@ -762,6 +949,7 @@ try {
             const polled = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: `repair-read-${index}-${verifierAttempt}`, action: 'read', runId: run.id });
             if (polled.type !== 'WORKSPACE_TRANSLATION_RESULT' || !polled.run) throw new Error(`repair read failed: ${JSON.stringify(polled)}`);
             run = polled.run;
+            activeRun = run;
             if (['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) break;
           }
           if (run.status !== 'completed') {
@@ -779,21 +967,13 @@ try {
         entry.acceptance = run.acceptance;
         entry.changedPaths = [...new Set(run.changes.map((change) => change.path))];
         entry.agent = run.agent;
+        entry.plan = run.plan;
         if (entry.translationVerification?.status === 'failure' && !entry.error) {
           entry.status = 'failed';
           entry.error = `verifier remained failed after ${entry.translationVerificationAttempts?.length ?? 1} attempt(s)`;
         }
         console.log(`    #44 函数组验证：${entry.translationVerification.status}（${entry.translationVerification.functions.map((item) => `${item.target.name}:${item.executed ? 'executed' : 'unverified'}`).join(', ')}）`);
         }
-      } else if (run.status === 'completed' && lastCompilation?.success && !top?.sourceModule) {
-        const mapping = buildModuleFunctionMapping(module, undefined);
-        entry.functionMapping = mapping;
-        entry.translationVerification = {
-          status: 'failure', reason: 'mapping-invalid',
-          issue: { kind: 'translation', description: '没有历史候选可用于建立 source/target 函数映射，无法进行行为验证。' },
-          functions: [],
-        };
-        console.log('    函数组验证：跳过（直实现兜底没有 source 函数）');
       }
       if (run.error) entry.error = run.error;
       if (run.status !== 'completed' && run.events?.length) {
@@ -805,6 +985,82 @@ try {
       console.log(`  ${entry.status === 'completed' ? '✓' : '✗'} ${entry.status} turns=${run.modelTurns} acceptance=${run.acceptance ?? '-'} ` +
         `files=${entry.changedPaths.join(',')} ${(entry.wallMs / 1000).toFixed(0)}s`);
       } finally {
+        // Preserve the translated implementation before restoring the shared
+        // target skeleton. Always attempt rollback even when snapshotting
+        // fails, because a dirty workspace must never reach the next module.
+        if (activeRun && translation) {
+          let snapshotFailure: string | undefined;
+          if (!['completed', 'failed', 'cancelled', 'interrupted', 'rolled-back'].includes(activeRun.status)) {
+            try {
+              const cancelled = await translation.host.handle({
+                type: 'WORKSPACE_TRANSLATION', requestId: `cancel-before-rollback-${index}`, action: 'cancel', runId: activeRun.id,
+              });
+              if (cancelled.type === 'WORKSPACE_TRANSLATION_RESULT' && cancelled.run) activeRun = cancelled.run;
+              else snapshotFailure = `无法停止仍在运行的翻译：${cancelled.type === 'WORKSPACE_TRANSLATION_ERROR' ? cancelled.message : JSON.stringify(cancelled)}`;
+            } catch (error) {
+              snapshotFailure = `无法先停止仍在运行的翻译：${error instanceof Error ? error.message : String(error)}`;
+            }
+          }
+          try {
+            if (!snapshotFailure) {
+              entry.snapshot = await captureModuleSnapshot({
+                root: targetRoot, snapshotRoot, index, module, entry, run: activeRun,
+                baselineHashes: entry.baselineHashes ?? {},
+              });
+            }
+          } catch (error) {
+            snapshotFailure = error instanceof Error ? error.message : String(error);
+            stopAfterRollbackFailure = true;
+            entry.status = 'failed';
+            entry.error = `模块 snapshot 失败：${snapshotFailure}`;
+            console.log(`    ✗ ${entry.error}`);
+          }
+          if (snapshotFailure && !entry.error) {
+            stopAfterRollbackFailure = true;
+            entry.status = 'failed';
+            entry.error = `模块 snapshot 失败：${snapshotFailure}`;
+            console.log(`    ✗ ${entry.error}`);
+          }
+          try {
+            const rolledBack = await translation.host.handle({
+              type: 'WORKSPACE_TRANSLATION', requestId: `rollback-${index}`, action: 'rollback', runId: activeRun.id,
+            });
+            if (rolledBack.type !== 'WORKSPACE_TRANSLATION_RESULT' || !rolledBack.run) {
+              throw new Error(`rollback failed: ${JSON.stringify(rolledBack)}`);
+            }
+            activeRun = rolledBack.run;
+            const mismatches = await compareBaselineHashes(targetRoot, entry.baselineHashes ?? {});
+            entry.rollback = {
+              requested: true,
+              status: rolledBack.run.status,
+              restored: rolledBack.run.status === 'rolled-back' && mismatches.length === 0,
+              baselineMatches: mismatches.length === 0,
+              ...(mismatches.length ? { error: `rollback baseline mismatch: ${mismatches.join('; ')}` } : {}),
+            };
+            if (!entry.rollback.restored) throw new Error(entry.rollback.error ?? `rollback returned ${rolledBack.run.status}`);
+            if (!snapshotFailure) console.log(`    ↩ 已保存 snapshot，模块已恢复骨架（${entry.snapshot?.directory}）`);
+          } catch (error) {
+            const description = error instanceof Error ? error.message : String(error);
+            entry.rollback = { requested: true, restored: false, error: description };
+            stopAfterRollbackFailure = true;
+            entry.status = 'failed';
+            entry.error = `模块回滚失败，已停止后续模块：${description}`;
+            console.log(`    ✗ ${entry.error}`);
+          }
+          if (entry.snapshot) {
+            try {
+              const snapshotManifest = JSON.parse(readFileSync(entry.snapshot.manifest, 'utf8')) as Record<string, unknown>;
+              snapshotManifest.rollback = entry.rollback;
+              snapshotManifest.rollbackRecordedAt = new Date().toISOString();
+              await writeFile(entry.snapshot.manifest, `${JSON.stringify(snapshotManifest, null, 2)}\n`);
+            } catch (error) {
+              stopAfterRollbackFailure = true;
+              entry.status = 'failed';
+              entry.error = `模块 snapshot manifest 更新失败：${error instanceof Error ? error.message : String(error)}`;
+              console.log(`    ✗ ${entry.error}`);
+            }
+          }
+        }
         if (verifierSourceRoot) await removeReadOnlyTree(verifierSourceRoot);
         if (historyViewRoot) await removeReadOnlyTree(historyViewRoot);
       }
@@ -813,6 +1069,10 @@ try {
       entry.error = error instanceof Error ? error.message : String(error);
       entry.wallMs = Date.now() - started;
       console.log(`  ✗ ${entry.error.slice(0, 240)}`);
+    }
+    if (stopAfterRollbackFailure) {
+      console.log('  ⏹ 模块 snapshot/回滚未能确认，停止后续模块以避免污染。');
+      break;
     }
   }
 } finally {

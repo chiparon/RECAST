@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createFunctionGroupVerifier } from "./function-group-verify.js";
-import type { FunctionGroupVerificationInput } from "./types.js";
-import { createSingleAgentFunctionGroupTask } from "./strategies/single-agent-function-group/strategy.js";
+import type { AgentTask } from "./host/agent.js";
+import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput } from "./types.js";
+import { createRequirementFunctionGroupTask, createSingleAgentFunctionGroupTask } from "./strategies/single-agent-function-group/strategy.js";
 
 const input: FunctionGroupVerificationInput = {
   schemaVersion: "3.1",
@@ -122,6 +123,56 @@ describe("createFunctionGroupVerifier", () => {
       "run_function_group_tests",
       "finish_function_group",
       "report_uncertain",
+    ]);
+  });
+
+  it("runs requirement-only verification without source tools", async () => {
+    const requirementInput: RequirementFunctionGroupVerificationInput = {
+      schemaVersion: "3.1",
+      mode: "requirement",
+      sourceLanguage: "C#",
+      targetLanguage: "C#",
+      targetProjectPath: "/tmp/target",
+      requirement: "Reject expired tenant scopes.",
+      functions: [{ target: { path: "src/TenantScope.cs", name: "IsExpired" } }],
+    };
+    let task: AgentTask | undefined;
+    const verify = createFunctionGroupVerifier({
+      run: (value) => {
+        task = value;
+        return {
+          testExecutionStatus: "success" as const,
+          translationStatus: "success" as const,
+          functionGroupTest: {
+            status: "success" as const,
+            testPaths: ["tests/TenantScope.test.cs"],
+            tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
+            functions: [{ target: requirementInput.functions[0]!.target, status: "passed" as const, executed: true, lineCoverage: 100, branchCoverage: null }],
+            failures: [],
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+          },
+        };
+      },
+    });
+    await expect(verify(requirementInput, "requirement-function-group", "verify"))
+      .resolves.toMatchObject({ status: "success" });
+    expect(task?.userPrompt).toContain("Reject expired tenant scopes.");
+    expect(task?.tools.map((factory) => factory({
+      state: {},
+      runtime: {
+        sourceLanguage: "C#", targetLanguage: "C#", sourceProjectPath: "/tmp/target", targetProjectPath: "/tmp/target",
+        sourcePath: "src/TenantScope.cs", targetPath: "src/TenantScope.cs",
+        targetFunction: requirementInput.functions[0]!.target, functionGroup: requirementInput,
+        sourceDirectory: "src", targetDirectory: "src", testRoots: ["tests"], testRunner: "dotnet" as const,
+        targetTest: { executable: "dotnet", args: ["test"] },
+      },
+      runner: { run: async () => { throw new Error("unused"); } },
+      functionGroupRunner: { run: async () => { throw new Error("unused"); } },
+    })).map((tool) => tool.name)).toEqual([
+      "list_target_files", "read_target_file", "write_target_test",
+      "run_function_group_tests", "finish_function_group", "report_uncertain",
     ]);
   });
 });

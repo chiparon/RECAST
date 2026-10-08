@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectModule } from "@forexplore/contracts";
-import { buildModuleFunctionMapping, callableApiName } from "./module-function-mapping.js";
+import { buildModuleFunctionMapping, callableApiName, expandClassLevelFunctions } from "./module-function-mapping.js";
 
 const target = (coreApis: string[], sourceFiles = ["src/OrderService.cs", "src/PriceRule.cs"]): ProjectModule => ({
   id: "target", name: "Orders", kind: "feature", description: "orders", sourceFiles, coreApis,
@@ -8,6 +8,25 @@ const target = (coreApis: string[], sourceFiles = ["src/OrderService.cs", "src/P
 });
 
 describe("module function mapping", () => {
+  it("expands class-level C# APIs to coverage-addressable methods", () => {
+    const result = expandClassLevelFunctions(
+      [{ path: "src/Telemetry.cs", name: "TraceFactory" }],
+      () => `public sealed class TraceFactory { public TraceScope Start(string traceId, string operation) { return null; } }`,
+    );
+    expect(result).toEqual([{
+      path: "src/Telemetry.cs",
+      name: "Start",
+      signature: "TraceFactory.Start(string traceId, string operation)",
+    }]);
+  });
+
+  it("drops an incomplete qualified signature so coverage can match the method", () => {
+    expect(expandClassLevelFunctions(
+      [{ path: "src/Telemetry.cs", name: "CheckAsync", signature: "AssetUpgradeGateway.Telemetry.MetricsHealthProbe.CheckAsync" }],
+      () => undefined,
+    )).toEqual([{ path: "src/Telemetry.cs", name: "CheckAsync" }]);
+  });
+
   it("normalizes signatures and maps every unique API", () => {
     expect(callableApiName("public decimal OrderService::CalculatePrice(decimal amount)")).toBe("CalculatePrice");
     const result = buildModuleFunctionMapping(

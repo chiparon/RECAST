@@ -34,7 +34,7 @@ type ModuleSearchStage = 'queueMs' | 'recallAndAggregateMs' | 'candidatePrepareM
 /** The retrieval signals the shared kernel preserves for a recalled document. */
 interface ScoredDocument {
   searchDocumentId: string;
-  retrievalScore?: { semantic?: number; lexical?: number };
+  retrievalScore?: { semantic?: number; lexical?: number; fusion?: number };
 }
 
 interface ModuleHit extends RepositoryRevisionScope {
@@ -44,6 +44,39 @@ interface ModuleHit extends RepositoryRevisionScope {
   module: ProjectModule;
   score: number;
   semanticScore: number;
+  semanticOrderScore: number;
+}
+
+function compareHits(a: ModuleHit, b: ModuleHit): number {
+  return b.score - a.score || JSON.stringify([a.repositoryId, a.projectId, a.module.id])
+    .localeCompare(JSON.stringify([b.repositoryId, b.projectId, b.module.id]));
+}
+
+/** Give the model both hybrid and semantic candidates, without duplicate manifests. */
+function shortlistHits(hits: ModuleHit[], budget: number): ModuleHit[] {
+  const hybrid = [...hits].sort(compareHits);
+  const semantic = [...hits].sort((a, b) => b.semanticOrderScore - a.semanticOrderScore || compareHits(a, b));
+  const selected: ModuleHit[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < hits.length && selected.length < budget; index++) {
+    for (const hit of [hybrid[index], semantic[index]]) {
+      if (!hit || selected.length >= budget) continue;
+      const manifest = JSON.stringify([hit.repositoryId, hit.analysisRevision, hit.projectId, [...hit.module.sourceFiles].sort()]);
+      if (seen.has(manifest)) continue;
+      seen.add(manifest);
+      selected.push(hit);
+    }
+  }
+  return selected.sort(compareHits);
+}
+
+function hybridRelevance(document: ScoredDocument, fallback: number): number {
+  const fusion = document.retrievalScore?.fusion;
+  // SeekDB uses two-channel RRF with offset 61; its theoretical maximum is 2/61.
+  // Other stores may expose raw lexical counts as fusion, so retain the kernel's
+  // normalised ranking when the value is outside that RRF range.
+  return fusion !== undefined && Number.isFinite(fusion) && fusion >= 0 && fusion <= 2 / 61
+    ? fusion * 61 / 2 : fallback;
 }
 
 function normalizedApi(api: string): string {
@@ -191,7 +224,7 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
   const requiredApis = [...new Set(request.target.module?.coreApis ?? [])];
   const profile = process.env.RECAST_SEARCH_PROFILE === '1';
   const profileStart = profile ? Date.now() : 0;
-  const hits = (await mapBounded(repositoryIds, 4, async (repositoryId) => {
+  const allHits = (await mapBounded(repositoryIds, 4, async (repositoryId) => {
     signal.throwIfAborted();
     const repository = await store.getRepository(repositoryId, signal);
     if (!repository?.activeRevision || repository.role !== 'history') return [];
@@ -208,7 +241,9 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       limitPerView: Math.min(120, Math.max(24, request.topK * 12)),
       signal,
     });
-    const documents = outcome.documents;
+    // Older projections indexed whitespace gaps between declarations. They
+    // contain no implementation evidence, even when their paths match the query.
+    const documents = outcome.documents.filter((document) => document.kind !== 'source-fragment' || document.text.trim());
     const recallMs = profile ? Date.now() - recallStart : 0;
     if (profile) console.log(`      [profile]   ${repository.displayName}: recall=${recallMs}ms docs=${documents.length} 视图=${[...new Set(documents.map((d) => d.kind))].join('|') || '无'}`);
     // Summary documents carry their own module artifact. Implementation and
@@ -256,16 +291,19 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       const apiScore = requiredApis.length ? requiredApis.filter((api) => available.has(normalizedApi(api))).length / requiredApis.length : 0;
       const semantic = document.retrievalScore?.semantic;
       const lexical = document.retrievalScore?.lexical ?? 0;
-      // The rank fallback now uses the shared fusion instead of a raw channel rank.
       const fused = RecallKernel.normalise(outcome, document.searchDocumentId);
       const relevance = semantic !== undefined && Number.isFinite(semantic) ? Math.max(0, Math.min(1, semantic))
         : lexical > 0 ? lexical / (lexical + 10) : fused;
-      const score = 0.8 * relevance + 0.2 * apiScore;
+      const semanticOrderScore = 0.8 * relevance + 0.2 * apiScore;
+      const score = 0.8 * hybridRelevance(document, fused) + 0.2 * apiScore;
       const key = JSON.stringify([record.projectId, module.id]);
-      if ((byModule.get(key)?.score ?? -1) < score) byModule.set(key, {
+      const previous = byModule.get(key);
+      if ((previous?.score ?? -1) < score) byModule.set(key, {
         ...scope, repositoryName: repository.displayName, projectId: project.projectId,
         projectPath: project.relativePath, module, score, semanticScore: relevance,
+        semanticOrderScore: Math.max(previous?.semanticOrderScore ?? 0, semanticOrderScore),
       });
+      else if (previous) previous.semanticOrderScore = Math.max(previous.semanticOrderScore, semanticOrderScore);
     };
     const seenDeclarations = new Set<string>();
     documents.forEach((document) => {
@@ -295,14 +333,14 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       }
     });
     return [...byModule.values()];
-  })).flat().sort((a, b) => b.score - a.score || JSON.stringify([a.repositoryId, a.projectId, a.module.id]).localeCompare(JSON.stringify([b.repositoryId, b.projectId, b.module.id]))).slice(0, reranker ? Math.min(20, Math.max(8, request.topK * 2)) : request.topK);
+  })).flat();
   if (profile) console.log(`      [profile] 召回+聚合(含4并发/仓库)=${Date.now() - profileStart}ms 仓库数=${repositoryIds.length}`);
 
   beginStage('candidatePrepareMs');
   // Older module projections can contain a documentation-only or otherwise
   // language-less node with a non-empty file list. Such a hit is not a usable
   // implementation candidate; skip it instead of aborting the whole search.
-  const usableHits = hits.filter((hit) => {
+  const usableHits = allHits.filter((hit) => {
     try {
       moduleLanguage(hit.module.language, hit.module.sourceFiles);
       return true;
@@ -310,7 +348,12 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       return false;
     }
   });
-  const result = await mapBounded(usableHits, 4, async (hit): Promise<SearchCandidate> => {
+  // Top4 receives up to 16 distinct candidates (bounded by the model's 20-item
+  // contract). Keeping both orders protects useful semantic matches while
+  // allowing lexical/vector agreement to bring missed implementations back.
+  const hits = reranker ? shortlistHits(usableHits, Math.min(20, Math.max(12, request.topK * 4)))
+    : usableHits.sort(compareHits).slice(0, request.topK);
+  const result = await mapBounded(hits, 4, async (hit): Promise<SearchCandidate> => {
     signal.throwIfAborted();
     const files = [...new Set(hit.module.sourceFiles)];
     const previewFiles = files.slice(0, 3);
@@ -350,6 +393,10 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
     try {
       const ordering = await reranker.rank(query, result.map((candidate) => [candidate.title, candidate.summary,
         candidate.signature, candidate.dependencies.join('\n'), candidate.preview].join('\n')), signal);
+      if (!Array.isArray(ordering) || ordering.length !== result.length ||
+          ordering.some((item) => !item || !Number.isInteger(item.index) || item.index < 0 || item.index >= result.length ||
+            !Number.isFinite(item.score) || item.score < 0 || item.score > 1) ||
+          new Set(ordering.map((item) => item.index)).size !== result.length) throw new Error('Reranker returned an invalid candidate ordering.');
       ranked = ordering.map(({ index, score }) => ({ ...result[index]!, score: { ...result[index]!.score, overall: score },
         moduleMatch: { ...result[index]!.moduleMatch!, reranker: { model: reranker.model, score } } }));
     } catch (error) {

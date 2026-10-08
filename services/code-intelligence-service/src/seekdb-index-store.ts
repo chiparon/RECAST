@@ -1593,24 +1593,15 @@ export class SeekDbIndexStore implements IndexStore {
     if (!embedding) throw new Error('Search embedding provider omitted a query vector.');
     assertEmbedding(embedding, this.#vectorDimension);
 
-    const batched = planned.length > 1;
     const selected = new Map<SearchDocumentRecord['kind'], Array<[string, RankedScores]>>();
-    if (batched) {
-      // The union limit keeps the same head-room per view; kinds that produce no
-      // hit above the union cut simply return fewer rows, exactly as a per-view
-      // query with too small a limit would.
-      const candidateLimit = Math.min(2_400, planned.reduce((sum, item) => sum + item.candidateLimit, 0) * 2);
+    // Each view needs its own top-N: a global cut can let fragments/summaries
+    // consume every slot before symbol hits are selected. Share the embedding
+    // and hydration, but run views sequentially so each repository still uses
+    // at most two concurrent SQL queries in the shared connection pool.
+    for (const item of planned) {
       const candidates = await this.#recallCandidates({ scope, text: lexicalText, embedding,
-        kinds: planned.map((item) => item.view), candidateLimit, signal });
-      for (const item of planned) {
-        selected.set(item.view, this.#fuseCandidates(candidates.textRows, candidates.vectorRows, item.view, item.boundedLimit));
-      }
-    } else {
-      for (const item of planned) {
-        const candidates = await this.#recallCandidates({ scope, text: lexicalText, embedding,
-          kinds: [item.view], candidateLimit: item.candidateLimit, signal });
-        selected.set(item.view, this.#fuseCandidates(candidates.textRows, candidates.vectorRows, item.view, item.boundedLimit));
-      }
+        kinds: [item.view], candidateLimit: item.candidateLimit, signal });
+      selected.set(item.view, this.#fuseCandidates(candidates.textRows, candidates.vectorRows, item.view, item.boundedLimit));
     }
 
     const wanted = [...new Set([...selected.values()].flatMap((entries) => entries.map(([id]) => id)))];
@@ -1639,19 +1630,23 @@ export class SeekDbIndexStore implements IndexStore {
     const textMatch = 'MATCH(search_text) AGAINST (? IN NATURAL LANGUAGE MODE)';
     // project_id sits in idx_search_documents_scope, so the vector pre-filter applies it before the top-N cut.
     const projectFilter = scope.projectId ? ' AND project_id = ?' : '';
+    // Filter old whitespace-only fragments before top-N, rather than letting
+    // their matching file paths occupy the implementation view's budget.
+    const implementationFilter = kinds.includes('source-fragment')
+      ? " AND (kind <> 'source-fragment' OR document_text REGEXP '[^[:space:]]')" : '';
     const filterValues = [...scopeParams(scope), ...kinds, ...(scope.projectId ? [scope.projectId] : [])];
     const [textRows, vectorRows] = await Promise.all([
       queryRows<RowDataPacket[]>(this.pool, `
         SELECT search_document_id, kind, ${textMatch} AS text_score
         FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter} AND ${textMatch}
+        WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter}${implementationFilter} AND ${textMatch}
         ORDER BY text_score DESC
         LIMIT ?
       `, [text, ...filterValues, text, candidateLimit], signal),
       queryRows<RowDataPacket[]>(this.pool, `
         SELECT search_document_id, kind, GREATEST(0, 1 - cosine_distance(embedding, ${vectorHex(embedding)})) AS semantic_score
         FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter}
+        WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter}${implementationFilter}
         ORDER BY cosine_distance(embedding, ${vectorHex(embedding)})
         APPROXIMATE
         LIMIT ?

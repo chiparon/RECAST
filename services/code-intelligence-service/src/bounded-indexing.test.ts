@@ -137,9 +137,38 @@ describe('bounded indexing and local reads', () => {
     const results = await store.searchSearchDocuments({ repositoryId: 'repository', analysisRevision: 'revision', projectId: 'project' }, 'matching implementation', 1, 'source-fragment');
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({ searchDocumentId: 'shared', text: 'actual code', retrievalScore: { lexical: 4, semantic: 0.8 } });
-    expect(query.mock.calls[0]![0]).not.toContain('document_text');
+    expect(query.mock.calls[0]![0].split('FROM')[0]).not.toContain('document_text');
+    expect(query.mock.calls[0]![0]).toContain("document_text REGEXP '[^[:space:]]'");
     expect(query.mock.calls[0]![1]).toEqual(['matching implementation', 'repository', 'revision', 'source-fragment', 'project', 'matching implementation', 24]);
-    expect(query.mock.calls[1]![0]).not.toContain('document_text');
+    expect(query.mock.calls[1]![0].split('FROM')[0]).not.toContain('document_text');
+    expect(query.mock.calls[1]![0]).toContain("document_text REGEXP '[^[:space:]]'");
     expect(query.mock.calls[2]![1]).toEqual(['repository', 'revision', 'shared', 1]);
+  });
+
+  it('preserves each view under a saturated fragment corpus while sharing embedding and hydration', async () => {
+    const kinds = ['symbol', 'source-fragment', 'summary'] as const;
+    const embedding = { dimension: 384, identity: 'test', embed: vi.fn(),
+      embedQuery: vi.fn(async () => [1, ...Array<number>(383).fill(0)]) };
+    const query = vi.fn(async (sql: string, values: unknown[]) => {
+      if (sql.includes('document_text\n') && sql.includes('search_document_id IN')) {
+        return [kinds.flatMap((kind) => [0, 1].map((i) => ({ search_document_id: `${kind}-${i}`, kind,
+          relative_path: kind === 'summary' ? null : `${kind}.ts`, content_hash: 'hash', title: kind,
+          document_text: kind === 'summary' ? '{}' : 'actual code' })))];
+      }
+      const requested = kinds.filter((kind) => values.includes(kind));
+      // Reproduce the failure: a union cut contains only fragments, despite
+      // there being usable symbol and summary results in their own channels.
+      const selected = requested.length === 1 ? requested[0]! : 'source-fragment';
+      return [[0, 1].map((i) => ({ search_document_id: `${selected}-${i}`, kind: selected,
+        ...(sql.includes('text_score') ? { text_score: 4 - i } : { semantic_score: 0.9 - i / 10 }) }))];
+    });
+    const store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'bounded_test',
+      embeddingProvider: embedding }, { query } as unknown as Pool);
+    const results = await store.searchSearchDocumentsByViews({ repositoryId: 'repository', analysisRevision: 'revision' },
+      'implementation', { symbol: 2, 'source-fragment': 2, summary: 2 }, kinds);
+    for (const kind of kinds) expect(results[kind]?.map((doc) => doc.searchDocumentId)).toEqual([`${kind}-0`, `${kind}-1`]);
+    expect(embedding.embedQuery).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(7); // two queries per view, then one bounded hydration
+    expect(query.mock.calls.filter(([sql]) => sql.includes('search_document_id IN'))).toHaveLength(1);
   });
 });
