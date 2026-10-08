@@ -162,4 +162,34 @@ describe('CandidatesStage', () => {
     expect(markup).not.toContain('disabled=""');
     expect(markup).toContain('准备模块翻译与回填');
   });
+
+  it('keeps three selected modules removable and disables the remaining Top4 candidate', () => {
+    reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+    const moduleCandidates = [1, 2, 3, 4, 5].map(index => ({
+      ...moduleCandidate(`candidate-${index}`, `Module${index}`, `module-${index}`, `Module ${index}`),
+      kind: 'module' as const,
+    }));
+    const onSelectCandidate = vi.fn();
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      act(() => root.render(<CandidatesStage
+        state={{ ...state, target: { ...target, kind: 'module' }, candidates: moduleCandidates,
+          selectedCandidateId: 'candidate-1', selectedCandidateIds: ['candidate-1', 'candidate-2', 'candidate-3'] }}
+        dispatch={vi.fn()} adaptationProvider="DeepSeek" onSelectCandidate={onSelectCandidate} onAdapt={vi.fn()}
+      />));
+      const buttons = [...container.querySelectorAll<HTMLButtonElement>('.candidate-item')];
+      expect(buttons).toHaveLength(4);
+      expect(buttons.map(button => button.getAttribute('aria-pressed'))).toEqual(['true', 'true', 'true', 'false']);
+      expect(buttons[3]!.disabled).toBe(true);
+      act(() => buttons[3]!.click());
+      expect(onSelectCandidate).not.toHaveBeenCalled();
+      act(() => buttons[1]!.click());
+      expect(onSelectCandidate).toHaveBeenCalledWith('candidate-2');
+      expect(container.textContent).toContain('已选择 3/3 个参考模块');
+    } finally {
+      act(() => root.unmount());
+      reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+    }
+  });
 });

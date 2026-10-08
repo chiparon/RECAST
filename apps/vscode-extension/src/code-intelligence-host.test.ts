@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -225,6 +225,34 @@ it('prioritizes target-related history files before applying the byte budget', (
   ]);
   const selected = boundHistoryViewFiles(files, sizes, 3, 50, ['WorkflowDispatcher', 'RetryPolicy']);
   expect(selected).toEqual(['Entry.cs', 'WorkflowDispatcher.cs', 'RetryPolicy.cs']);
+});
+
+it('merges selected modules with colliding file names and skips an unreadable candidate', async () => {
+  const target = await temporaryRepository('view-target');
+  const histories = await Promise.all(['a', 'b', 'c'].map(name => temporaryRepository(`view-${name}`)));
+  const runtime = createRuntime();
+  const instance = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const state = await instance.synchronize({ repositories: histories.map(localPath => ({ localPath, role: 'history' as const })) });
+  const selections = state.presentation.repositories.map((repository, index) => ({
+    repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision!, moduleId: `module-${index}`,
+    name: `History ${index}`, sourceFiles: index === 1 ? ['missing.ts'] : ['src/example.ts'],
+  }));
+  for (const [index, history] of histories.entries()) await writeFile(path.join(history, 'src/example.ts'), `export const value = ${index};`);
+  const view = await instance.createHistoryModulesView({ workspaceRoot: target, candidates: selections });
+  expect(view.candidates?.map(candidate => candidate.prefix)).toEqual(['candidate-1', 'candidate-3']);
+  expect(view.files).toEqual(['candidate-1/src/example.ts', 'candidate-3/src/example.ts']);
+  expect(await readFile(path.join(view.root, 'source/candidate-1/src/example.ts'), 'utf8')).not.toEqual(await readFile(path.join(view.root, 'source/candidate-3/src/example.ts'), 'utf8'));
+  expect(JSON.parse(await readFile(path.join(view.root, 'manifest.json'), 'utf8')).skippedCandidates).toHaveLength(1);
+  expect(await readdir(path.dirname(view.root))).toEqual([view.runId]);
+  await expect(instance.createHistoryModulesView({ candidates: [selections[0]!, selections[0]!] })).rejects.toThrow('不同的历史模块');
+  await expect(instance.createHistoryModulesView({ candidates: [...selections, { ...selections[0]!, moduleId: 'fourth' }] })).rejects.toThrow('1～3');
+  // Restore directory permissions so the fixture can remove its read-only view.
+  const makeWritable = async (root: string): Promise<void> => {
+    await chmod(root, 0o700);
+    for (const entry of await readdir(root, { withFileTypes: true })) if (entry.isDirectory()) await makeWritable(path.join(root, entry.name));
+  };
+  await makeWritable(view.root);
+  await instance.dispose();
 });
 
 async function temporaryRepository(name: string): Promise<string> {

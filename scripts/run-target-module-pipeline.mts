@@ -18,7 +18,10 @@
  * Options
  *   --target <path>      target project root (required)
  *   --database <name>    SeekDB database (default forexplore_asset_upgrade_20261004)
- *   --top-k <n>          retrieval width; Top-1 means 1 (default 1)
+ *   --top-k <n>          retrieval width (default 4)
+ *   --candidate-ranks <1,2,3>  select 1–3 ranks from Top4 (default 1)
+ *   --reuse-plan         reuse the current module plan for repeatable comparisons
+ *   --retrieval-from <report> reuse reviewed Top4 so ranking changes cannot change the selection
  *   --max-modules <n>    stop after n modules (default 0 = every module)
  *   --module <text>      translate only modules whose name or id contains text
  *   --repos <a,b,c>      retrieval scope; default every indexed asset repository.
@@ -61,6 +64,7 @@ import { requestSemanticModuleMigrationProposal } from '../apps/vscode-extension
 import { HttpModuleHierarchyPlanner } from '../apps/vscode-extension/src/module-hierarchy-client.js';
 import { prepareDirectModuleTranslationScope, prepareModuleTranslationScope } from '../apps/vscode-extension/src/module-translation-handoff.js';
 import { WorkspaceTranslationHost } from '../apps/vscode-extension/src/workspace-translation-host.js';
+import { ConfiguredModelReranker } from '../apps/vscode-extension/src/model-reranker.js';
 import { CodexWorkspaceTranslationRuntime } from '../services/adaptation-service/src/codex-workspace-translation-runtime.js';
 import { prepareDeepSeekCodexHome } from '../services/adaptation-service/src/codex-experiment-home.js';
 import { createHttpServer } from '../services/adaptation-service/src/http-server.js';
@@ -88,7 +92,10 @@ if (!targetArgument) throw new Error('--target <path> is required.');
 const targetRoot = resolve(targetArgument);
 if (!existsSync(targetRoot) || !statSync(targetRoot).isDirectory()) throw new Error(`Target project root is not a directory: ${targetRoot}`);
 const database = argument('database', process.env.CODE_INTELLIGENCE_SEEKDB_DATABASE ?? 'forexplore_asset_upgrade_20261004')!;
-const topK = Number(argument('top-k', '1'));
+const topK = Number(argument('top-k', '4'));
+const candidateRanks = (argument('candidate-ranks', '1') ?? '1').split(',').map(Number);
+if (candidateRanks.length < 1 || candidateRanks.length > 3 || new Set(candidateRanks).size !== candidateRanks.length ||
+    candidateRanks.some(rank => !Number.isInteger(rank) || rank < 1 || rank > 4 || rank > topK)) throw new Error('--candidate-ranks must select 1–3 distinct ranks from the retrieved Top4.');
 if (!Number.isInteger(topK) || topK < 1 || topK > 10) throw new Error('--top-k must be between 1 and 10 (Top-1 means 1).');
 const maxModules = Number(argument('max-modules', '0'));
 if (!Number.isInteger(maxModules) || maxModules < 0) throw new Error('--max-modules must be a non-negative integer.');
@@ -287,6 +294,10 @@ interface ModuleReport {
   writeFiles?: string[];
   candidate?: { repository: string; name: string; moduleId: string; language: string; score: number; hybrid?: number; rerank?: number; title: string };
   candidatesConsidered?: number;
+  retrievalCandidates?: SearchCandidate[];
+  retrievedCandidates?: Array<{ id: string; rank: number; repository: string; name: string; moduleId?: string; score: number; language: string; summary: string; sourceFiles: string[]; coreApis: string[] }>;
+  selectedCandidates?: Array<{ id: string; rank: number; repository: string; name: string; moduleId: string; language: string; score: number }>;
+  historyViewCandidates?: import('@forexplore/contracts').WorkspaceHistoryCandidate[];
   translationMode?: 'analyzer-translator' | 'direct-translator';
   fallbackReason?: string;
   /** Set when the first history search hit the store's query budget and was retried. */
@@ -418,7 +429,7 @@ const report = {
   dryRun,
   database,
   targetRoot,
-  topK,
+  topK, candidateRanks,
   gates: {} as { compile: string; verification: string | undefined; hiddenSuite: string },
   target: {} as { repositoryId?: string; analysisRevision?: string; projectId?: string; project?: string; modules?: number; hierarchy?: unknown },
   modules: [] as ModuleReport[],
@@ -489,9 +500,18 @@ const retrievalRepositories = assetNames ? assets : historyRepositories;
 console.log(`database=${database}  history repositories=${historyRepositories.length}（asset ${assets.length}）`);
 for (const row of assets) console.log(`  asset: ${row.displayName}`);
 
+// Match the workbench's configured model reranker. Without this injection the
+// offline driver would present raw hybrid Top4, not the choices a user sees.
+const cleanups: Array<() => Promise<unknown>> = [];
+const retrievalBackend = createHttpServer({ adapter: { adapt: async () => { throw new Error('Retrieval-only backend'); } } });
+await new Promise<void>(resolveListen => retrievalBackend.listen(0, '127.0.0.1', resolveListen));
+const retrievalEndpoint = `http://127.0.0.1:${(retrievalBackend.address() as AddressInfo).port}`;
+cleanups.push(() => new Promise<void>((resolveClose, rejectClose) => retrievalBackend.close(error => error ? rejectClose(error) : resolveClose())));
+
 let semanticEndpoint: string | undefined;
 const codeIntelligence = new CodeIntelligenceHost({
-  runtimeOptions: codeIntelligenceRuntimeOptionsFromEnvironment(process.env, { allowInMemory: false }),
+  runtimeOptions: { ...codeIntelligenceRuntimeOptionsFromEnvironment(process.env, { allowInMemory: false }),
+    moduleCandidateReranker: new ConfiguredModelReranker(() => retrievalEndpoint, async () => undefined) },
   identityStore,
   planProject: async (scope) => {
     // The revision-scoped query port must exist before the service will plan; the
@@ -506,7 +526,6 @@ const codeIntelligence = new CodeIntelligenceHost({
   output: { appendLine: (line: string) => console.log(`    ${line}`) },
 });
 
-const cleanups: Array<() => Promise<unknown>> = [];
 try {
   // The target registers and scans first; the assets are only made visible so
   // retrieval can see them, which is why they are synchronized without a scan.
@@ -558,7 +577,7 @@ try {
        WHERE repository_id=? AND analysis_revision=? AND module_artifact_id=? AND status='current'`,
     [targetScope.repositoryId, targetScope.analysisRevision, `project-job:${chosen.projectId}:code-understanding/v1`]);
   const previousPlanUpdatedAt = previousPlanRows[0]?.updatedAt ? String(previousPlanRows[0].updatedAt) : undefined;
-  await codeIntelligence.retryProject(projectScope, true);
+  if (!flag('reuse-plan') || !previousPlanUpdatedAt) await codeIntelligence.retryProject(projectScope, true);
   // retryProject schedules the analysis and returns; waitForProjects() can observe an
   // empty run set before the scheduled run registers itself, so the published record
   // is polled for instead of trusting a single idle() call.
@@ -574,7 +593,7 @@ try {
         projectId?: string; state?: string; error?: string; proposal?: ProjectModuleProposal;
       }, updatedAt: String(row.updatedAt) }))
       .find((payload) => payload?.projectId === chosen.projectId);
-    if (record && (record.state === 'ready' || record.state === 'failed') && record.updatedAt !== previousPlanUpdatedAt) break;
+    if (record && (record.state === 'ready' || record.state === 'failed') && (flag('reuse-plan') || record.updatedAt !== previousPlanUpdatedAt)) break;
     if (Date.now() >= planDeadline) break;
     await new Promise((resolveWait) => setTimeout(resolveWait, 5_000));
   }
@@ -665,7 +684,16 @@ try {
       // looking like a missing candidate.
       let candidates: SearchCandidate[] = [];
       const retrievalStart = Date.now();
-      for (let attempt = 0; ; attempt++) {
+      const reviewedReport = argument('retrieval-from');
+      if (reviewedReport) {
+        const saved = JSON.parse(readFileSync(resolve(reviewedReport), 'utf8')) as typeof report;
+        const reviewed = saved.modules.find(item => item.moduleId === module.id);
+        if (saved.database !== database || saved.target.repositoryId !== targetScope.repositoryId ||
+            saved.target.analysisRevision !== targetScope.analysisRevision || saved.topK !== topK ||
+            reviewed?.requirement !== requirement || !reviewed.retrievalCandidates?.length) throw new Error('Reviewed Top4 does not match the current target, requirement and revision.');
+        candidates = reviewed.retrievalCandidates;
+        console.log('  使用开发人员已审阅的同一份 Top4');
+      } else for (let attempt = 0; ; attempt++) {
         try {
           candidates = await codeIntelligence.searchHistoricalImplementations({ target, requirement, topK });
           break;
@@ -678,85 +706,66 @@ try {
         }
       }
       entry.candidatesConsidered = candidates.length;
+      entry.retrievalCandidates = candidates;
       entry.retrievalMs = Date.now() - retrievalStart;
-      // A parent/subsystem hit can carry no concrete files in an older module
-      // projection. It cannot produce a history-view, so select the first
-      // usable module within the requested retrieval width. If none exists,
-      // continue through the direct Translator fallback instead of dropping
-      // the target module entirely.
-      const top = candidates.find((candidate) => candidate.kind === 'module' &&
-        Boolean(candidate.sourceModule?.sourceFiles?.length));
-      if (!top) {
-        entry.status = 'retrieved';
-        entry.translationMode = 'direct-translator';
-        entry.fallbackReason = 'no history candidate with source files';
-        console.log('  ! 没有可读取的历史候选，切换到需求直实现 Translator 兜底');
+      entry.retrievedCandidates = candidates.map((candidate, index) => ({ id: candidate.id, rank: index + 1,
+        repository: candidate.repository, name: candidate.sourceModule?.name ?? candidate.title,
+        moduleId: candidate.sourceModule?.moduleId, score: candidate.score.overall, language: candidate.language, summary: candidate.summary,
+        sourceFiles: candidate.sourceModule?.sourceFiles ?? [], coreApis: candidate.sourceModule?.coreApis ?? [] }));
+      let selectedCandidates = candidateRanks.map(rank => candidates[rank - 1]).filter((candidate): candidate is SearchCandidate =>
+        Boolean(candidate?.kind === 'module' && candidate.sourceModule?.sourceFiles?.length));
+      let top = selectedCandidates[0];
+      entry.selectedCandidates = selectedCandidates.map(candidate => ({ id: candidate.id, rank: candidates.indexOf(candidate) + 1,
+        repository: candidate.repository, name: candidate.sourceModule!.name, moduleId: candidate.sourceModule!.moduleId,
+        language: candidate.language, score: candidate.score.overall }));
+      entry.translationMode = top ? 'analyzer-translator' : 'direct-translator';
+      if (top) {
+        entry.candidate = { repository: top.repository, name: top.sourceModule!.name, moduleId: top.sourceModule!.moduleId,
+          language: top.language, score: top.score.overall, title: top.title };
+        for (const candidate of entry.selectedCandidates) console.log(`  Selected Top-${candidate.rank}: ${candidate.repository} / ${candidate.name} score=${candidate.score.toFixed(3)}`);
       } else {
-        if (top.kind !== 'module' || !top.sourceModule) { entry.status = 'skipped'; entry.error = `candidate kind ${top.kind}`; console.log(`  ✗ 候选不是模块：${top.kind}`); continue; }
-        entry.translationMode = 'analyzer-translator';
-        entry.candidate = { repository: top.repository, name: top.sourceModule.name, moduleId: top.sourceModule.moduleId,
-          language: top.language, score: top.score.overall, ...(top.score.hybrid === undefined ? {} : { hybrid: top.score.hybrid }),
-          ...(top.score.rerank === undefined ? {} : { rerank: top.score.rerank }), title: top.title };
-        console.log(`  Top-1: ${top.repository} / ${top.sourceModule.name}  score=${top.score.overall.toFixed(3)}` +
-          `${top.score.hybrid === undefined ? '' : ` hybrid=${top.score.hybrid.toFixed(3)}`}（候选 ${candidates.length}）`);
+        entry.fallbackReason = 'no selected history candidate with source files';
+        console.log('  ! 选中候选没有可读取源码，切换到需求直实现 Translator');
       }
-
       let verifierSourceRoot: string | undefined;
       let historyViewRoot: string | undefined;
       let activeRun: WorkspaceTranslationRun | undefined;
       try {
         let scope: Awaited<ReturnType<typeof prepareModuleTranslationScope>>;
-        if (top) {
-          let historyUnavailable = false;
-          let historyView: Awaited<ReturnType<typeof codeIntelligence.createHistoryModuleView>> | undefined;
+        let historyView: Awaited<ReturnType<typeof codeIntelligence.createHistoryModulesView>> | undefined;
+        if (top && !dryRun) {
           try {
-            historyView = dryRun ? undefined : await codeIntelligence.createHistoryModuleView({
-            workspaceRoot: targetRoot,
-            repositoryId: top.sourceModule!.repositoryId,
-            analysisRevision: top.sourceModule!.analysisRevision,
-            projectId: top.sourceModule!.projectId,
-            moduleId: top.sourceModule!.moduleId,
-            sourceFiles: top.sourceModule!.sourceFiles ?? [top.path],
-            relevanceTerms: [
-              target.name, target.path, target.signature,
-              ...(target.module?.sourceFiles ?? []), ...(target.module?.coreApis ?? []),
-              top.sourceModule!.name, top.sourceModule!.purpose ?? '',
-              ...(top.sourceModule!.coreApis ?? []),
-            ],
-            });
+            historyView = await codeIntelligence.createHistoryModulesView({ workspaceRoot: targetRoot,
+              candidates: selectedCandidates.map(candidate => ({
+                repositoryId: candidate.sourceModule!.repositoryId, analysisRevision: candidate.sourceModule!.analysisRevision,
+                projectId: candidate.sourceModule!.projectId, moduleId: candidate.sourceModule!.moduleId,
+                name: candidate.sourceModule!.name, language: candidate.language,
+                sourceFiles: candidate.sourceModule!.sourceFiles ?? [candidate.path],
+                relevanceTerms: [target.name, target.path, target.signature, ...(target.module?.sourceFiles ?? []),
+                  ...(target.module?.coreApis ?? []), candidate.sourceModule!.name, candidate.sourceModule!.purpose ?? '',
+                  ...(candidate.sourceModule!.coreApis ?? [])],
+              })) });
+            historyViewRoot = historyView.root;
+            const identities = historyView.candidates ?? [historyView];
+            selectedCandidates = selectedCandidates.filter(candidate => identities.some(view =>
+              view.repositoryId === candidate.sourceModule!.repositoryId && view.analysisRevision === candidate.sourceModule!.analysisRevision &&
+              view.moduleId === candidate.sourceModule!.moduleId && view.projectId === candidate.sourceModule!.projectId));
+            top = selectedCandidates[0];
+            entry.historyViewCandidates = historyView.candidates;
+            verifierSourceRoot = await mkdtemp(join(tmpdir(), 'forexplore-verifier-history-'));
+            await cp(join(historyView.root, 'source'), verifierSourceRoot, { recursive: true });
+            console.log(`  历史视图：${selectedCandidates.length} 模块，${historyView.files.length} 文件`);
           } catch (error) {
             const description = error instanceof Error ? error.message : String(error);
-            if (!/有效的源文件清单|source files|source file/i.test(description)) throw error;
-            historyUnavailable = true;
-            entry.translationMode = 'direct-translator';
-            entry.fallbackReason = 'history candidate source files unavailable';
-            console.log(`  ! Top-1 历史候选文件已不可读，切换到需求直实现 Translator 兜底：${description.slice(0, 180)}`);
+            if (!/有效的源文件清单|source files|source file|ENOENT/i.test(description)) throw error;
+            selectedCandidates = []; top = undefined;
+            entry.translationMode = 'direct-translator'; entry.fallbackReason = description.slice(0, 300);
+            console.log(`  ! 历史源码不可读，切换需求直实现：${description.slice(0, 180)}`);
           }
-          if (!historyUnavailable) {
-          historyViewRoot = historyView?.root;
-          // Keep a separate read-only copy for the post-translation #44
-          // verifier; it contains only the selected module files.
-          verifierSourceRoot = historyView ? await mkdtemp(join(tmpdir(), 'forexplore-verifier-history-')) : undefined;
-          if (historyView && verifierSourceRoot) await cp(join(historyView.root, 'source'), verifierSourceRoot, { recursive: true });
-          try {
-            scope = await prepareModuleTranslationScope({ workspaceRoot: targetRoot, target, candidate: top,
-              requirement, decisionNotes: '',
-              evidenceScopes: [{ repositoryId: top.sourceModule!.repositoryId, analysisRevision: top.sourceModule!.analysisRevision }],
-              ...(historyView ? { historyView } : {}) });
-          } catch (error) {
-            const description = error instanceof Error ? error.message : String(error);
-            if (!/有效的源文件清单|source files|source file/i.test(description)) throw error;
-            entry.translationMode = 'direct-translator';
-            entry.fallbackReason = 'history candidate source files unavailable';
-            console.log(`  ! 历史视图没有可读取源文件，切换到需求直实现 Translator 兜底：${description.slice(0, 180)}`);
-            scope = await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '' });
-          }
-          } else {
-            scope = await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '' });
-          }
-        } else {
-          scope = await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '' });
         }
+        scope = top ? await prepareModuleTranslationScope({ workspaceRoot: targetRoot, target, candidates: selectedCandidates,
+          requirement, decisionNotes: '', ...(historyView ? { historyView } : {}) })
+          : await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '' });
       // Experiment hook, off by default. The product scope makes the module's own files the
       // only readable ones, so an Analyzer cannot read the types those files reference and
       // reports a blocker. RECAST_EXPERIMENT_WIDEN_READ_SCOPE=1 adds the rest of the target
@@ -838,7 +847,18 @@ try {
         // Prefer source/target fidelity verification when at least one safe
         // mapping exists. Otherwise verify the target directly against the
         // requirement instead of disabling the verifier altogether.
-        const mapping = buildModuleFunctionMapping(module, top?.sourceModule);
+        const sourceModules = selectedCandidates.map(candidate => {
+          const source = candidate.sourceModule!;
+          const prefix = entry.historyViewCandidates?.find(view => view.repositoryId === source.repositoryId &&
+            view.analysisRevision === source.analysisRevision && view.projectId === source.projectId && view.moduleId === source.moduleId)?.prefix;
+          return { sourceFiles: (source.sourceFiles ?? []).map(file => prefix ? `${prefix}/${file}` : file), coreApis: source.coreApis ?? [] };
+        });
+        const targetFileContents = Object.fromEntries(module.sourceFiles.map((file) => {
+          try { return [file, readFileSync(join(targetRoot, file), 'utf8')]; }
+          catch { return [file, '']; }
+        }));
+        const mapping = buildModuleFunctionMapping(module, { sourceFiles: sourceModules.flatMap(source => source.sourceFiles),
+          coreApis: sourceModules.flatMap(source => source.coreApis) }, targetFileContents);
         // Indexers may expose an exported class as a core API. Coverage is
         // method-based, so expand those target-only subjects before creating
         // the requirement verifier input.

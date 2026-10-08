@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 import path from 'node:path';
@@ -27,7 +27,7 @@ import type {
   CodeIntelligenceSummaryPresentation,
 } from './ui-types';
 import { projectAnalysisPresentation } from './project-analysis-presentation';
-import { MAX_RETRIEVAL_SCOPES, type WorkspaceEvidenceScope, type WorkspaceHistoryView } from '@forexplore/contracts';
+import { MAX_RETRIEVAL_SCOPES, MAX_SELECTED_HISTORY_MODULES, type WorkspaceEvidenceScope, type WorkspaceHistoryCandidate, type WorkspaceHistoryView } from '@forexplore/contracts';
 import type { ModuleReranker } from '../../../services/code-intelligence-service/src/module-reranker';
 import { platformLocalPath } from '../../../services/code-intelligence-service/src/platform-path';
 import { createIndexingProgressReporter, indexingProgressMessage, isIndexingCancellation,
@@ -42,6 +42,17 @@ import { createIndexingProgressReporter, indexingProgressMessage, isIndexingCanc
  */
 export const HISTORY_VIEW_MAX_FILES = 8;
 export const HISTORY_VIEW_MAX_BYTES = 128_000;
+
+export interface HistoryModuleSelection {
+  repositoryId: RepositoryId;
+  analysisRevision: string;
+  projectId?: ProjectId;
+  moduleId: string;
+  sourceFiles: readonly string[];
+  relevanceTerms?: readonly string[];
+  name?: string;
+  language?: string;
+}
 
 const historyPathStopWords = new Set(['src', 'main', 'test', 'tests', 'java', 'csharp', 'cs', 'com', 'org', 'net', 'example']);
 
@@ -402,6 +413,17 @@ async function safeHistoryFile(root: string, relative: string): Promise<string> 
   return candidate;
 }
 
+async function removeHistoryView(root: string): Promise<void> {
+  async function makeWritable(directory: string): Promise<void> {
+    await chmod(directory, 0o700);
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) await makeWritable(path.join(directory, entry.name));
+    }
+  }
+  await makeWritable(root).catch(() => undefined);
+  await rm(root, { recursive: true, force: true });
+}
+
 async function chmodReadonlyTree(root: string): Promise<void> {
   for (const entry of await readdir(root, { withFileTypes: true })) {
     const child = path.join(root, entry.name);
@@ -753,7 +775,7 @@ export class CodeIntelligenceHost {
     }
     const root = targetRoot
       ? path.join(await realpath(platformLocalPath(targetRoot)), '.forexpore', 'history-views', runId)
-      : await mkdtemp(path.join(tmpdir(), 'forexpore-history-view-'));
+      : await mkdtemp(path.join(tmpdir(), 'forexplore-history-view-'));
     await mkdir(path.join(root, 'source'), { recursive: true });
     const generatedAt = new Date().toISOString();
     const manifestEntries: Array<[string, string]> = [];
@@ -790,6 +812,72 @@ export class CodeIntelligenceHost {
       throw error;
     }
 }
+
+  /** Merge 1–3 user-selected modules; each retains the existing per-module budget. */
+  async createHistoryModulesView(input: {
+    workspaceRoot?: string;
+    candidates: readonly HistoryModuleSelection[];
+  }): Promise<WorkspaceHistoryView> {
+    if (input.candidates.length < 1 || input.candidates.length > MAX_SELECTED_HISTORY_MODULES ||
+        new Set(input.candidates.map(item => JSON.stringify([item.repositoryId, item.analysisRevision, item.projectId, item.moduleId]))).size !== input.candidates.length) {
+      throw new Error('请选择 1～3 个不同的历史模块。');
+    }
+    // Preserve the established layout for a single selected module.
+    if (input.candidates.length === 1) return this.createHistoryModuleView({ ...input.candidates[0]!, workspaceRoot: input.workspaceRoot });
+    const views: Array<{ selection: HistoryModuleSelection; view: WorkspaceHistoryView; prefix: string }> = [];
+    const skippedCandidates: Array<{ moduleId: string; repositoryId: string; reason: string }> = [];
+    let root: string | undefined;
+    try {
+      for (const [index, selection] of input.candidates.entries()) {
+        try {
+          const view = await this.createHistoryModuleView({ ...selection, workspaceRoot: input.workspaceRoot });
+          views.push({ selection, view, prefix: `candidate-${index + 1}` });
+        } catch (error) {
+          skippedCandidates.push({ moduleId: selection.moduleId, repositoryId: selection.repositoryId,
+            reason: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (!views.length) throw new Error(`历史候选没有可读取的 source files：${skippedCandidates.map(item => item.reason).join('; ')}`);
+      const primary = views[0]!.view;
+      const runId = randomUUID();
+      root = primary.root.startsWith(path.join(tmpdir(), 'forexplore-history-view-'))
+        ? await mkdtemp(path.join(tmpdir(), 'forexplore-history-view-'))
+        : path.join(path.dirname(primary.root), runId);
+      await mkdir(path.join(root, 'source'), { recursive: true });
+      const entries: Array<[string, string]> = [];
+      const candidates: WorkspaceHistoryCandidate[] = [];
+      const omittedFiles: string[] = [];
+      for (const { selection, view, prefix } of views) {
+        candidates.push({ prefix, repositoryId: view.repositoryId, analysisRevision: view.analysisRevision,
+          ...(view.projectId ? { projectId: view.projectId } : {}), moduleId: view.moduleId,
+          ...(selection.name ? { name: selection.name } : {}), ...(selection.language ? { language: selection.language } : {}) });
+        for (const file of view.files) {
+          const bytes = await readFile(path.join(view.root, 'source', ...file.split('/')));
+          const relative = `${prefix}/${file}`;
+          const destination = path.join(root, 'source', ...relative.split('/'));
+          await mkdir(path.dirname(destination), { recursive: true });
+          await writeFile(destination, bytes, { mode: 0o444 });
+          entries.push([relative, createHash('sha256').update(bytes).digest('hex')]);
+        }
+        const manifest = JSON.parse(await readFile(path.join(view.root, 'manifest.json'), 'utf8'));
+        omittedFiles.push(...(manifest.omittedFiles ?? []).map((file: string) => `${prefix}/${file}`));
+      }
+      entries.sort(([a], [b]) => a.localeCompare(b));
+      const manifestHash = createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+      const generatedAt = new Date().toISOString();
+      const identity = { repositoryId: primary.repositoryId, analysisRevision: primary.analysisRevision,
+        ...(primary.projectId ? { projectId: primary.projectId } : {}), moduleId: primary.moduleId };
+      await writeFile(path.join(root, 'manifest.json'), JSON.stringify({ ...identity, runId, generatedAt, candidates,
+        files: entries.map(([file, sha256]) => ({ path: file, sha256 })), omittedFiles, skippedCandidates }, null, 2), { mode: 0o444 });
+      await chmodReadonlyTree(root);
+      return { root, ...identity, files: entries.map(([file]) => file), manifestHash, runId, generatedAt, candidates };
+    } catch (error) {
+      if (root) await removeHistoryView(root);
+      throw error;
+    } finally {
+      for (const { view } of views) await removeHistoryView(view.root);
+    }
+  }
 
   /** Returns the active structural index for trusted host-side presentation. */
   async structuralIndexForPath(localPath: string): Promise<StructuralIndex | null> {

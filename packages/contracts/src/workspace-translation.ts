@@ -25,6 +25,20 @@ export interface WorkspaceEvidenceScope {
  * Only the listed repository-relative files may be copied into an Agent
  * staging workspace.
  */
+export const MAX_SELECTED_HISTORY_MODULES = 3;
+
+/** One selected module within a merged direct-read history view. */
+export interface WorkspaceHistoryCandidate {
+  /** Directory under history-view/source, e.g. candidate-1. */
+  prefix: string;
+  repositoryId: string;
+  analysisRevision: string;
+  projectId?: string;
+  moduleId: string;
+  name?: string;
+  language?: string;
+}
+
 export interface WorkspaceHistoryView {
   root: string;
   files: string[];
@@ -36,6 +50,8 @@ export interface WorkspaceHistoryView {
   /** Host-created manifest identity for the direct-read history hand-off. */
   runId?: string;
   generatedAt?: string;
+  /** Multi-module views retain primary identity above for single-view callers. */
+  candidates?: WorkspaceHistoryCandidate[];
 }
 
 /** Shared ceiling for revision-scoped history evidence queries. */
@@ -170,7 +186,7 @@ export interface WorkspaceTranslationRun {
     inputChars?: number;
     outputChars?: number;
     usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number };
-    historyView?: { repositoryId: string; analysisRevision: string; moduleId: string; files: number; manifestHash: string; runId?: string; generatedAt?: string };
+    historyView?: { repositoryId: string; analysisRevision: string; moduleId: string; files: number; manifestHash: string; runId?: string; generatedAt?: string; candidates?: WorkspaceHistoryCandidate[] };
     /** Per-stage provenance. Prompts and source contents are intentionally omitted. */
     stages?: Array<{
       stage: "analyzer" | "translator";
@@ -184,6 +200,8 @@ export interface WorkspaceTranslationRun {
       outputChars?: number;
       usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number };
       readFiles?: string[];
+      /** Bounded command metadata from Codex JSONL; command output is omitted. */
+      commands?: Array<{ command: string; exitCode?: number | null }>;
       /** Bounded Analyzer final output retained for invalid-plan diagnosis. */
       analyzerOutput?: string;
       analyzerOutputTruncated?: boolean;

@@ -39,7 +39,7 @@ const hash = (value: string | null): string | null => value === null ? null : cr
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const maxCodexOutput = 4 * 1024 * 1024;
 const maxRecordedAnalyzerOutput = 64 * 1024;
-const generatedDirectoryNames = new Set([".git", ".forexpore", ".codex", ".claude", "node_modules", "bin", "obj", "target", "build", "dist", "test", "tests", "__tests__", "evaluation"]);
+const generatedDirectoryNames = new Set([".git", ".forexpore", ".codex", ".claude", ".translation-verifier-tests", "node_modules", "bin", "obj", "target", "build", "dist", "test", "tests", "__tests__", "evaluation"]);
 const sensitiveFileNames = new Set([".env", ".env.local", ".env.production", ".npmrc", "id_rsa", "id_ed25519"]);
 const codexMetadataDirectories = new Set([".agents", ".aws", ".codex", ".git"]);
 type CodexStage = "analyzer" | "translator";
@@ -351,7 +351,7 @@ export class CodexWorkspaceTranslationRuntime {
           this.save(run);
         }
       } finally {
-        await rm(analysisStage.root, { recursive: true, force: true }).catch(() => undefined);
+        await removeStagingTree(analysisStage.root);
       }
     }
 
@@ -374,7 +374,7 @@ export class CodexWorkspaceTranslationRuntime {
         if (!changes.length) throw new Error("Codex Translator completed without changing an allowed source file.");
         this.applyChanges(run, changes);
       } finally {
-        await rm(stage.root, { recursive: true, force: true }).catch(() => undefined);
+        await removeStagingTree(stage.root);
       }
       this.reconcile(run);
       run.status = "compiling"; this.event(run, "compiling", "Codex Translator 变更已由宿主应用，开始编译检查"); this.save(run);
@@ -406,7 +406,8 @@ export class CodexWorkspaceTranslationRuntime {
     return [
       "You are the Analyzer Codex for a RECAST module translation task.",
       "You have read-only access to target/ and history-view/. Do not write, create, delete, rename, or chmod any file.",
-      "Inspect the target write files first. From history-view, select only the two or three files most relevant to the target symbols; do not run bulk find/ls/cat commands or print the entire history module. Use short targeted reads (for example head/sed) and return the plan immediately after that.",
+      "Inspect the target write files first. For each selected history module, read only two or three files relevant to the requirement; use short targeted reads rather than bulk cat. The modules may cover complementary parts of one requirement. Keep mappings.source as a string containing the candidate prefix and source path; the plan JSON format is unchanged.",
+      this.historyInventory(request),
       "The history-view can contain many large files. Read manifest.json first: omittedFiles lists files deliberately outside this bounded view, and omission is not evidence that the historical module lacks that behavior. Reading every available file is a failure mode: stay within a small evidence sample and rely on file names, interfaces, and the requirement for the remaining mapping.",
       "Return only one JSON object with summary, mappings, dependencies, and ordered steps. Do not return Markdown or source code.",
       "Every step must use only the exact allowed writeFiles. The plan must be concrete enough for a separate Translator Codex to implement without query_evidence.",
@@ -426,6 +427,8 @@ export class CodexWorkspaceTranslationRuntime {
       "The Analyzer plan is unavailable or was deliberately bypassed. Implement the requirement directly from the target workspace and task specification.",
       "A read-only history-view may be present as optional evidence; use it when useful, but do not wait for an Analyzer plan, invent a historical source, or attempt to access files outside this staging workspace.",
       "Read the target files before writing. Work only under target/ and modify only the exact allowed write files. Do not create build artifacts or change tests, build configuration, or verification criteria.",
+      "Temporary patches or scripts may be stored in .agent-tmp/; only the allowed target source changes are applied back.",
+      this.historyInventory(request),
       "Preserve existing public contracts and compiler settings. Implement complete behavior required by the specification; do not add stubs or weaken validation.",
       `Requirement:\n${request.spec.replaceAll(this.files.root, "<staging-workspace>")}`,
       `Target files in target/: ${visible}`,
@@ -454,6 +457,8 @@ export class CodexWorkspaceTranslationRuntime {
       "You are the Translator Codex for a RECAST module translation task.",
       "Work only under target/. Read target files, CODEX_IMPLEMENTATION_PLAN.json, and the read-only history-view/source directory.",
       "The host will apply only changes to the exact allowed write files; do not edit any other file, do not create build artifacts, and do not modify history-view.",
+      "Temporary patches or scripts may be stored in .agent-tmp/; only the allowed target source changes are applied back. Use the selected history modules for complementary behaviors as indicated by the plan, reading relevant files on demand.",
+      this.historyInventory(request),
       "Implement the validated Analyzer plan completely in dependency order. Preserve public contracts and compiler settings. Do not add stubs or weaken validation.",
       `Requirement:\n${request.spec.replaceAll(this.files.root, "<staging-workspace>")}`,
       `Target files in target/: ${visible}`,
@@ -464,6 +469,12 @@ export class CodexWorkspaceTranslationRuntime {
       feedback ? `The host verifier rejected the previous implementation. This is feedback from the real Host test run, not a request to change tests or criteria. Repair the same module and compile again:\n${JSON.stringify(feedback, null, 2)}` : "",
       "Do not inspect or attempt to access files outside this staging workspace. Finish after the source implementation is complete.",
     ].join("\n\n");
+  }
+
+  private historyInventory(request: WorkspaceTranslationRequest): string {
+    const candidates = request.historyView?.candidates;
+    return candidates?.length ? `Selected read-only history modules (one task, one plan):\n${candidates.map(candidate =>
+      `${candidate.prefix}: ${candidate.name ?? candidate.moduleId} (${candidate.language ?? "source"}) — history-view/source/${candidate.prefix}/`).join("\n")}` : "";
   }
 
   private safeDiagnostics(output: string): string {
@@ -552,7 +563,7 @@ export class CodexWorkspaceTranslationRuntime {
         planHash = createHash("sha256").update(planText).digest("hex");
       }
       return { root, historyRoot, baseline, historyBaseline, ...(planHash ? { planHash } : {}) };
-    } catch (error) { await rm(root, { recursive: true, force: true }).catch(() => undefined); throw error; }
+    } catch (error) { await removeStagingTree(root); throw error; }
   }
 
   private async copyHistoryView(view: WorkspaceHistoryView | undefined, destination: string, signal: AbortSignal): Promise<void> {
@@ -579,12 +590,13 @@ export class CodexWorkspaceTranslationRuntime {
     } catch { throw new Error("History view manifest is missing or invalid."); }
     const manifestObject = manifest as {
       repositoryId?: unknown; analysisRevision?: unknown; projectId?: unknown; moduleId?: unknown;
-      runId?: unknown; generatedAt?: unknown; files?: unknown; omittedFiles?: unknown;
+      runId?: unknown; generatedAt?: unknown; files?: unknown; omittedFiles?: unknown; candidates?: unknown;
     };
     if (manifestObject.repositoryId !== view.repositoryId || manifestObject.analysisRevision !== view.analysisRevision ||
         manifestObject.moduleId !== view.moduleId || (view.projectId ?? undefined) !== (manifestObject.projectId ?? undefined) ||
         (view.runId ?? undefined) !== (manifestObject.runId ?? undefined) || (view.generatedAt ?? undefined) !== (manifestObject.generatedAt ?? undefined) ||
         !Array.isArray(manifestObject.files)) throw new Error("History view manifest metadata mismatch.");
+    if (JSON.stringify(manifestObject.candidates ?? null) !== JSON.stringify(view.candidates ?? null)) throw new Error("History view candidate metadata mismatch.");
     if (manifestObject.omittedFiles !== undefined &&
         (!Array.isArray(manifestObject.omittedFiles) || manifestObject.omittedFiles.some((file) => typeof file !== "string"))) {
       throw new Error("Invalid omitted history-view file list.");
@@ -667,6 +679,7 @@ export class CodexWorkspaceTranslationRuntime {
       inputChars: prompt.length, outputChars: result.outputChars,
       ...(result.usage ? { usage: result.usage } : {}),
       readFiles: [...new Set([...run.request.workspaceFiles.map(path => `target/${path}`), ...historyFiles.map(path => `history-view/source/${path}`)])].sort(),
+      commands: codexCommands(result.stdout),
     };
     const agent = run.agent ?? { kind: "codex" as const, command: this.codexCommand, ...(this.codexModel ? { model: this.codexModel } : {}), startedAt: result.startedAt, stages: [] };
     run.agent = agent;
@@ -849,7 +862,34 @@ function collectAnalyzerPayloads(value: unknown, output: string[], depth = 0): v
 
 function historyViewAudit(view: WorkspaceHistoryView): NonNullable<WorkspaceTranslationRun["agent"]>["historyView"] {
   return { repositoryId: view.repositoryId, analysisRevision: view.analysisRevision, moduleId: view.moduleId, files: view.files.length, manifestHash: view.manifestHash,
-    ...(view.runId ? { runId: view.runId } : {}), ...(view.generatedAt ? { generatedAt: view.generatedAt } : {}) };
+    ...(view.runId ? { runId: view.runId } : {}), ...(view.generatedAt ? { generatedAt: view.generatedAt } : {}),
+    ...(view.candidates ? { candidates: structuredClone(view.candidates) } : {}) };
+}
+
+function codexCommands(stdout: string): Array<{ command: string; exitCode?: number | null }> {
+  const commands: Array<{ command: string; exitCode?: number | null }> = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event = JSON.parse(line);
+      const item = event.type === "item.completed" ? event.item : undefined;
+      if (item?.type === "command_execution" && typeof item.command === "string") {
+        commands.push({ command: item.command.slice(0, 4000), ...(item.exit_code !== undefined ? { exitCode: item.exit_code } : {}) });
+      }
+    } catch { /* partial or non-JSON output */ }
+  }
+  return commands.slice(-40);
+}
+
+/** chmod makes the host-owned read-only evidence removable on Linux too. */
+async function removeStagingTree(root: string): Promise<void> {
+  async function writable(directory: string): Promise<void> {
+    await chmod(directory, 0o700);
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) await writable(join(directory, entry.name));
+    }
+  }
+  await writable(root).catch(() => undefined);
+  await rm(root, { recursive: true, force: true }).catch(() => undefined);
 }
 
 async function copyVisibleTree(source: string, destination: string, protectedFiles: readonly string[], baseline: Map<string, string>, signal: AbortSignal): Promise<void> {
@@ -867,7 +907,9 @@ async function copyVisibleTree(source: string, destination: string, protectedFil
 async function walkTree(root: string, prefix: string, visit: (relativePath: string, absolutePath: string) => Promise<void>): Promise<void> {
   for (const entry of await readdir(join(root, ...(prefix ? prefix.split("/") : [])), { withFileTypes: true })) {
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (generatedDirectoryNames.has(entry.name) || entry.name.startsWith(".forexpore") || sensitiveFileNames.has(entry.name.toLowerCase()) || /(?:\.test|\.spec)\.[^.]+$/i.test(entry.name)) continue;
+    // Both spellings exist in deployed workspaces. Run journals contain prior
+    // implementation snapshots and verification evidence, never Agent input.
+    if (generatedDirectoryNames.has(entry.name) || entry.name.startsWith(".forexpore") || entry.name.startsWith(".forexplore") || sensitiveFileNames.has(entry.name.toLowerCase()) || /(?:\.test|\.spec)\.[^.]+$/i.test(entry.name)) continue;
     const absolute = join(root, ...relativePath.split("/"));
     if (entry.isDirectory()) await walkTree(root, relativePath, visit);
     else if (entry.isFile()) {
@@ -890,7 +932,7 @@ async function collectAllFiles(root: string, prefix: string, result: Map<string,
       // Build/test tools commonly leave bin/obj/node_modules in the staging
       // copy. They are deliberately invisible to the Agent and must not turn
       // an otherwise valid source diff into an out-of-scope edit.
-      if (generatedDirectoryNames.has(entry.name) || entry.name.startsWith(".forexpore")) continue;
+      if (generatedDirectoryNames.has(entry.name) || entry.name.startsWith(".forexpore") || entry.name.startsWith(".forexplore")) continue;
       await collectAllFiles(root, relativePath, result);
     }
     else if (entry.isFile()) result.set(relativePath, snapshotBytes(await readFile(absolute)));

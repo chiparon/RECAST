@@ -154,4 +154,44 @@ describe("function-group tools", () => {
     expect(result.functionGroupTest.testPaths).toEqual(["tests/a.test.py", "tests/b.test.py"]);
     expect(result.functionGroupTest.tests).toEqual({ executed: 2, passed: 2, failed: 0, skipped: 0 });
   });
+
+  it("uses the newest result when an agent reruns the same test file", async () => {
+    const target = { path: "src/A.py", name: "a" };
+    const context = {
+      state: {
+        functionGroupTests: [
+          {
+            status: "failure" as const,
+            testPaths: ["tests/all.test.py"],
+            tests: { executed: 2, passed: 0, failed: 2, skipped: 0 },
+            functions: [{ target, status: "unverified" as const, executed: false, lineCoverage: null, branchCoverage: null }],
+            failures: [{ message: "test authoring assertion" }],
+            stdout: "",
+            stderr: "",
+            exitCode: 1,
+          },
+          {
+            status: "success" as const,
+            testPaths: ["tests/all.test.py"],
+            tests: { executed: 2, passed: 2, failed: 0, skipped: 0 },
+            functions: [{ target, status: "passed" as const, executed: true, lineCoverage: 100, branchCoverage: null }],
+            failures: [],
+            stdout: "ok",
+            stderr: "",
+            exitCode: 0,
+          },
+        ],
+      },
+      runtime: {
+        sourceLanguage: "Python", targetLanguage: "Python", sourceProjectPath: "/tmp/source", targetProjectPath: "/tmp/target",
+        sourcePath: "src/a.py", targetPath: target.path, targetFunction: target,
+        sourceDirectory: "src", targetDirectory: "src", testRoots: ["tests"], testRunner: "pytest" as const,
+        targetTest: { executable: "python3", args: ["-m", "pytest"] },
+      },
+      runner: { run: async () => { throw new Error("unused"); } },
+    } satisfies ToolContext;
+    const tool = createFinishFunctionGroupTool()(context);
+    await expect(tool.execute(tool.parse({ testExecutionStatus: "success", translationStatus: "success" })))
+      .resolves.toMatchObject({ functionGroupTest: { status: "success", tests: { executed: 2, passed: 2, failed: 0 } } });
+  });
 });

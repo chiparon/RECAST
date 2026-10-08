@@ -1,5 +1,5 @@
 import type { WorkspaceTranslationPlan, WorkspaceTranslationRequest } from "@forexplore/contracts";
-import { MAX_RETRIEVAL_SCOPES } from '@forexplore/contracts';
+import { MAX_RETRIEVAL_SCOPES, MAX_SELECTED_HISTORY_MODULES } from '@forexplore/contracts';
 import {
   completeWithDeepSeekTools, type DeepSeekClientOptions, type DeepSeekToolCompletion,
   type DeepSeekToolDefinition, type DeepSeekToolMessage,
@@ -144,7 +144,7 @@ export function validateWorkspaceTranslationRequest(value: unknown): asserts val
   }
   if (input.historyView !== undefined) {
     const view = object(input.historyView);
-    if (Object.keys(view).some((key) => !["root", "files", "repositoryId", "analysisRevision", "projectId", "moduleId", "manifestHash", "runId", "generatedAt"].includes(key)) ||
+    if (Object.keys(view).some((key) => !["root", "files", "repositoryId", "analysisRevision", "projectId", "moduleId", "manifestHash", "runId", "generatedAt", "candidates"].includes(key)) ||
       !nonempty(view.root) || !/^([A-Za-z]:[\\/]|[\\/]{2}|\/)/.test(view.root) ||
       !stringArray(view.files) || !view.files.length || view.files.length > 256 ||
       !nonempty(view.repositoryId) || !nonempty(view.analysisRevision) || !nonempty(view.moduleId) ||
@@ -155,6 +155,24 @@ export function validateWorkspaceTranslationRequest(value: unknown): asserts val
       throw new Error("Invalid history view.");
     }
     for (const file of view.files) validateWorkspacePath(file);
+    if (view.candidates !== undefined) {
+      if (!Array.isArray(view.candidates) || !view.candidates.length || view.candidates.length > MAX_SELECTED_HISTORY_MODULES) throw new Error("Invalid history candidate list.");
+      const prefixes = new Set<string>();
+      const identities = new Set<string>();
+      for (const raw of view.candidates) {
+        const candidate = object(raw);
+        if (Object.keys(candidate).some(key => !["prefix", "repositoryId", "analysisRevision", "projectId", "moduleId", "name", "language"].includes(key)) ||
+            !/^candidate-[1-3]$/.test(String(candidate.prefix)) || !nonempty(candidate.repositoryId) || !nonempty(candidate.analysisRevision) || !nonempty(candidate.moduleId) ||
+            ["projectId", "name", "language"].some(key => candidate[key] !== undefined && !nonempty(candidate[key]))) throw new Error("Invalid history candidate.");
+        const identity = JSON.stringify([candidate.repositoryId, candidate.analysisRevision, candidate.projectId, candidate.moduleId]);
+        if (prefixes.has(String(candidate.prefix)) || identities.has(identity)) throw new Error("Duplicate history candidate.");
+        prefixes.add(String(candidate.prefix)); identities.add(identity);
+        if (!(view.files as string[]).some(file => file.startsWith(`${candidate.prefix}/`))) throw new Error("History candidate has no files.");
+      }
+      if ((view.files as string[]).some(file => !prefixes.has(file.split('/')[0]!))) throw new Error("History file is outside selected candidate directories.");
+      const primary = object(view.candidates[0]);
+      if (["repositoryId", "analysisRevision", "projectId", "moduleId"].some(key => (primary[key] ?? undefined) !== (view[key] ?? undefined))) throw new Error("History view primary candidate mismatch.");
+    }
   }
   for (const paths of [input.workspaceFiles, input.writeFiles]) {
     if (new Set(paths.map((path) => process.platform === "win32" ? path.toLowerCase() : path)).size !== paths.length) {

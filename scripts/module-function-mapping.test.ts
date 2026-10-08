@@ -20,11 +20,11 @@ describe("module function mapping", () => {
     }]);
   });
 
-  it("drops an incomplete qualified signature so coverage can match the method", () => {
+  it("preserves an incomplete qualified signature so coverage can select the declaring class", () => {
     expect(expandClassLevelFunctions(
       [{ path: "src/Telemetry.cs", name: "CheckAsync", signature: "AssetUpgradeGateway.Telemetry.MetricsHealthProbe.CheckAsync" }],
       () => undefined,
-    )).toEqual([{ path: "src/Telemetry.cs", name: "CheckAsync" }]);
+    )).toEqual([{ path: "src/Telemetry.cs", name: "CheckAsync", signature: "AssetUpgradeGateway.Telemetry.MetricsHealthProbe.CheckAsync" }]);
   });
 
   it("normalizes signatures and maps every unique API", () => {
@@ -56,5 +56,21 @@ describe("module function mapping", () => {
     expect(result.functions).toEqual([]);
     expect(result.unmatchedFunctions[0]?.path).toBe("src/OrderService.cs");
     expect(result.diagnostics[0]?.reason).toBe("source-file-ambiguous");
+  });
+
+  it("resolves target APIs to the file that declares their class", () => {
+    const result = buildModuleFunctionMapping(
+      target(["TenantQuotaPolicy.Evaluate", "TenantQuotaPolicy.IsWithin", "AttachmentValidationPipeline.Evaluate"], [
+        "src/AttachmentPolicies.cs", "src/AuthorizationAndQuotaPolicies.cs",
+      ]),
+      undefined,
+      {
+        "src/AttachmentPolicies.cs": "public sealed class AttachmentValidationPipeline { public PolicyResult Evaluate() => throw null; }",
+        "src/AuthorizationAndQuotaPolicies.cs": "public sealed class TenantQuotaPolicy { public PolicyResult Evaluate() => throw null; public bool IsWithin() => false; }",
+      },
+    );
+    expect(result.unmatchedFunctions.map((item) => item.path)).toEqual([
+      "src/AuthorizationAndQuotaPolicies.cs", "src/AuthorizationAndQuotaPolicies.cs", "src/AttachmentPolicies.cs",
+    ]);
   });
 });

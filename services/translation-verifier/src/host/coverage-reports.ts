@@ -115,6 +115,7 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
   const packages = report?.packages?.package;
   const packageList = Array.isArray(packages) ? packages : packages ? [packages] : [];
   const methods: any[] = [];
+  const declaringType = csharpDeclaringType(subject);
   for (const pkg of packageList) for (const cls of pkg.classes?.class ?? []) {
     const path = String(cls.filename ?? "").replaceAll("\\", "/");
     if (root) {
@@ -122,6 +123,11 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
       const candidates = isAbsolute(path) ? [path] : sources.length ? sources.map(source => resolve(source, path)) : [resolve(root, path)];
       if (!candidates.some(candidate => fileIdentity(root, candidate) === fileIdentity(root, subject.path))) continue;
     } else if (path !== subject.path) continue;
+    if (declaringType) {
+      const className = String(cls.name ?? "");
+      const simpleName = className.split(/[.:]/).filter(Boolean).at(-1) ?? className;
+      if (simpleName !== declaringType && className !== declaringType) continue;
+    }
     for (const method of cls.methods?.method ?? []) {
       if (method.name === subject.name && (!subject.signature || matchesCsharpSignature(method.signature, subject.signature, subject.name))) methods.push(method);
     }
@@ -142,8 +148,24 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
   return { name: subject.name, executed: hits.some((n: number) => n > 0), lineCoverage: percent(hits), branchCoverage: totalBranches === 0 ? null : Math.round(coveredBranches / totalBranches * 10_000) / 100 };
 }
 
+function csharpDeclaringType(subject: VerificationFunction): string | undefined {
+  let signature = subject.signature?.trim();
+  if (!signature) return undefined;
+  const open = signature.indexOf("(");
+  if (open >= 0) signature = signature.slice(0, open);
+  const dot = signature.lastIndexOf(".");
+  const colon = signature.lastIndexOf("::");
+  const separator = Math.max(dot, colon);
+  if (separator <= 0) return undefined;
+  const offset = separator === colon ? 2 : 1;
+  const method = signature.slice(separator + offset).trim();
+  if (method !== subject.name) return undefined;
+  return signature.slice(0, separator).trim().split(/[.:]/).filter(Boolean).at(-1);
+}
+
 function matchesCsharpSignature(actual: string, requested: string, name: string): boolean {
   if (actual === requested) return true;
+  if (!requested.includes("(")) return true;
   const aliases: Record<string, string> = { int: "System.Int32", long: "System.Int64", short: "System.Int16", byte: "System.Byte", bool: "System.Boolean", string: "System.String", char: "System.Char", double: "System.Double", float: "System.Single", decimal: "System.Decimal", object: "System.Object" };
   const start = requested.indexOf(`${name}(`);
   if (start < 0 || !actual.startsWith("(")) return false;
@@ -154,7 +176,18 @@ function matchesCsharpSignature(actual: string, requested: string, name: string)
     const base = type.replace(/\[\]$/, "");
     return (aliases[base] ?? base) + (type.endsWith("[]") ? "[]" : "");
   }) : [];
-  return `(${wanted.join(",")})` === actual;
+  const actualTypes = actual.startsWith("(") && actual.endsWith(")")
+    ? actual.slice(1, -1).split(",").filter(Boolean)
+    : [];
+  if (actualTypes.length !== wanted.length) return false;
+  return wanted.every((requestedType, index) => {
+    const actualType = actualTypes[index]!;
+    if (actualType === requestedType) return true;
+    // Coverlet writes fully-qualified parameter types while the indexer often
+    // records the source-level short name. Accept that namespace decoration
+    // only when the requested type itself is unqualified.
+    return !requestedType.includes(".") && actualType.endsWith(`.${requestedType}`);
+  });
 }
 
 type XmlNode = Record<string, any>;

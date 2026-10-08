@@ -129,6 +129,7 @@ export default function App() {
   const pendingRef = useRef<WorkflowState['pending']>(null);
   const targetIdRef = useRef<string | null>(null);
   const candidateIdRef = useRef<string | null>(null);
+  const candidateIdsRef = useRef<string[]>([]);
   const settingsRef = useRef<PanelSettingsPresentation>({ repositoryPaths: [], topK: 4 });
   // The host reports phases, not the entry point that was used, so the mode is
   // remembered here to make the retry button replay the same action.
@@ -137,6 +138,7 @@ export default function App() {
   pendingRef.current = state.pending;
   targetIdRef.current = state.target?.id ?? null;
   candidateIdRef.current = state.selectedCandidateId;
+  candidateIdsRef.current = state.selectedCandidateIds?.length ? state.selectedCandidateIds : (state.selectedCandidateId ? [state.selectedCandidateId] : []);
 
   useEffect(() => {
     bus.post({ type: 'READY' });
@@ -174,7 +176,10 @@ export default function App() {
           // waiting forever with no error, which reads as "translation is
           // running" while nothing is. Report it and release the pending state.
           const directFallback = message.candidateId === 'direct-fallback';
-          if (message.targetId !== targetIdRef.current || (directFallback ? candidateIdRef.current !== null : message.candidateId !== candidateIdRef.current)) {
+          const selectionMismatch = message.candidateIds
+            ? JSON.stringify(message.candidateIds) !== JSON.stringify(candidateIdsRef.current)
+            : candidateIdsRef.current.length > 1;
+          if (message.targetId !== targetIdRef.current || selectionMismatch || (directFallback ? candidateIdRef.current !== null : message.candidateId !== candidateIdRef.current)) {
             const reason = '宿主返回的模块翻译作用域不属于当前选择的模块候选；请重新选择候选后再发起翻译。';
             setError(reason);
             dispatch({ type: 'ADAPT_FAILURE', message: reason });
@@ -322,6 +327,16 @@ export default function App() {
   }
 
   function handleSelectCandidate(candidateId: string): void {
+    if (state.target?.kind === 'module') {
+      const previous = state.selectedCandidateIds?.length ? state.selectedCandidateIds : (state.selectedCandidateId ? [state.selectedCandidateId] : []);
+      const next = previous.includes(candidateId) ? previous.filter(id => id !== candidateId) : [...previous, candidateId];
+      if (next.length > 3) { setError('最多选择 3 个参考模块。'); return; }
+      const candidateIds = state.candidates.slice(0, 4).filter(candidate => next.includes(candidate.id)).map(candidate => candidate.id);
+      setModuleTranslation(null); setError(null);
+      dispatch({ type: 'SELECT_CANDIDATES', candidateIds });
+      bus.post({ type: 'SELECT_CANDIDATES', candidateIds });
+      return;
+    }
     setModuleTranslation(null);
     dispatch({ type: 'SELECT_CANDIDATE', candidateId });
     bus.post({ type: 'SELECT_CANDIDATE', candidateId });

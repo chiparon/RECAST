@@ -22,7 +22,7 @@ afterEach(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-it('takes an explicitly selected module through preparation, scoped start, diff review and rollback', async () => {
+it('takes two explicitly selected modules through preparation, scoped start, diff review and rollback', async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   const target: ModuleTarget = { id: 'target-module', name: 'Limit module', kind: 'module', language: 'TypeScript', path: 'target.ts', signature: '',
     module: { sourceFiles: ['target.ts', 'policy.ts'], coreApis: ['limit'], dependsOn: [] } };
@@ -30,6 +30,8 @@ it('takes an explicitly selected module through preparation, scoped start, diff 
     signature: 'limit(int)', summary: 'Boundary policy', preview: 'class Limit {}', license: 'MIT', dependencies: [], compatibility: [], risks: [],
     score: { overall: 0.9, semantic: 0.9, symbol: 1, contract: 1 },
     sourceModule: { repositoryId: 'history', analysisRevision: 'r1', projectId: 'history-project', projectPath: '', moduleId: 'limit', name: 'Limit', sourceFiles: ['Limit.java'], coreApis: ['limit'] } };
+  const complementary: SearchCandidate = { ...candidate, id: 'history-retry', title: 'Java retry module',
+    sourceModule: { ...candidate.sourceModule!, moduleId: 'retry', name: 'Retry', sourceFiles: ['Retry.java'] } };
   const explorer: ModuleExplorerPresentation = { generatedAt: '', history: [], target: {
     id: 'target', repositoryId: 'target', projectId: 'project', revision: 'revision', mode: 'target', name: 'Target', rootLabel: '.', tree: [],
     stats: { modules: 1, files: 2, types: 0, methods: 0, implemented: 0, unimplemented: 1, unknown: 0, dependencies: 0 },
@@ -45,8 +47,8 @@ it('takes an explicitly selected module through preparation, scoped start, diff 
   window.acquireVsCodeApi = () => ({ getState: () => null, setState: () => {}, postMessage: (raw) => {
     const message = raw as WebviewToHostMessage; sent.push(message);
     expect(isWebviewToHostMessage(message)).toBe(true);
-    if (message.type === 'START_SEARCH') post({ type: 'SEARCH_RESULT', candidates: [candidate] });
-    if (message.type === 'START_ADAPT') post({ type: 'MODULE_TRANSLATION_READY', targetId: target.id, candidateId: candidate.id, moduleScopeId: scopeId });
+    if (message.type === 'START_SEARCH') post({ type: 'SEARCH_RESULT', candidates: [candidate, complementary] });
+    if (message.type === 'START_ADAPT') post({ type: 'MODULE_TRANSLATION_READY', targetId: target.id, candidateId: candidate.id, candidateIds: [candidate.id, complementary.id], moduleScopeId: scopeId });
     if (message.type === 'WORKSPACE_TRANSLATION') post({ type: 'WORKSPACE_TRANSLATION_RESULT', requestId: message.requestId,
       ...(message.action === 'describe' ? { profile: { profileId: 'profile', moduleScopeId: scopeId, workspaceRoot: '/target', sourceLanguage: 'Java', targetLanguage: 'TypeScript',
         workspaceFiles: ['target.ts', 'policy.ts'], writeFiles: ['target.ts', 'policy.ts'], behavioralVerification: true } }
@@ -63,7 +65,9 @@ it('takes an explicitly selected module through preparation, scoped start, diff 
   await act(async () => button('查找 4 个候选方案').click());
   expect(sent.some(item => item.type === 'START_ADAPT')).toBe(false);
   await act(async () => button('Java limit module').click());
-  expect(sent).toContainEqual({ type: 'SELECT_CANDIDATE', candidateId: candidate.id });
+  expect(sent).toContainEqual({ type: 'SELECT_CANDIDATES', candidateIds: [candidate.id] });
+  await act(async () => button('Java retry module').click());
+  expect(sent).toContainEqual({ type: 'SELECT_CANDIDATES', candidateIds: [candidate.id, complementary.id] });
   await act(async () => button('准备模块翻译与回填').click());
   expect(sent).toContainEqual(expect.objectContaining({ type: 'WORKSPACE_TRANSLATION', action: 'describe', moduleScopeId: scopeId }));
   expect(container.textContent).toContain('target.ts、policy.ts');

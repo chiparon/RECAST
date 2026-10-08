@@ -23,6 +23,13 @@ describe("CodexWorkspaceTranslationRuntime", () => {
       await writeFile(join(root, "src.cs"), "class Target { }\n");
       await writeFile(join(root, "visible.txt"), "visible\n");
       await writeFile(join(root, "hidden.txt"), "secret criteria\n");
+      await mkdir(join(root, ".forexplore", "workspace-translations"), { recursive: true });
+      await writeFile(join(root, ".forexplore", "workspace-translations", "previous.json"),
+        JSON.stringify({ changes: [{ after: "prior implementation answer" }], verification: "private test evidence" }));
+      await mkdir(join(root, ".forexpore", "history-views"), { recursive: true });
+      await writeFile(join(root, ".forexpore", "history-views", "unselected.json"), "unselected history");
+      await mkdir(join(root, ".translation-verifier-tests"), { recursive: true });
+      await writeFile(join(root, ".translation-verifier-tests", "previous-tests.txt"), "private verifier tests");
       await mkdir(join(history, "source"));
       await writeFile(join(history, "source", "Legacy.cs"), "class Legacy { public int Answer() => 42; }\n");
       const historyContent = await readFile(join(history, "source", "Legacy.cs"));
@@ -36,6 +43,7 @@ mkdirSync('.git', { recursive: true });
 const history = readFileSync('history-view/source/Legacy.cs', 'utf8');
 const manifest = readFileSync('history-view/manifest.json', 'utf8');
 const hiddenWasVisible = existsSync('target/hidden.txt');
+if (existsSync('target/.forexplore') || existsSync('target/.forexpore') || existsSync('target/.translation-verifier-tests')) process.exit(11);
 const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
 if (!existsSync('CODEX_IMPLEMENTATION_PLAN.json')) {
   writeFileSync(output, JSON.stringify({ summary:'implement answer', mappings:[{source:'Legacy.Answer',targetPath:'src.cs',targetSymbol:'Answer'}], dependencies:[], steps:[{id:'answer',description:'implement answer',files:['src.cs'],dependsOn:[]}] }));
@@ -72,6 +80,97 @@ if (!existsSync('CODEX_IMPLEMENTATION_PLAN.json')) {
       await runtime.shutdown();
     } finally {
       await Promise.all([rm(root, { recursive: true, force: true }), rm(history, { recursive: true, force: true }), rm(scripts, { recursive: true, force: true })]);
+    }
+  });
+
+  it("uses three isolated history inputs in one Analyzer plan and one Translator run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-runtime-multi-test-"));
+    const history = await mkdtemp(join(tmpdir(), "forexplore-history-view-"));
+    const scripts = await mkdtemp(join(tmpdir(), "codex-multi-script-test-"));
+    try {
+      await writeFile(join(root, "src.cs"), "class Target { }\n");
+      const candidates = [1, 2, 3].map(index => ({ prefix: `candidate-${index}`, repositoryId: `repo-${index}`,
+        analysisRevision: `rev-${index}`, moduleId: `module-${index}`, name: `Module ${index}`, language: "C#" }));
+      const entries: Array<[string, string]> = [];
+      for (const candidate of candidates) {
+        await mkdir(join(history, "source", candidate.prefix), { recursive: true });
+        const content = `class Legacy { public int Value = ${candidate.prefix.at(-1)}; }`;
+        await writeFile(join(history, "source", candidate.prefix, "Same.cs"), content);
+        entries.push([`${candidate.prefix}/Same.cs`, createHash("sha256").update(content).digest("hex")]);
+      }
+      const identity = { repositoryId: "repo-1", analysisRevision: "rev-1", moduleId: "module-1" };
+      const manifestHash = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+      await writeFile(join(history, "manifest.json"), JSON.stringify({ ...identity, candidates, files: entries.map(([path, sha256]) => ({ path, sha256 })) }));
+      const codex = join(scripts, "fake-multi-codex.mjs");
+      await writeFile(codex, `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
+const prompt = process.argv.at(-1);
+for (const prefix of ['candidate-1','candidate-2','candidate-3']) {
+  if (!prompt.includes(prefix) || !readFileSync('history-view/source/' + prefix + '/Same.cs', 'utf8').includes(prefix.at(-1))) process.exit(10);
+}
+if (!existsSync('CODEX_IMPLEMENTATION_PLAN.json')) {
+  writeFileSync(output, JSON.stringify({summary:'combine three behaviors', mappings:[1,2,3].map(i=>({source:'candidate-'+i+'/Same.cs',targetPath:'src.cs',targetSymbol:'Answer'})), dependencies:[],steps:[{id:'implement',description:'combine the behaviors',files:['src.cs'],dependsOn:[]}]}));
+} else {
+  writeFileSync('target/src.cs','class Target { public int Answer() => 6; }');
+  writeFileSync('patch.txt', 'temporary');
+  writeFileSync(output,'done');
+  console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'cat history-view/source/candidate-2/Same.cs',exit_code:0}}));
+}
+`);
+      await chmod(codex, 0o755);
+      const runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root,
+        compileCommand: { executable: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5000 }, codexCommand: codex, maxModelTurns: 2 });
+      const run = runtime.start({ spec: "Combine three behaviors.", sourceLanguage: "C#", targetLanguage: "C#", context: [],
+        workspaceFiles: ["src.cs"], writeFiles: ["src.cs"], historyView: { root: history, ...identity, files: entries.map(([file]) => file), manifestHash, candidates } });
+      const result = await eventually(() => runtime.get(run.id), value => ["completed", "failed"].includes(value.status));
+      expect(result.status).toBe("completed");
+      expect(result.plan?.mappings).toHaveLength(3);
+      expect(Object.keys(result.plan!)).toEqual(["summary", "mappings", "dependencies", "steps"]);
+      expect(result.agent?.historyView?.candidates).toHaveLength(3);
+      expect(result.agent?.stages?.map(stage => stage.stage)).toEqual(["analyzer", "translator"]);
+      expect(result.agent?.stages?.at(-1)?.commands?.[0]?.command).toContain("candidate-2");
+      expect(await readFile(join(root, "src.cs"), "utf8")).toContain("Answer() => 6");
+      expect(await readFile(join(root, "patch.txt"), "utf8").catch(() => null)).toBeNull();
+      await runtime.shutdown();
+    } finally {
+      await Promise.all([root, history, scripts].map(root => rm(root, { recursive: true, force: true })));
+    }
+  });
+
+  it("rejects a merged history manifest that substitutes an unselected module", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-runtime-history-identity-"));
+    const history = await mkdtemp(join(tmpdir(), "forexplore-history-view-"));
+    const runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root,
+      compileCommand: { executable: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5000 },
+      codexCommand: process.execPath });
+    try {
+      await writeFile(join(root, "src.cs"), "class Target { }\n");
+      const candidates = [1, 2].map(index => ({ prefix: `candidate-${index}`, repositoryId: `repo-${index}`,
+        analysisRevision: `rev-${index}`, moduleId: `module-${index}` }));
+      const entries: Array<[string, string]> = [];
+      for (const candidate of candidates) {
+        await mkdir(join(history, "source", candidate.prefix), { recursive: true });
+        const content = `class Legacy${candidate.prefix.at(-1)} { }`;
+        await writeFile(join(history, "source", candidate.prefix, "Same.cs"), content);
+        entries.push([`${candidate.prefix}/Same.cs`, createHash("sha256").update(content).digest("hex")]);
+      }
+      const identity = { repositoryId: "repo-1", analysisRevision: "rev-1", moduleId: "module-1" };
+      const manifestHash = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+      await writeFile(join(history, "manifest.json"), JSON.stringify({ ...identity,
+        candidates: [candidates[0], { ...candidates[1], repositoryId: "unselected-repository" }],
+        files: entries.map(([path, sha256]) => ({ path, sha256 })) }));
+      const run = runtime.start({ spec: "Implement only from the selected modules.", sourceLanguage: "C#", targetLanguage: "C#",
+        context: [], workspaceFiles: ["src.cs"], writeFiles: ["src.cs"],
+        historyView: { root: history, ...identity, candidates, files: entries.map(([file]) => file), manifestHash } });
+      const result = await eventually(() => runtime.get(run.id), value => value.status === "failed");
+      expect(result.status).toBe("failed");
+      expect(result.events?.at(-1)?.message).toContain("History view candidate metadata mismatch");
+      expect(result.agent?.stages ?? []).toEqual([]);
+      expect(await readFile(join(root, "src.cs"), "utf8")).toBe("class Target { }\n");
+    } finally {
+      await runtime.shutdown();
+      await Promise.all([root, history].map(directory => rm(directory, { recursive: true, force: true })));
     }
   });
 

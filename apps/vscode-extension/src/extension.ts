@@ -100,6 +100,7 @@ interface ActiveMigrationRun {
   candidates: SearchCandidate[];
   /** Null until the user expressly clicks a candidate in this run. */
   selectedCandidateId: string | null;
+  selectedCandidateIds?: string[];
   adaptation: AdaptationResult | null;
 }
 
@@ -703,6 +704,9 @@ async function handlePanelMessage(
     case 'SELECT_CANDIDATE':
       selectCandidate(message.candidateId);
       return;
+    case 'SELECT_CANDIDATES':
+      selectCandidates(message.candidateIds);
+      return;
     case 'START_ADAPT':
       await startAdaptation(host, message.decisionNotes);
       return;
@@ -1068,6 +1072,7 @@ async function startSearch(
     run.requirement = message.requirement.trim();
     run.candidates = candidates;
     run.selectedCandidateId = null;
+    run.selectedCandidateIds = [];
     run.adaptation = null;
     publish({ type: 'SEARCH_RESULT', candidates: run.candidates });
   } catch (error) {
@@ -1086,10 +1091,25 @@ function selectCandidate(candidateId: string): void {
     // This is deliberately the only operation that changes this field. A
     // retrieval ranking never becomes consent by itself.
     run.selectedCandidateId = candidateId;
+    run.selectedCandidateIds = [candidateId];
     run.adaptation = null;
   } catch (error) {
     publishError(errorMessage(error, '候选选择无效'));
   }
+}
+
+function selectCandidates(candidateIds: string[]): void {
+  try {
+    const run = requireActiveRun();
+    if (run.target.kind !== 'module' || candidateIds.length > 3 || new Set(candidateIds).size !== candidateIds.length ||
+        candidateIds.some(id => !run.candidates.slice(0, 4).some(candidate => candidate.id === id && candidate.kind === 'module' && candidate.sourceModule))) {
+      throw new Error('请从当前 Top4 中选择 1～3 个历史模块。');
+    }
+    invalidateModuleTranslation();
+    run.selectedCandidateIds = [...candidateIds];
+    run.selectedCandidateId = candidateIds[0] ?? null;
+    run.adaptation = null;
+  } catch (error) { publishError(errorMessage(error, '候选选择无效')); }
 }
 
 async function startAdaptation(host: ExtensionHost, decisionNotes: string): Promise<void> {
@@ -1097,6 +1117,8 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
   try {
     const run = requireActiveRun();
     const candidate = run.selectedCandidateId ? selectedRunCandidate(run) : undefined;
+    const candidates = (run.selectedCandidateIds ?? (candidate ? [candidate.id] : []))
+      .map(id => run.candidates.find(item => item.id === id)!).filter(Boolean);
     if (!candidate && run.target.kind !== 'module') throw new Error('当前目标没有可用候选，只有模块目标支持按需求直实现。');
     log(`translation requested: target=${run.target.id} candidate=${candidate?.id ?? 'direct-fallback'} kinds=${run.target.kind}/${candidate?.kind ?? 'direct-translator'}`);
     if (run.target.kind === 'module' || candidate?.kind === 'module') {
@@ -1106,23 +1128,18 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
       const selectionVersion = moduleSelectionVersion;
       await host.services.ensureStarted();
       const scope = await (candidate ? (async () => {
-        const evidenceScopes = await host.codeIntelligence.historyEvidenceScopes(candidate.sourceModule!);
-        const historyView = await host.codeIntelligence.createHistoryModuleView({
-          workspaceRoot: run.workspaceFolder.uri.fsPath,
-          repositoryId: candidate.sourceModule!.repositoryId,
-          analysisRevision: candidate.sourceModule!.analysisRevision,
-          projectId: candidate.sourceModule!.projectId,
-          moduleId: candidate.sourceModule!.moduleId,
-          sourceFiles: candidate.sourceModule!.sourceFiles ?? [candidate.path],
-          relevanceTerms: [
-            run.target.name, run.target.path, run.target.signature,
-            ...(run.target.module?.sourceFiles ?? []), ...(run.target.module?.coreApis ?? []),
-            candidate.sourceModule!.name, candidate.sourceModule!.purpose ?? '',
-            ...(candidate.sourceModule!.coreApis ?? []),
-          ],
-        });
+        const historyView = await host.codeIntelligence.createHistoryModulesView({ workspaceRoot: run.workspaceFolder.uri.fsPath,
+          candidates: candidates.map(item => ({ repositoryId: item.sourceModule!.repositoryId,
+            analysisRevision: item.sourceModule!.analysisRevision, projectId: item.sourceModule!.projectId,
+            moduleId: item.sourceModule!.moduleId, name: item.sourceModule!.name, language: item.language,
+            sourceFiles: item.sourceModule!.sourceFiles ?? [item.path], relevanceTerms: [run.target.name, run.target.path,
+              run.target.signature, ...(run.target.module?.sourceFiles ?? []), ...(run.target.module?.coreApis ?? []),
+              item.sourceModule!.name, item.sourceModule!.purpose ?? '', ...(item.sourceModule!.coreApis ?? [])] })) });
+        const identities = historyView.candidates ?? [historyView];
+        const usableCandidates = candidates.filter(item => identities.some(view => view.repositoryId === item.sourceModule!.repositoryId &&
+          view.analysisRevision === item.sourceModule!.analysisRevision && view.projectId === item.sourceModule!.projectId && view.moduleId === item.sourceModule!.moduleId));
         return prepareModuleTranslationScope({ workspaceRoot: run.workspaceFolder.uri.fsPath,
-          target: run.target, candidate, requirement: run.requirement, decisionNotes, evidenceScopes, historyView });
+          target: run.target, candidates: usableCandidates, requirement: run.requirement, decisionNotes, historyView });
       })() : prepareDirectModuleTranslationScope({ workspaceRoot: run.workspaceFolder.uri.fsPath,
         target: run.target, requirement: run.requirement, decisionNotes }));
       if (activeRun !== run || selectionVersion !== moduleSelectionVersion) {
@@ -1135,7 +1152,7 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
       const moduleScopeId = workspaceTranslation.rememberModuleScope(scope);
       log(`module translation scope prepared: ${moduleScopeId} writeFiles=${scope.profile.writeFiles.length} `
         + `targetId=${run.target.id} candidateId=${candidate?.id ?? 'direct-fallback'}`);
-      publish({ type: 'MODULE_TRANSLATION_READY', targetId: run.target.id, candidateId: candidate?.id ?? 'direct-fallback', moduleScopeId });
+      publish({ type: 'MODULE_TRANSLATION_READY', targetId: run.target.id, candidateId: candidate?.id ?? 'direct-fallback', candidateIds: candidates.map(item => item.id), moduleScopeId });
       log('module translation handoff published'
         + `${TranslationPanel.current ? '' : ' (no panel is attached, so the reply was dropped)'}; `
         + 'the workspace translation service is not called before this handoff succeeds.');

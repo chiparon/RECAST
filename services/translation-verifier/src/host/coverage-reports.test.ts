@@ -48,6 +48,20 @@ describe("framework coverage reports", () => {
     expect(() => parseCobertura(xml.replace('filename="src/Price.cs"', 'filename="vendor/src/Price.cs"'), { path: "src/Price.cs", name: "Calculate" }, "/project")).toThrow();
     expect(() => parseCobertura(xml.replace('1/2', '3/2'), { path: "src/Price.cs", name: "Calculate" })).toThrow();
   });
+  it("uses a qualified C# API to disambiguate duplicate method names", () => {
+    const xml = `<coverage><sources><source>/project/src</source></sources><packages><package><classes>
+      <class name="A.OrderValidationPolicy" filename="Policies.cs"><methods><method name="Evaluate" signature="()"><lines><line number="1" hits="0" /></lines></method></methods></class>
+      <class name="A.AttachmentValidationPipeline" filename="Policies.cs"><methods><method name="Evaluate" signature="()"><lines><line number="2" hits="1" /></lines></method></methods></class>
+    </classes></package></packages></coverage>`;
+    expect(parseCobertura(xml, { path: "Policies.cs", name: "Evaluate", signature: "OrderValidationPolicy.Evaluate" }, "/project/src").executed).toBe(false);
+    expect(parseCobertura(xml, { path: "Policies.cs", name: "Evaluate", signature: "AttachmentValidationPipeline.Evaluate" }, "/project/src").executed).toBe(true);
+  });
+  it("accepts Coverlet namespace-qualified parameter types for source-level signatures", () => {
+    const xml = `<coverage><sources><source>/project/src</source></sources><packages><package><classes>
+      <class name="A.AttachmentValidationPipeline" filename="Policies.cs"><methods><method name="Evaluate" signature="(A.AttachmentInput)"><lines><line number="1" hits="1" /></lines></method></methods></class>
+    </classes></package></packages></coverage>`;
+    expect(parseCobertura(xml, { path: "Policies.cs", name: "Evaluate", signature: "AttachmentValidationPipeline.Evaluate(AttachmentInput attachment)" }, "/project/src").executed).toBe(true);
+  });
 });
 
 const subject = { path: "src/main/java/example/Order.java", name: "calculatePrice", signature: "public int calculatePrice(int quantity)" };

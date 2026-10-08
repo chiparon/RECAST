@@ -92,10 +92,13 @@ export function buildModuleTranslationScope(input: ModuleTranslationScopeInput):
   }
   const language = input.targetModule.language?.trim() || 'Text';
   if (input.historyView) {
-    const selected = input.candidates[0];
-    if (!selected || input.historyView.repositoryId !== selected.repositoryId ||
-        input.historyView.analysisRevision !== selected.analysisRevision ||
-        input.historyView.moduleId !== selected.moduleId) {
+    const identities = input.historyView.candidates ?? [input.historyView];
+    if (identities.length !== input.candidates.length || identities.some((view, index) => {
+      const selected = input.candidates[index];
+      return !selected || view.repositoryId !== selected.repositoryId ||
+        view.analysisRevision !== selected.analysisRevision || view.moduleId !== selected.moduleId ||
+        (view.projectId ?? '') !== (selected.projectId ?? '');
+    })) {
       throw new Error('历史视图与选中的候选模块不一致。');
     }
   }

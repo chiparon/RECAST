@@ -42,6 +42,17 @@ const adaptation: AdaptationResult = {
 };
 
 describe('workflowReducer', () => {
+  it('selects up to three modules from Top4 and clears selections on a new search', () => {
+    const candidates = [1, 2, 3, 4, 5].map(index => ({ ...candidate, id: `module-${index}`, kind: 'module' as const }));
+    const state = { ...initialWorkflowState, target: { ...target, kind: 'module' as const }, candidates };
+    const selected = workflowReducer(state, { type: 'SELECT_CANDIDATES', candidateIds: ['module-1', 'module-3', 'module-4'] });
+    expect(selected.selectedCandidateIds).toEqual(['module-1', 'module-3', 'module-4']);
+    expect(selected.selectedCandidateId).toBe('module-1');
+    expect(workflowReducer(selected, { type: 'SELECT_CANDIDATES', candidateIds: ['module-1', 'module-2', 'module-3', 'module-4'] })).toBe(selected);
+    expect(workflowReducer(selected, { type: 'SELECT_CANDIDATES', candidateIds: ['module-5'] })).toBe(selected);
+    expect(workflowReducer(selected, { type: 'SELECT_CANDIDATES', candidateIds: ['module-1', 'module-1'] })).toBe(selected);
+    expect(workflowReducer(selected, { type: 'SEARCH_SUCCESS', candidates }).selectedCandidateIds).toEqual([]);
+  });
   it('runs through target, search, adaptation and apply stages', () => {
     let state = workflowReducer(initialWorkflowState, { type: 'SELECT_TARGET', target });
     expect(state.stage).toBe('requirement');

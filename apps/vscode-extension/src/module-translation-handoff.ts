@@ -1,23 +1,28 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import type { ModuleTarget, SearchCandidate, WorkspaceEvidenceScope, WorkspaceHistoryView } from '@forexplore/contracts';
+import { MAX_SELECTED_HISTORY_MODULES, type ModuleTarget, type SearchCandidate, type WorkspaceEvidenceScope, type WorkspaceHistoryView } from '@forexplore/contracts';
 import { buildModuleTranslationScope } from './module-translation-scope';
 import type { WorkspaceTranslationModuleScope } from './workspace-translation-host';
 
 /** Both product hosts pass their own selected target and explicitly chosen candidate. */
 export async function prepareModuleTranslationScope(input: {
-  workspaceRoot: string; target: ModuleTarget; candidate: SearchCandidate;
+  workspaceRoot: string; target: ModuleTarget; candidate?: SearchCandidate;
+  candidates?: readonly SearchCandidate[];
   requirement: string; decisionNotes: string;
   includeCandidateContext?: boolean;
   evidenceScopes?: WorkspaceEvidenceScope[];
   historyView?: WorkspaceHistoryView;
 }): Promise<WorkspaceTranslationModuleScope> {
-  const { target, candidate } = input;
-  if (target.kind !== 'module' || !target.module || candidate.kind !== 'module' || !candidate.sourceModule) {
+  const { target } = input;
+  const candidates = input.candidates ?? (input.candidate ? [input.candidate] : []);
+  if (candidates.length < 1 || candidates.length > MAX_SELECTED_HISTORY_MODULES ||
+      new Set(candidates.map(item => JSON.stringify([item.sourceModule?.repositoryId, item.sourceModule?.analysisRevision, item.sourceModule?.projectId, item.sourceModule?.moduleId]))).size !== candidates.length) {
+    throw new Error('请选择 1～3 个不同的历史模块。');
+  }
+  if (target.kind !== 'module' || !target.module || candidates.some(candidate => candidate.kind !== 'module' || !candidate.sourceModule)) {
     throw new Error('模块翻译需要当前目标模块和已选中的历史模块候选。');
   }
-  const source = candidate.sourceModule;
   const readOnlyFiles = await discoverTargetReadOnlyFiles(input.workspaceRoot, target.module.sourceFiles);
   const scope = buildModuleTranslationScope({
     workspaceRoot: await realpath(input.workspaceRoot),
@@ -25,15 +30,18 @@ export async function prepareModuleTranslationScope(input: {
     requirement: [input.requirement.trim(), input.decisionNotes.trim()].filter(Boolean).join('\n补充约束：'),
     includeCandidateContext: input.includeCandidateContext,
     evidenceScopes: input.evidenceScopes,
-    candidates: [{ repositoryId: source.repositoryId, repositoryName: candidate.repository,
+    candidates: candidates.map(candidate => {
+      const source = candidate.sourceModule!;
+      return { repositoryId: source.repositoryId, repositoryName: candidate.repository,
       analysisRevision: source.analysisRevision, projectId: source.projectId, moduleId: source.moduleId,
       name: source.name, purpose: source.purpose, language: candidate.language,
       sourceFiles: source.sourceFiles ?? [candidate.path], coreApis: source.coreApis ?? [], dependsOn: source.dependsOn ?? candidate.dependencies,
-      preview: candidate.preview }],
+      preview: candidate.preview };
+    }),
     readOnlyFiles,
     ...(input.historyView ? { historyView: input.historyView } : {}),
   });
-  scope.profile.sourceLanguage = candidate.language;
+  scope.profile.sourceLanguage = candidates[0]!.language;
   const fileHashes: Record<string, string> = {};
   for (const file of scope.profile.writeFiles) {
     fileHashes[file] = await moduleFileHash(scope.profile.workspaceRoot, file);

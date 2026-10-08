@@ -19,7 +19,19 @@ export type FinishFunctionGroupResult = FinishFunctionGroupInput & {
 function mergeFunctionGroupTests(runs: readonly FunctionGroupTestRun[]): FunctionGroupTestRun {
   const latest = runs[runs.length - 1];
   if (!latest) throw new Error("Run run_function_group_tests before finish_function_group.");
-  const tests = runs.reduce(
+  // An agent commonly reruns the same generated test file after fixing an
+  // assertion or a fixture.  That retry supersedes the earlier observation;
+  // retaining the old failure would make a final passing run impossible to
+  // finish.  Keep separate test-file runs so a function group can still be
+  // covered by more than one file, while replacing exact-path retries with
+  // their newest Host result.
+  const latestByPathSet = new Map<string, FunctionGroupTestRun>();
+  for (const run of runs) {
+    const key = [...run.testPaths].sort().join("\0");
+    latestByPathSet.set(key, run);
+  }
+  const effectiveRuns = [...latestByPathSet.values()];
+  const tests = effectiveRuns.reduce(
     (total, run) => ({
       executed: total.executed + run.tests.executed,
       passed: total.passed + run.tests.passed,
@@ -29,7 +41,7 @@ function mergeFunctionGroupTests(runs: readonly FunctionGroupTestRun[]): Functio
     { executed: 0, passed: 0, failed: 0, skipped: 0 },
   );
   const byFunction = new Map<string, FunctionGroupTestRun["functions"][number]>();
-  for (const run of runs) {
+  for (const run of effectiveRuns) {
     for (const item of run.functions) {
       const key = `${item.target.path}\0${item.target.name}\0${item.target.signature ?? ""}`;
       const previous = byFunction.get(key);
@@ -42,12 +54,12 @@ function mergeFunctionGroupTests(runs: readonly FunctionGroupTestRun[]): Functio
   }
   return {
     ...latest,
-    status: runs.some((run) => run.status === "failure") ? "failure" : "success",
+    status: effectiveRuns.some((run) => run.status === "failure") ? "failure" : "success",
     tests,
-    testPaths: [...new Set(runs.flatMap((run) => run.testPaths))],
+    testPaths: [...new Set(effectiveRuns.flatMap((run) => run.testPaths))],
     functions: [...byFunction.values()],
-    failures: runs.flatMap((run) => run.failures),
-    reason: mergeReason(runs, [...byFunction.values()]),
+    failures: effectiveRuns.flatMap((run) => run.failures),
+    reason: mergeReason(effectiveRuns, [...byFunction.values()]),
   };
 }
 

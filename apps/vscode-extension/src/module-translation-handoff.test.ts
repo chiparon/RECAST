@@ -53,6 +53,18 @@ it('passes reviewed Java module evidence and both target files without a static 
   expect(task.type).toBe('WORKSPACE_TRANSLATION_ERROR');
 });
 
+it('keeps the target write scope when three reviewed candidates are selected', async () => {
+  const { input } = await setup();
+  const candidates = [1, 2, 3].map(index => ({ ...input.candidate, id: `candidate-${index}`,
+    sourceModule: { ...input.candidate.sourceModule!, repositoryId: `history-${index}`, moduleId: `module-${index}` } }));
+  const scope = await prepareModuleTranslationScope({ ...input, candidates });
+  expect(scope.profile.writeFiles).toEqual(['first.ts', 'second.ts']);
+  expect(scope.evidenceScopes).toHaveLength(3);
+  expect(scope.context.filter(item => item.id.startsWith('module-candidate:'))).toHaveLength(3);
+  await expect(prepareModuleTranslationScope({ ...input, candidates: [candidates[0]!, candidates[0]!] })).rejects.toThrow('不同的历史模块');
+  await expect(prepareModuleTranslationScope({ ...input, candidates: [...candidates, { ...candidates[0]!, sourceModule: { ...candidates[0]!.sourceModule!, moduleId: 'fourth' } }] })).rejects.toThrow('1～3');
+});
+
 it('rejects changes to a non-representative module file and permits retry after restoration', async () => {
   const { root, host, start, requests } = await setup();
   await writeFile(path.join(root, 'second.ts'), 'export const second = 42;');

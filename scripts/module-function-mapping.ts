@@ -7,6 +7,8 @@ import type {
 type ModuleApiSource = Pick<ProjectModule, "sourceFiles" | "coreApis"> | {
   sourceFiles?: readonly string[];
   coreApis?: readonly string[];
+  /** Optional target/source text used to resolve APIs whose class name differs from the file stem. */
+  fileContents?: Readonly<Record<string, string>>;
 };
 
 export type FunctionMappingDiagnostic = {
@@ -40,14 +42,13 @@ export function expandClassLevelFunctions(
 ): VerificationFunction[] {
   const expanded: VerificationFunction[] = [];
   for (const target of functions) {
-    if (target.name.includes(".") || target.signature?.includes("(")) {
+    if (target.name.includes(".") || target.signature?.includes("(") ||
+        (target.signature && /[.:]/.test(target.signature) && callableApiName(target.signature) === target.name)) {
       // Indexers often store a fully-qualified symbol as the signature but
       // omit its parameter list (`Namespace.Type.Method`). Coverage reports
       // provide the real method signature; retaining the incomplete indexer
       // text would make an otherwise unique method look unmatched.
-      expanded.push(target.signature && !target.signature.includes("(")
-        ? { path: target.path, name: target.name }
-        : { ...target });
+      expanded.push({ ...target });
       continue;
     }
     const source = readSource(target.path);
@@ -174,6 +175,27 @@ function resolveApiPath(rawApi: string, files: readonly string[]): string | unde
   return scored[0]!.path;
 }
 
+function resolveApiPathFromContents(
+  rawApi: string,
+  files: readonly string[],
+  fileContents: Readonly<Record<string, string>> | undefined,
+): string | undefined {
+  if (!fileContents || files.length === 0) return undefined;
+  const callable = callableApiName(rawApi);
+  const qualifiers = qualifierTokens(rawApi);
+  const className = qualifiers.at(-1);
+  const candidates = files.map((file) => {
+    const source = fileContents[file];
+    if (!source) return { file, score: 0 };
+    let score = 0;
+    if (className && new RegExp(`\\b(?:class|interface|record|struct)\\s+${escapeRegExp(className)}\\b`, "i").test(source)) score += 4;
+    if (callable && new RegExp(`\\b${escapeRegExp(callable)}\\s*\\(`, "i").test(source)) score += 1;
+    return { file, score };
+  }).sort((left, right) => right.score - left.score);
+  if (!candidates[0] || candidates[0].score === 0 || candidates[0].score === candidates[1]?.score) return undefined;
+  return candidates[0].file;
+}
+
 function resolveRelatedFile(targetPath: string | undefined, sourceFiles: readonly string[]): string | undefined {
   if (!targetPath || sourceFiles.length === 0) return undefined;
   const targetStem = fileStem(targetPath);
@@ -189,7 +211,7 @@ function describeApis(source: ModuleApiSource): ApiDescriptor[] {
         raw,
         name,
         compareName: normalizeCompareName(name),
-        path: resolveApiPath(raw, source.sourceFiles ?? []),
+        path: resolveApiPath(raw, source.sourceFiles ?? []) ?? resolveApiPathFromContents(raw, source.sourceFiles ?? [], source.fileContents),
       };
     });
 }
@@ -210,8 +232,9 @@ function asVerificationFunction(api: ApiDescriptor, fallbackPath: string | undef
 export function buildModuleFunctionMapping(
   targetModule: ProjectModule,
   sourceModule: ModuleApiSource | undefined,
+  targetFileContents?: Readonly<Record<string, string>>,
 ): ModuleFunctionMapping {
-  const targetApis = describeApis(targetModule);
+  const targetApis = describeApis({ ...targetModule, fileContents: targetFileContents });
   const sourceApis = sourceModule ? describeApis(sourceModule) : [];
   const sourceByName = new Map<string, ApiDescriptor[]>();
   const targetByName = new Map<string, ApiDescriptor[]>();

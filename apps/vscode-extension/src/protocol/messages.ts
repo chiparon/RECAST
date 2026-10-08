@@ -58,7 +58,7 @@ export type HostToWebviewMessage =
   | { type: 'INIT'; payload: PanelInitPayload }
   | { type: 'SEARCH_RESULT'; candidates: SearchCandidate[] }
   | { type: 'ADAPT_RESULT'; result: AdaptationResult }
-  | { type: 'MODULE_TRANSLATION_READY'; targetId: string; candidateId: string; moduleScopeId: string }
+  | { type: 'MODULE_TRANSLATION_READY'; targetId: string; candidateId: string; candidateIds?: string[]; moduleScopeId: string }
   | { type: 'APPLY_RESULT'; result: ApplyResult }
   | { type: 'REPOSITORY_STATUS'; statuses: RepositoryStatus[] }
   | { type: 'CODE_INTELLIGENCE_STATUS'; presentation: CodeIntelligencePresentation }
@@ -92,6 +92,7 @@ export type WebviewToHostMessage =
       topK: number;
     }
   | { type: 'SELECT_CANDIDATE'; candidateId: string }
+  | { type: 'SELECT_CANDIDATES'; candidateIds: string[] }
   | { type: 'START_ADAPT'; decisionNotes: string }
   | { type: 'APPLY_CURRENT_RUN' }
   | { type: 'CHECK_REPOSITORIES' }
@@ -231,6 +232,10 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
         message.topK >= 1 &&
         message.topK <= 10
       );
+    case 'SELECT_CANDIDATES':
+      return hasOnlyKeys(message, ['type', 'candidateIds']) && Array.isArray(message.candidateIds) &&
+        message.candidateIds.length <= 3 && new Set(message.candidateIds).size === message.candidateIds.length &&
+        message.candidateIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 256);
     case 'SELECT_CANDIDATE':
       return (
         hasOnlyKeys(message, ['type', 'candidateId']) &&
@@ -328,6 +333,8 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (message.type === 'MODULE_TRANSLATION_READY') {
     const ready = value as Record<string, unknown>;
     return isCorrelationIdentifier(ready.targetId) && isCorrelationIdentifier(ready.candidateId) &&
+      (ready.candidateIds === undefined || Array.isArray(ready.candidateIds) && ready.candidateIds.length <= 3 &&
+        new Set(ready.candidateIds).size === ready.candidateIds.length && ready.candidateIds.every(isCorrelationIdentifier)) &&
       typeof ready.moduleScopeId === 'string' && /^[a-f0-9]{64}$/.test(ready.moduleScopeId);
   }
   // The phase and outcome literals select the progress UI, so they are

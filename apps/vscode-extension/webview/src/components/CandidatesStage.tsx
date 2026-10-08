@@ -49,8 +49,11 @@ export function CandidatesStage({
   onAdapt,
 }: CandidatesStageProps) {
   const candidate = selectedCandidate(state);
+  const multiSelect = state.target?.kind === 'module';
+  const selectedIds = state.selectedCandidateIds?.length ? state.selectedCandidateIds : (candidate ? [candidate.id] : []);
+  const selected = state.candidates.filter(item => selectedIds.includes(item.id));
   const adapting = state.pending === 'adapt';
-  const modules = groupCandidatesByModule(state.candidates);
+  const modules = groupCandidatesByModule(multiSelect ? state.candidates.slice(0, 4) : state.candidates);
   const repositoryCount = new Set(state.candidates.map((item) => item.repository)).size;
   const targetLanguage = state.target?.language ?? '目标语言';
 
@@ -60,7 +63,7 @@ export function CandidatesStage({
         <header className="candidate-browser-header">
           <div>
             <span>02 · 检索结果</span>
-            <h1 id="candidate-browser-title">选择一个可复用实现</h1>
+            <h1 id="candidate-browser-title">{multiSelect ? '从 Top4 选择 1～3 个参考模块' : '选择一个可复用实现'}</h1>
             <p>{state.target?.name}</p>
           </div>
           <div className="candidate-result-stats" aria-label="检索结果规模">
@@ -85,13 +88,14 @@ export function CandidatesStage({
                 </header>
                 <div className="candidate-module-items">
                   {module.candidates.map(({ candidate: item, rank }) => {
-                    const active = item.id === state.selectedCandidateId;
+                    const active = multiSelect ? selectedIds.includes(item.id) : item.id === state.selectedCandidateId;
                     return (
                       <button
                         type="button"
                         key={item.id}
                         className={`candidate-item${active ? ' is-active' : ''}`}
                         aria-pressed={active}
+                        disabled={adapting || (multiSelect && !active && selectedIds.length >= 3)}
                         onClick={() => onSelectCandidate(item.id)}
                       >
                         <span className="candidate-rank">{String(rank).padStart(2, '0')}</span>
@@ -124,11 +128,11 @@ export function CandidatesStage({
         )}
       </section>
 
-      {candidate ? <CandidateDetail target={state.target} candidate={candidate} /> : (
+      {candidate ? (multiSelect ? selected : [candidate]).map(item => <CandidateDetail key={item.id} target={state.target} candidate={item} />) : (
         state.candidates.length > 0 ? (
           <section className="candidate-selection-prompt">
             <CheckCircle2 size={16} />
-            <span>从上方模块中选择一个具体实现，再确认适配。</span>
+            <span>{multiSelect ? '选择能够互补覆盖需求的 1～3 个模块，再准备翻译。' : '从上方模块中选择一个具体实现，再确认适配。'}</span>
           </section>
         ) : null
       )}
@@ -138,6 +142,7 @@ export function CandidatesStage({
           <span>适配目标</span>
           <strong>任意候选语言 → {targetLanguage}</strong>
           <small>由 {adaptationProvider} 根据目标签名、需求和所选实现生成适配代码。</small>
+          {multiSelect ? <small>已选择 {selected.length}/3 个参考模块</small> : null}
         </div>
         <label>
           <span>人工备注 / 额外约束 <small>可选</small></span>
