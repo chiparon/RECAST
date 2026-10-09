@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { CodexWorkspaceTranslationRuntime } from "./codex-workspace-translation-runtime";
@@ -223,6 +224,96 @@ writeFileSync(output, 'done');
       expect(completed.agent?.stages?.map(stage => stage.stage)).toEqual(["translator"]);
       expect(completed.plan?.summary).toContain("No usable historical candidate");
       expect(await readFile(join(root, "src.cs"), "utf8")).toContain("Answer() => 42");
+      await runtime.shutdown();
+    } finally {
+      await Promise.all([rm(root, { recursive: true, force: true }), rm(scripts, { recursive: true, force: true })]);
+    }
+  });
+
+  it("accepts a verifier repair that only fixes the Host-owned test harness", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-runtime-test-only-repair-"));
+    const scripts = await mkdtemp(join(tmpdir(), "codex-test-only-repair-script-"));
+    try {
+      await writeFile(join(root, "src.cs"), "class Target { }\n");
+      const codex = join(scripts, "fake-test-only-repair.mjs");
+      await writeFile(codex, `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
+if (!existsSync('CODEX_IMPLEMENTATION_PLAN.json')) {
+  writeFileSync(output, JSON.stringify({ summary:'implement answer', mappings:[{source:'requirement',targetPath:'src.cs',targetSymbol:'Answer'}], dependencies:[], steps:[{id:'answer',description:'implement answer',files:['src.cs'],dependsOn:[]}] }));
+} else {
+  const target = readFileSync('target/src.cs', 'utf8');
+  if (!target.includes('Answer')) writeFileSync('target/src.cs', 'class Target { public int Answer() => 42; }\\n');
+  writeFileSync(output, 'done');
+}
+`);
+      await chmod(codex, 0o755);
+      const runtime = new CodexWorkspaceTranslationRuntime({
+        workspaceRoot: root,
+        compileCommand: { executable: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5_000 },
+        codexCommand: codex,
+        maxModelTurns: 2,
+        timeoutMs: 30_000,
+      });
+      const run = runtime.start({
+        spec: "Implement Answer.", sourceLanguage: "C#", targetLanguage: "C#",
+        context: [{ id: "target", kind: "summary", content: "Target module" }], workspaceFiles: ["src.cs"], writeFiles: ["src.cs"],
+      });
+      const completed = await eventually(() => runtime.get(run.id), value => value.status === "completed");
+      expect(completed.status).toBe("completed");
+      const repaired = runtime.repairAfterVerification(run.id, {
+        attempt: 1, status: "failure", reason: "test-failed",
+        issue: { kind: "test", description: "The Host test fixture needed a correction." },
+      });
+      const afterRepair = await eventually(() => runtime.get(repaired.id), value => ["completed", "failed"].includes(value.status));
+      expect(afterRepair.status).toBe("completed");
+      expect(afterRepair.error).toBeUndefined();
+      expect(afterRepair.events?.some(event => event.message.includes("未产生生产代码 diff"))).toBe(true);
+      expect(await readFile(join(root, "src.cs"), "utf8")).toContain("Answer() => 42");
+      await runtime.shutdown();
+    } finally {
+      await Promise.all([rm(root, { recursive: true, force: true }), rm(scripts, { recursive: true, force: true })]);
+    }
+  });
+
+  it("rejects a production repair that produces no allowed source diff", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-runtime-production-repair-test-"));
+    const scripts = await mkdtemp(join(tmpdir(), "codex-production-repair-script-"));
+    try {
+      await writeFile(join(root, "src.cs"), "class Target { }\n");
+      const codex = join(scripts, "fake-production-noop-repair.mjs");
+      await writeFile(codex, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from 'node:fs';
+const output = process.argv[process.argv.indexOf('--output-last-message') + 1];
+const prompt = process.argv.at(-1) ?? '';
+if (prompt.includes('Analyzer Codex')) {
+  writeFileSync(output, JSON.stringify({ summary:'implement answer', mappings:[{source:'requirement',targetPath:'src.cs',targetSymbol:'Answer'}], dependencies:[], steps:[{id:'answer',description:'implement answer',files:['src.cs'],dependsOn:[]}] }));
+} else if (!readFileSync('target/src.cs', 'utf8').includes('Answer')) {
+  writeFileSync('target/src.cs', 'class Target { public int Answer() => 42; }\\n');
+  writeFileSync(output, 'done');
+} else writeFileSync(output, 'done');
+`);
+      await chmod(codex, 0o755);
+      const runtime = new CodexWorkspaceTranslationRuntime({
+        workspaceRoot: root,
+        compileCommand: { executable: process.execPath, args: ["-e", "process.exit(0)"], timeoutMs: 5_000 },
+        codexCommand: codex,
+        maxModelTurns: 2,
+        timeoutMs: 30_000,
+      });
+      const run = runtime.start({
+        spec: "Implement Answer.", sourceLanguage: "C#", targetLanguage: "C#",
+        context: [{ id: "target", kind: "summary", content: "Target module" }], workspaceFiles: ["src.cs"], writeFiles: ["src.cs"],
+      });
+      const completed = await eventually(() => runtime.get(run.id), value => value.status === "completed");
+      const repaired = runtime.repairAfterVerification(completed.id, {
+        attempt: 1, status: "failure", reason: "test-failed",
+        issue: { kind: "translation", description: "The production behavior is still incorrect." },
+      });
+      const failed = await eventually(() => runtime.get(repaired.id), value => ["completed", "failed"].includes(value.status));
+      expect(failed.status).toBe("failed");
+      expect(failed.error).toContain("after production verifier feedback");
+      expect(failed.verificationRepairs?.at(-1)?.status).toBe("failed");
       await runtime.shutdown();
     } finally {
       await Promise.all([rm(root, { recursive: true, force: true }), rm(scripts, { recursive: true, force: true })]);

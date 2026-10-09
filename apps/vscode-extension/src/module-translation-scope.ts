@@ -46,6 +46,8 @@ export interface ModuleTranslationScopeInput {
    * modifying.  The write set remains the target module's own files.
    */
   readOnlyFiles?: readonly string[];
+  /** Host-derived dependency-closure files allowed for a coordinated repair. */
+  relatedWriteFiles?: readonly string[];
 }
 
 export interface ModuleTranslationScope {
@@ -76,21 +78,28 @@ const maxPreviewChars = 24_000;
  * Turns "a selected target module plus its retrieved history candidates" into
  * the profile and context the translation runtime consumes.
  *
- * The write scope is the target module's own files only: a history candidate
- * can never widen it, because retrieving a module is not consent to edit it.
+ * The write scope starts with the target module's own files. The trusted host
+ * may add a bounded dependency closure for a coordinated repair; a history
+ * candidate can never widen it by itself.
  */
 export function buildModuleTranslationScope(input: ModuleTranslationScopeInput): ModuleTranslationScope {
   const workspaceRoot = input.workspaceRoot.trim();
   if (!workspaceRoot || !/^([A-Za-z]:[\\/]|[\\/]{2}|\/)/.test(workspaceRoot)) {
     throw new Error('模块翻译需要宿主提供绝对的目标工程根目录。');
   }
-  const writeFiles = unique(input.targetModule.sourceFiles.map(normalizeRelativePath).filter(Boolean));
+  const primaryWriteFiles = unique(input.targetModule.sourceFiles.map(normalizeRelativePath).filter(Boolean));
+  const relatedWriteFiles = unique((input.relatedWriteFiles ?? []).map(normalizeRelativePath).filter(Boolean))
+    .filter((file) => !primaryWriteFiles.includes(file));
+  const writeFiles = unique([...primaryWriteFiles, ...relatedWriteFiles]);
   const readOnlyFiles = unique((input.readOnlyFiles ?? []).map(normalizeRelativePath).filter(Boolean))
     .filter((file) => !writeFiles.includes(file));
   if (writeFiles.length === 0) {
     throw new Error('选中的目标模块没有文件清单，无法确定可修改范围。');
   }
   const language = input.targetModule.language?.trim() || 'Text';
+  const scopeWarnings = relatedWriteFiles.length
+    ? [`受控跨模块写范围：${relatedWriteFiles.length} 个依赖闭包文件可由本次任务一并修复。`]
+    : [];
   if (input.historyView) {
     const identities = input.historyView.candidates ?? [input.historyView];
     if (identities.length !== input.candidates.length || identities.some((view, index) => {
@@ -203,6 +212,7 @@ export function buildModuleTranslationScope(input: ModuleTranslationScopeInput):
       '',
       '## 约束',
       '- 只在 writeFiles 内实现；历史候选模块是证据，不是可修改目标。',
+      relatedWriteFiles.length ? `- 其中 ${relatedWriteFiles.length} 个文件属于宿主计算的直接依赖闭包，只能用于闭合当前模块调用链，不得扩展到其他文件。` : '',
       '- 复用目标工程既有结构与契约，不要为通过编译而删除实现或放宽构建配置。',
       '- 目标工程的 workspaceFiles 可用 read_file 读取且只读；query_evidence 只查询固定历史版本，不要用它查目标工程依赖。',
       `- 待实现的历史候选模块：${input.candidates.length ? input.candidates.map((item) => item.name).join('、') : '（尚未选择候选模块，仅依据已勾选的任务证据）'}`,
@@ -218,7 +228,7 @@ export function buildModuleTranslationScope(input: ModuleTranslationScopeInput):
     evidenceScopes,
     ...(input.historyView ? { historyView: structuredClone(input.historyView) } : {}),
     contextCharacters: characters,
-    warnings,
+    warnings: [...scopeWarnings, ...warnings],
   };
 }
 

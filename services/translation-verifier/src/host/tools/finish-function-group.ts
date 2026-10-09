@@ -19,6 +19,30 @@ export type FinishFunctionGroupResult = FinishFunctionGroupInput & {
 function mergeFunctionGroupTests(runs: readonly FunctionGroupTestRun[]): FunctionGroupTestRun {
   const latest = runs[runs.length - 1];
   if (!latest) throw new Error("Run run_function_group_tests before finish_function_group.");
+  // A verifier may first run a pre-existing/broken fixture and then replace
+  // it with one corrected test set. When the final Host run is successful and
+  // covers every target function, that final run is the authoritative test
+  // environment. Keeping the obsolete failure would turn a test-authoring
+  // repair into a production translation failure.
+  const allFunctionKeys = new Set(runs.flatMap((run) => run.functions.map((item) =>
+    `${item.target.path}\0${item.target.name}\0${item.target.signature ?? ""}`,
+  )));
+  const latestFunctionKeys = new Set(latest.functions.map((item) =>
+    `${item.target.path}\0${item.target.name}\0${item.target.signature ?? ""}`,
+  ));
+  const latestIsComplete = latest.status === "success" && latest.tests.executed > 0 && latest.tests.failed === 0 &&
+    latest.functions.length > 0 && latestFunctionKeys.size === allFunctionKeys.size &&
+    [...allFunctionKeys].every((key) => latestFunctionKeys.has(key)) &&
+    latest.functions.every((item) => item.status === "passed" && item.executed);
+  if (latestIsComplete) {
+    return {
+      ...latest,
+      testPaths: [...latest.testPaths],
+      functions: latest.functions.map((item) => ({ ...item })),
+      failures: [],
+      reason: "verified",
+    };
+  }
   // An agent commonly reruns the same generated test file after fixing an
   // assertion or a fixture.  That retry supersedes the earlier observation;
   // retaining the old failure would make a final passing run impossible to

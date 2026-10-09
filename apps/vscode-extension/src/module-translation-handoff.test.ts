@@ -65,6 +65,21 @@ it('keeps the target write scope when three reviewed candidates are selected', a
   await expect(prepareModuleTranslationScope({ ...input, candidates: [...candidates, { ...candidates[0]!, sourceModule: { ...candidates[0]!.sourceModule!, moduleId: 'fourth' } }] })).rejects.toThrow('1～3');
 });
 
+it('adds only a referenced target dependency to the interactive write scope', async () => {
+  const { root, input } = await setup();
+  await writeFile(path.join(root, 'first.ts'), 'import type { PaymentContract } from "./contract";\nexport const first = (value: PaymentContract) => value;');
+  await writeFile(path.join(root, 'contract.ts'), 'export interface PaymentContract { id: string; }');
+  const related: ModuleTarget = {
+    id: `module://${encodeURIComponent(JSON.stringify(['repo-target', 'revision-target', 'project-target', 'module-contract']))}`,
+    name: 'Contracts', kind: 'module', path: 'contract.ts', language: 'TypeScript', signature: 'PaymentContract',
+    module: { sourceFiles: ['contract.ts'], coreApis: ['PaymentContract'], dependsOn: [] },
+  };
+  const scope = await prepareModuleTranslationScope({ ...input, relatedModules: [related] });
+  expect(scope.profile.writeFiles).toEqual(['first.ts', 'second.ts', 'contract.ts']);
+  expect(scope.profile.workspaceFiles).toContain('contract.ts');
+  expect(scope.warnings?.some(warning => warning.includes('依赖闭包'))).toBe(true);
+});
+
 it('rejects changes to a non-representative module file and permits retry after restoration', async () => {
   const { root, host, start, requests } = await setup();
   await writeFile(path.join(root, 'second.ts'), 'export const second = 42;');

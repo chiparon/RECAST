@@ -169,7 +169,14 @@ export interface WorkspaceTranslationRun {
   acceptance: "compilation-only" | "behavior-verified";
   /** Latest host verifier failure awaiting repair by this same Translator. */
   latestVerificationFeedback?: WorkspaceVerificationFeedback;
-  verificationRepairs?: Array<{ at: string; attempt: number; feedback: WorkspaceVerificationFeedback; status: "requested" | "completed" | "failed" }>;
+  verificationRepairs?: Array<{
+    at: string;
+    attempt: number;
+    feedback: WorkspaceVerificationFeedback;
+    status: "requested" | "completed" | "failed";
+    /** Host-observed distinction: a repaired test fixture is not a production-code repair. */
+    disposition?: "production-code" | "test-environment";
+  }>;
   verification?: {
     command: WorkspaceCompileCommand;
     criteria: Array<{ path: string; hash: string }>;

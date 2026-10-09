@@ -20,6 +20,10 @@
  *   --database <name>    SeekDB database (default forexplore_asset_upgrade_20261004)
  *   --top-k <n>          retrieval width (default 4)
  *   --candidate-ranks <1,2,3>  select 1–3 ranks from Top4 (default 1)
+ *   --candidate-ranks-map <json>  per-module rank selections, keyed by module id
+ *   --keep-project-until-end  defer module rollback for a project-level evaluation
+ *   --integration-repair  run one bounded project-level Analyzer/Translator pass after all modules
+ *   --integration-feedback <json>  host/evaluator failure summary for that integration pass
  *   --reuse-plan         reuse the current module plan for repeatable comparisons
  *   --retrieval-from <report> reuse reviewed Top4 so ranking changes cannot change the selection
  *   --max-modules <n>    stop after n modules (default 0 = every module)
@@ -38,10 +42,10 @@
  * ADAPTATION_WORKSPACE_VERIFICATION is set, exactly as in production, where the host
  * declares criteria and the runtime may never supply its own; without it the module
  * is compilation-gated only and the report says so. Every real module run is
- * snapshotted before rollback, so the target returns to its skeleton after the
- * module-level verifier and its repair loop. The global hidden acceptance suite
- * is therefore deliberately skipped for this mode; evaluate the immutable
- * module snapshots instead of scoring an empty skeleton.
+ * snapshotted before rollback. In the normal mode the target returns to its
+ * skeleton after the module-level verifier and its repair loop; with
+ * --keep-project-until-end it stays assembled for one project-level evaluator
+ * or integration repair pass.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -62,7 +66,7 @@ import {
 } from '../apps/vscode-extension/src/code-intelligence-host.js';
 import { requestSemanticModuleMigrationProposal } from '../apps/vscode-extension/src/module-plan-client.js';
 import { HttpModuleHierarchyPlanner } from '../apps/vscode-extension/src/module-hierarchy-client.js';
-import { prepareDirectModuleTranslationScope, prepareModuleTranslationScope } from '../apps/vscode-extension/src/module-translation-handoff.js';
+import { prepareDirectModuleTranslationScope, prepareIntegrationTranslationScope, prepareModuleTranslationScope } from '../apps/vscode-extension/src/module-translation-handoff.js';
 import { WorkspaceTranslationHost } from '../apps/vscode-extension/src/workspace-translation-host.js';
 import { ConfiguredModelReranker } from '../apps/vscode-extension/src/model-reranker.js';
 import { CodexWorkspaceTranslationRuntime } from '../services/adaptation-service/src/codex-workspace-translation-runtime.js';
@@ -83,7 +87,9 @@ const flag = (name: string): boolean => process.argv.includes(`--${name}`);
 
 if (flag('help')) {
   console.log('usage: npx tsx scripts/run-target-module-pipeline.mts --target <path> [--database <name>] ' +
-    '[--top-k <n>] [--max-modules <n>] [--module <text>] [--dry-run] [--out <json>]');
+    '[--top-k <n>] [--candidate-ranks <1,2,3>] [--candidate-ranks-map <json>] ' +
+    '[--keep-project-until-end] [--integration-repair] [--integration-feedback <json>] ' +
+    '[--max-modules <n>] [--module <text>] [--repos <a,b,c>] [--dry-run] [--out <json>]');
   process.exit(0);
 }
 
@@ -97,10 +103,27 @@ const candidateRanks = (argument('candidate-ranks', '1') ?? '1').split(',').map(
 if (candidateRanks.length < 1 || candidateRanks.length > 3 || new Set(candidateRanks).size !== candidateRanks.length ||
     candidateRanks.some(rank => !Number.isInteger(rank) || rank < 1 || rank > 4 || rank > topK)) throw new Error('--candidate-ranks must select 1–3 distinct ranks from the retrieved Top4.');
 if (!Number.isInteger(topK) || topK < 1 || topK > 10) throw new Error('--top-k must be between 1 and 10 (Top-1 means 1).');
+const candidateRanksMapPath = argument('candidate-ranks-map');
+const candidateRanksByModule = new Map<string, number[]>();
+if (candidateRanksMapPath) {
+  const raw = JSON.parse(readFileSync(resolve(candidateRanksMapPath), 'utf8')) as Record<string, unknown>;
+  for (const [moduleId, value] of Object.entries(raw)) {
+    if (!Array.isArray(value)) throw new Error(`Candidate rank selection for ${moduleId} must be an array.`);
+    const ranks = value.map(Number);
+    if (ranks.length < 1 || ranks.length > 3 || new Set(ranks).size !== ranks.length ||
+        ranks.some(rank => !Number.isInteger(rank) || rank < 1 || rank > 4 || rank > topK)) {
+      throw new Error(`Candidate ranks for ${moduleId} must select 1–3 distinct ranks from the retrieved Top4.`);
+    }
+    candidateRanksByModule.set(moduleId, ranks);
+  }
+}
 const maxModules = Number(argument('max-modules', '0'));
 if (!Number.isInteger(maxModules) || maxModules < 0) throw new Error('--max-modules must be a non-negative integer.');
 const moduleFilter = argument('module')?.trim().toLocaleLowerCase();
 const dryRun = flag('dry-run');
+const keepProjectUntilEnd = flag('keep-project-until-end');
+const integrationRepair = flag('integration-repair') || process.env.RECAST_INTEGRATION_REPAIR === '1';
+const integrationFeedbackPath = argument('integration-feedback');
 const outputPath = resolve(argument('out', 'results/target-module-pipeline.json')!);
 const adaptationApiUrl = argument('adaptation', process.env.ADAPTATION_API_URL ?? 'http://127.0.0.1:8788')!;
 const semanticPort = Number(argument('semantic-port', process.env.FOREXPLORE_SEMANTIC_QUERY_PORT ?? '8790'));
@@ -118,6 +141,27 @@ function classifyVerifierFailure(description: string): {
     return { reason: 'model-failure', kind: 'unknown' };
   }
   return { reason: 'test-environment-failure', kind: 'environment' };
+}
+
+function classifyVerifierDisposition(result: FunctionGroupVerificationResult): ModuleReport['verificationDisposition'] {
+  if (result.status === 'success') return 'verified';
+  // The verifier Host owns this distinction. Do not infer a production defect
+  // from a test failure message when the terminal issue explicitly says that
+  // the test fixture or its environment is the problem.
+  if (result.issue?.kind === 'test' || result.issue?.kind === 'environment' ||
+      result.reason === 'test-environment-failure' || result.reason === 'coverage-unavailable') {
+    return 'test-environment';
+  }
+  const description = `${result.issue?.description ?? ''} ${result.reason ?? ''}`;
+  const lower = description.toLowerCase();
+  if (result.reason === 'agent-timeout' || result.reason === 'model-failure' || lower.includes('context budget') || lower.includes('turn budget')) {
+    return 'agent-uncertain';
+  }
+  if (result.reason === 'coverage-unavailable' || result.reason === 'test-environment-failure' ||
+      /test (?:file|fixture|environment)|compile(?:d|s)? .*test|coverage .*unavailable|authorized test root|assert\.throws|cs\d{4}/i.test(description)) {
+    return 'test-environment';
+  }
+  return 'production-defect';
 }
 
 /** History views are intentionally read-only while an Agent can see them. */
@@ -292,6 +336,10 @@ interface ModuleReport {
   sourceFiles: string[];
   requirement: string;
   writeFiles?: string[];
+  /** Host-derived files in the bounded cross-module repair closure. */
+  relatedWriteFiles?: string[];
+  /** Why a module verifier did not produce a production-code verdict. */
+  verificationDisposition?: 'production-defect' | 'test-environment' | 'agent-uncertain' | 'verified';
   candidate?: { repository: string; name: string; moduleId: string; language: string; score: number; hybrid?: number; rerank?: number; title: string };
   candidatesConsidered?: number;
   retrievalCandidates?: SearchCandidate[];
@@ -315,6 +363,7 @@ interface ModuleReport {
   functionMapping?: Pick<ModuleFunctionMapping, 'functions' | 'unmatchedFunctions' | 'diagnostics'>;
   translationVerification?: FunctionGroupVerificationResult;
   translationVerificationAttempts?: FunctionGroupVerificationResult[];
+  verificationRepairs?: WorkspaceTranslationRun['verificationRepairs'];
   verificationMode?: 'translation-fidelity' | 'requirement';
   agent?: WorkspaceTranslationRun['agent'];
   /** Analyzer's structured plan, retained for completeness review. */
@@ -340,6 +389,54 @@ interface ModuleReport {
 function safeSnapshotSegment(value: string): string {
   const normalized = value.trim().replaceAll(/[^a-zA-Z0-9._-]+/g, '-').replaceAll(/^-+|-+$/g, '');
   return normalized || 'module';
+}
+
+/**
+ * Compute a conservative write closure from the target source itself. Module
+ * proposals do not always carry dependency edges, so the host supplements
+ * them with namespace, declaration and file-stem references. Only direct
+ * dependencies are added; callers are handled by the project integration pass
+ * after all modules have been translated.
+ */
+async function relatedModuleWriteFiles(
+  root: string,
+  current: ProjectModule,
+  modules: readonly ProjectModule[],
+): Promise<string[]> {
+  const currentFiles = new Set(current.sourceFiles.map((file) => file.replaceAll('\\', '/')));
+  const contents = new Map<string, string>();
+  for (const file of currentFiles) {
+    try { contents.set(file, readFileSync(targetFilePath(root, file), 'utf8')); } catch { /* missing files remain outside the closure */ }
+  }
+  const references = [...contents.values()].join('\n');
+  const related: string[] = [];
+  for (const candidate of modules) {
+    if (candidate.id === current.id) continue;
+    const candidateFiles = candidate.sourceFiles.map((file) => file.replaceAll('\\', '/'));
+    const stems = candidateFiles.map((file) => (file.split('/').at(-1) ?? file).replace(/\.[^.]+$/, ''))
+      .filter((stem) => stem.length >= 3 && !/^(?:program|startup|global|domain|application|adapters?|policies?|ports?)$/i.test(stem));
+    const declarations = new Set<string>();
+    for (const file of candidateFiles) {
+      try {
+        const content = readFileSync(targetFilePath(root, file), 'utf8');
+        for (const match of content.matchAll(/\b(?:class|record|interface|enum|struct|delegate)\s+([A-Za-z_]\w*)/g)) declarations.add(match[1]!);
+      } catch { /* a missing candidate file cannot widen the write scope */ }
+    }
+    const apis = (candidate.coreApis ?? []).map((api) => api.replace(/[^A-Za-z0-9_.]/g, ' ').trim().split(/\s+/).at(-1) ?? '')
+      .filter((api) => api.length >= 3);
+    const tokens = [...new Set([...stems, ...declarations, ...apis])];
+    const isReferenced = tokens.some((token) => {
+      const pattern = new RegExp(`(?:\\busing\\s+[A-Za-z0-9_.]*${escapeRegExp(token)}|\\b${escapeRegExp(token)}\\b)`, 'm');
+      return pattern.test(references);
+    });
+    const explicitDependency = (current.dependsOn ?? []).includes(candidate.id);
+    if (isReferenced || explicitDependency) related.push(...candidateFiles);
+  }
+  return [...new Set(related)].sort((left, right) => left.localeCompare(right));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function targetFilePath(root: string, relativePath: string): string {
@@ -424,15 +521,96 @@ async function captureModuleSnapshot(args: {
   return { directory, manifest: manifestPath, codeDirectory, changedPaths: [...(args.entry.changedPaths ?? [])] };
 }
 
+type IntegrationFailureCase = { taskId?: string; conditionId?: string; description: string; error?: string };
+
+function readIntegrationFailureCases(path: string | undefined, modules: readonly ModuleReport[]): IntegrationFailureCase[] {
+  if (path) {
+    const value = JSON.parse(readFileSync(resolve(path), 'utf8')) as { Cases?: unknown; cases?: unknown };
+    const cases = Array.isArray(value.Cases) ? value.Cases : Array.isArray(value.cases) ? value.cases : [];
+    return cases.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+      .filter((item) => item.Passed === false || item.passed === false)
+      .map((item) => ({
+        ...(typeof item.TaskId === 'string' ? { taskId: item.TaskId } : typeof item.taskId === 'string' ? { taskId: item.taskId } : {}),
+        ...(typeof item.ConditionId === 'string' ? { conditionId: item.ConditionId } : typeof item.conditionId === 'string' ? { conditionId: item.conditionId } : {}),
+        description: typeof item.Description === 'string' ? item.Description : typeof item.description === 'string' ? item.description : '项目集成行为未通过',
+        ...(typeof item.Error === 'string' ? { error: item.Error } : typeof item.error === 'string' ? { error: item.error } : {}),
+      }));
+  }
+  return modules.flatMap((module) => {
+    const verification = module.translationVerification;
+    if (!verification || verification.status === 'success' || module.verificationDisposition !== 'production-defect') return [];
+    return [{ taskId: module.moduleId, description: verification.issue?.description ?? '模块行为验证失败', error: module.error }];
+  });
+}
+
+/** Map a failure summary to a small set of module owners. Test source is never
+ * exposed; only the host-provided descriptions and target module paths are used. */
+function integrationAffectedModules(cases: readonly IntegrationFailureCase[], modules: readonly ProjectModule[]): ProjectModule[] {
+  const text = cases.map((item) => `${item.taskId ?? ''} ${item.conditionId ?? ''} ${item.description} ${item.error ?? ''}`).join(' ').toLowerCase();
+  const groups: Array<{ pattern: RegExp; names: RegExp }> = [
+    { pattern: /attachment|quarantine|file[- ]safety/, names: /domain|polic|application|adapter/ },
+    { pattern: /workflow|event|dispatch|retry/, names: /domain|polic|application|adapter|telemetry|composition/ },
+    { pattern: /reconcil|due[- ]retry|idempotent|rescan/, names: /domain|application|adapter|telemetry/ },
+    { pattern: /order|plugin|reservation|rollback|audit/, names: /domain|polic|application|adapter|telemetry|composition/ },
+  ];
+  const matched = new Set<string>();
+  // Hidden evaluators and module verifiers often preserve the owning module id
+  // in a failure record. Prefer that host-owned identity before relying on
+  // English keywords, which may be absent from a localized description.
+  const explicitOwners = new Set(cases.flatMap((item) => [item.taskId, item.conditionId])
+    .filter((value): value is string => Boolean(value)).map((value) => value.toLowerCase()));
+  for (const module of modules) {
+    const identities = [module.id, module.name, ...(module.sourceFiles ?? [])]
+      .map((value) => value.toLowerCase());
+    if (identities.some((identity) => explicitOwners.has(identity))) matched.add(module.id);
+  }
+  if (matched.size > 0) return modules.filter((module) => matched.has(module.id));
+  for (const group of groups) if (group.pattern.test(text)) {
+    for (const module of modules) {
+      const identity = `${module.name} ${module.id} ${(module.sourceFiles ?? []).join(' ')}`.toLowerCase();
+      if (group.names.test(identity)) matched.add(module.id);
+    }
+  }
+  if (matched.size === 0) {
+    for (const module of modules) if (module.sourceFiles.some((file) => text.includes(file.toLowerCase()))) matched.add(module.id);
+  }
+  return modules.filter((module) => matched.has(module.id));
+}
+
+function integrationFailureSummary(cases: readonly IntegrationFailureCase[], modules: readonly ModuleReport[]): string {
+  const plans = modules.filter((module) => module.plan).map((module) => `${module.moduleId}: ${module.plan!.summary.slice(0, 700)}`).join('\n');
+  const failures = cases.map((item) => `- ${item.taskId ?? 'integration'} / ${item.conditionId ?? 'case'}: ${item.description}${item.error ? `（Host observed: ${item.error}）` : ''}`).join('\n');
+  return [
+    '# Project integration repair',
+    'The module translations are complete. Close only the cross-module behavior failures listed below.',
+    'The failure summaries are Host/evaluator observations; hidden test source and assertions are not available.',
+    'Module plan summaries:', plans || '（无可用计划摘要）',
+    'Observed failures:', failures || '- No failure case was supplied.',
+  ].join('\n');
+}
+
 const report = {
   generatedAt: new Date().toISOString(),
   dryRun,
   database,
   targetRoot,
-  topK, candidateRanks,
+  topK, candidateRanks, ...(candidateRanksMapPath ? { candidateRanksMapPath, candidateRanksByModule: Object.fromEntries(candidateRanksByModule) } : {}),
   gates: {} as { compile: string; verification: string | undefined; hiddenSuite: string },
   target: {} as { repositoryId?: string; analysisRevision?: string; projectId?: string; project?: string; modules?: number; hierarchy?: unknown },
   modules: [] as ModuleReport[],
+  integrationRepair: undefined as undefined | {
+    requested: boolean;
+    feedbackCases: Array<{ taskId?: string; conditionId?: string; description: string; error?: string }>;
+    writeFiles: string[];
+    readOnlyFiles: string[];
+    status?: WorkspaceTranslationRun['status'];
+    runId?: string;
+    changedPaths?: string[];
+    wallMs?: number;
+    error?: string;
+    plan?: WorkspaceTranslationPlan;
+    agent?: WorkspaceTranslationRun['agent'];
+  },
 };
 const snapshotRoot = resolve(`${outputPath}.snapshots`);
 await rm(snapshotRoot, { recursive: true, force: true });
@@ -617,7 +795,9 @@ try {
   const verification = resolveVerification();
   report.gates = { compile: `${compileCommand.executable} ${compileCommand.args.join(' ')}`,
     verification: verification ? `${verification.command.executable} ${verification.command.args.join(' ')}` : undefined,
-    hiddenSuite: 'skipped: each module is snapshotted and rolled back; evaluate module snapshots separately' };
+    hiddenSuite: keepProjectUntilEnd
+      ? 'deferred: run project-level hidden evaluator after all modules, then restore the project skeleton'
+      : 'skipped: each module is snapshotted and rolled back; evaluate module snapshots separately' };
   console.log(`\n  编译门槛: ${report.gates.compile}`);
   console.log(`  行为验证: ${report.gates.verification ?? '未配置（使用模块级 verifier；每个模块结束后恢复骨架）'}`);
 
@@ -669,6 +849,7 @@ try {
       .filter(Boolean).join('\n');
     const entry: ModuleReport = { moduleId: module.id, module: module.name, language, sourceFiles: module.sourceFiles,
       requirement, status: 'planned' };
+    const selectedRanks = candidateRanksByModule.get(module.id) ?? candidateRanks;
     report.modules.push(entry);
     console.log(`\n[${index + 1}/${selected.length}] ${module.name}（${module.sourceFiles.length} 文件, ${language}）`);
     try {
@@ -712,7 +893,7 @@ try {
         repository: candidate.repository, name: candidate.sourceModule?.name ?? candidate.title,
         moduleId: candidate.sourceModule?.moduleId, score: candidate.score.overall, language: candidate.language, summary: candidate.summary,
         sourceFiles: candidate.sourceModule?.sourceFiles ?? [], coreApis: candidate.sourceModule?.coreApis ?? [] }));
-      let selectedCandidates = candidateRanks.map(rank => candidates[rank - 1]).filter((candidate): candidate is SearchCandidate =>
+      let selectedCandidates = selectedRanks.map(rank => candidates[rank - 1]).filter((candidate): candidate is SearchCandidate =>
         Boolean(candidate?.kind === 'module' && candidate.sourceModule?.sourceFiles?.length));
       let top = selectedCandidates[0];
       entry.selectedCandidates = selectedCandidates.map(candidate => ({ id: candidate.id, rank: candidates.indexOf(candidate) + 1,
@@ -731,6 +912,10 @@ try {
       let historyViewRoot: string | undefined;
       let activeRun: WorkspaceTranslationRun | undefined;
       try {
+        const relatedWriteFiles = keepProjectUntilEnd
+          ? await relatedModuleWriteFiles(targetRoot, module, selected)
+          : [];
+        entry.relatedWriteFiles = relatedWriteFiles;
         let scope: Awaited<ReturnType<typeof prepareModuleTranslationScope>>;
         let historyView: Awaited<ReturnType<typeof codeIntelligence.createHistoryModulesView>> | undefined;
         if (top && !dryRun) {
@@ -764,12 +949,11 @@ try {
           }
         }
         scope = top ? await prepareModuleTranslationScope({ workspaceRoot: targetRoot, target, candidates: selectedCandidates,
-          requirement, decisionNotes: '', ...(historyView ? { historyView } : {}) })
-          : await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '' });
-      // Experiment hook, off by default. The product scope makes the module's own files the
-      // only readable ones, so an Analyzer cannot read the types those files reference and
-      // reports a blocker. RECAST_EXPERIMENT_WIDEN_READ_SCOPE=1 adds the rest of the target
-      // project as readable while the write scope stays the module's own files (variant A1).
+          requirement, decisionNotes: '', relatedWriteFiles, ...(historyView ? { historyView } : {}) })
+          : await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '', relatedWriteFiles });
+      // Experiment hook, off by default. A full-project run already adds a
+      // host-computed direct dependency closure to writeFiles. This opt-in only
+      // widens the read inventory for diagnostics; it never widens writes.
       if (process.env.RECAST_EXPERIMENT_WIDEN_READ_SCOPE === '1') {
         const [projectFiles] = await pool.query<Array<{ relativePath: string }>>(
           `SELECT f.relative_path AS relativePath FROM files f
@@ -853,11 +1037,16 @@ try {
             view.analysisRevision === source.analysisRevision && view.projectId === source.projectId && view.moduleId === source.moduleId)?.prefix;
           return { sourceFiles: (source.sourceFiles ?? []).map(file => prefix ? `${prefix}/${file}` : file), coreApis: source.coreApis ?? [] };
         });
-        const targetFileContents = Object.fromEntries(module.sourceFiles.map((file) => {
+        const verificationTargetFiles = entry.writeFiles ?? module.sourceFiles;
+        const targetFileContents = Object.fromEntries(verificationTargetFiles.map((file) => {
           try { return [file, readFileSync(join(targetRoot, file), 'utf8')]; }
           catch { return [file, '']; }
         }));
-        const mapping = buildModuleFunctionMapping(module, { sourceFiles: sourceModules.flatMap(source => source.sourceFiles),
+        // When a module has a bounded dependency closure, include those files
+        // in API-to-file resolution as well. A function such as
+        // OrderStateMachine.Transition may be referenced by the Domain task
+        // while its declaration lives in the Policies module.
+        const mapping = buildModuleFunctionMapping({ ...module, sourceFiles: verificationTargetFiles }, { sourceFiles: sourceModules.flatMap(source => source.sourceFiles),
           coreApis: sourceModules.flatMap(source => source.coreApis) }, targetFileContents);
         // Indexers may expose an exported class as a core API. Coverage is
         // method-based, so expand those target-only subjects before creating
@@ -939,6 +1128,7 @@ try {
           };
           }
           (entry.translationVerificationAttempts ??= []).push(entry.translationVerification);
+          entry.verificationDisposition = classifyVerifierDisposition(entry.translationVerification);
           console.log(`    #44 函数组验证第${verifierAttempt}轮：${entry.translationVerification.status}`);
           if (entry.translationVerification.status === 'success' || verifierAttempt >= maxAttempts) break;
           if (entry.translationVerification.issue?.kind === 'environment' || entry.translationVerification.reason === 'test-environment-failure') {
@@ -952,6 +1142,10 @@ try {
           if (entry.translationVerification.reason === 'agent-timeout' || entry.translationVerification.reason === 'model-failure') {
             console.log('    ↻ verifier Agent 未产出可用测试证据，重新启动 verifier');
             continue;
+          }
+          if (entry.verificationDisposition === 'test-environment' || entry.verificationDisposition === 'agent-uncertain') {
+            console.log(`    ! verifier 结果属于${entry.verificationDisposition === 'test-environment' ? '测试环境' : 'Agent 不确定性'}，不交给 Translator 修改生产代码`);
+            break;
           }
           const feedback = {
             attempt: verifierAttempt,
@@ -988,7 +1182,8 @@ try {
         entry.changedPaths = [...new Set(run.changes.map((change) => change.path))];
         entry.agent = run.agent;
         entry.plan = run.plan;
-        if (entry.translationVerification?.status === 'failure' && !entry.error) {
+        entry.verificationRepairs = run.verificationRepairs;
+        if (entry.translationVerification?.status === 'failure' && !entry.error && entry.verificationDisposition === 'production-defect') {
           entry.status = 'failed';
           entry.error = `verifier remained failed after ${entry.translationVerificationAttempts?.length ?? 1} attempt(s)`;
         }
@@ -1041,31 +1236,35 @@ try {
             entry.error = `模块 snapshot 失败：${snapshotFailure}`;
             console.log(`    ✗ ${entry.error}`);
           }
-          try {
-            const rolledBack = await translation.host.handle({
-              type: 'WORKSPACE_TRANSLATION', requestId: `rollback-${index}`, action: 'rollback', runId: activeRun.id,
-            });
-            if (rolledBack.type !== 'WORKSPACE_TRANSLATION_RESULT' || !rolledBack.run) {
-              throw new Error(`rollback failed: ${JSON.stringify(rolledBack)}`);
+          if (keepProjectUntilEnd) {
+            console.log(`    ↩ 已保存 snapshot，延后模块回滚，等待全项目 hidden test`);
+          } else {
+            try {
+              const rolledBack = await translation.host.handle({
+                type: 'WORKSPACE_TRANSLATION', requestId: `rollback-${index}`, action: 'rollback', runId: activeRun.id,
+              });
+              if (rolledBack.type !== 'WORKSPACE_TRANSLATION_RESULT' || !rolledBack.run) {
+                throw new Error(`rollback failed: ${JSON.stringify(rolledBack)}`);
+              }
+              activeRun = rolledBack.run;
+              const mismatches = await compareBaselineHashes(targetRoot, entry.baselineHashes ?? {});
+              entry.rollback = {
+                requested: true,
+                status: rolledBack.run.status,
+                restored: rolledBack.run.status === 'rolled-back' && mismatches.length === 0,
+                baselineMatches: mismatches.length === 0,
+                ...(mismatches.length ? { error: `rollback baseline mismatch: ${mismatches.join('; ')}` } : {}),
+              };
+              if (!entry.rollback.restored) throw new Error(entry.rollback.error ?? `rollback returned ${rolledBack.run.status}`);
+              if (!snapshotFailure) console.log(`    ↩ 已保存 snapshot，模块已恢复骨架（${entry.snapshot?.directory}）`);
+            } catch (error) {
+              const description = error instanceof Error ? error.message : String(error);
+              entry.rollback = { requested: true, restored: false, error: description };
+              stopAfterRollbackFailure = true;
+              entry.status = 'failed';
+              entry.error = `模块回滚失败，已停止后续模块：${description}`;
+              console.log(`    ✗ ${entry.error}`);
             }
-            activeRun = rolledBack.run;
-            const mismatches = await compareBaselineHashes(targetRoot, entry.baselineHashes ?? {});
-            entry.rollback = {
-              requested: true,
-              status: rolledBack.run.status,
-              restored: rolledBack.run.status === 'rolled-back' && mismatches.length === 0,
-              baselineMatches: mismatches.length === 0,
-              ...(mismatches.length ? { error: `rollback baseline mismatch: ${mismatches.join('; ')}` } : {}),
-            };
-            if (!entry.rollback.restored) throw new Error(entry.rollback.error ?? `rollback returned ${rolledBack.run.status}`);
-            if (!snapshotFailure) console.log(`    ↩ 已保存 snapshot，模块已恢复骨架（${entry.snapshot?.directory}）`);
-          } catch (error) {
-            const description = error instanceof Error ? error.message : String(error);
-            entry.rollback = { requested: true, restored: false, error: description };
-            stopAfterRollbackFailure = true;
-            entry.status = 'failed';
-            entry.error = `模块回滚失败，已停止后续模块：${description}`;
-            console.log(`    ✗ ${entry.error}`);
           }
           if (entry.snapshot) {
             try {
@@ -1094,6 +1293,80 @@ try {
       console.log('  ⏹ 模块 snapshot/回滚未能确认，停止后续模块以避免污染。');
       break;
     }
+  }
+  if (integrationRepair) {
+    const integrationStarted = Date.now();
+    const integrationCases = readIntegrationFailureCases(integrationFeedbackPath, report.modules);
+    const affected = integrationAffectedModules(integrationCases, selected);
+    const affectedIds = new Set(affected.map((module) => module.id));
+    const moduleEntries = report.modules.filter((entry) => affectedIds.has(entry.moduleId));
+    const explicitPaths = integrationCases.flatMap((item) => {
+      const matches = `${item.description} ${item.error ?? ''}`.match(/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:cs|java|kt|ts|tsx|js|py|go|rs)/g) ?? [];
+      return matches.map((path) => path.replaceAll('\\', '/'));
+    });
+    const writeFiles = [...new Set([
+      ...moduleEntries.flatMap((entry) => [...(entry.writeFiles ?? []), ...(entry.relatedWriteFiles ?? [])]),
+      ...explicitPaths.filter((path) => selected.some((module) => module.sourceFiles.includes(path))),
+    ])].filter((path) => existsSync(targetFilePath(targetRoot, path)));
+    const readOnlyFiles = [...new Set(selected.flatMap((module) => module.sourceFiles))].filter((path) => existsSync(targetFilePath(targetRoot, path)));
+    report.integrationRepair = {
+      requested: true,
+      feedbackCases: integrationCases,
+      writeFiles,
+      readOnlyFiles,
+      wallMs: 0,
+    };
+    if (!keepProjectUntilEnd) {
+      report.integrationRepair.error = '--integration-repair 需要 --keep-project-until-end，以便在统一项目状态上执行。';
+    } else if (!translation) {
+      report.integrationRepair.error = '翻译运行时未启动，无法执行项目集成修复。';
+    } else if (integrationCases.length === 0) {
+      report.integrationRepair.error = '没有 Host/evaluator 失败摘要，跳过项目集成修复。';
+    } else if (writeFiles.length === 0) {
+      report.integrationRepair.error = '失败摘要无法映射到任何宿主授权的生产文件。';
+    } else {
+      try {
+        const integrationLanguage = targetLanguage(selected[0]?.language, readOnlyFiles);
+        const scope = await prepareIntegrationTranslationScope({
+          workspaceRoot: targetRoot,
+          targetLanguage: integrationLanguage,
+          writeFiles,
+          readOnlyFiles,
+          requirement: integrationFailureSummary(integrationCases, report.modules),
+        });
+        const moduleScopeId = translation.host.rememberModuleScope(scope);
+        const described = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-describe', action: 'describe', moduleScopeId });
+        if (described.type !== 'WORKSPACE_TRANSLATION_RESULT' || !described.profile) throw new Error(`integration describe failed: ${JSON.stringify(described)}`);
+        const profileId = described.profile.profileId;
+        const startedRun = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-start', action: 'start', moduleScopeId, profileId });
+        if (startedRun.type !== 'WORKSPACE_TRANSLATION_RESULT' || !startedRun.run) throw new Error(`integration start failed: ${JSON.stringify(startedRun)}`);
+        let run = startedRun.run;
+        report.integrationRepair.runId = run.id;
+        const deadline = Date.now() + Number(process.env.ADAPTATION_WORKSPACE_TIMEOUT_MS ?? 1_800_000);
+        while (!['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status) && Date.now() < deadline) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
+          const polled = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-read', action: 'read', runId: run.id });
+          if (polled.type !== 'WORKSPACE_TRANSLATION_RESULT' || !polled.run) throw new Error(`integration read failed: ${JSON.stringify(polled)}`);
+          run = polled.run;
+          console.log(`    integration ${run.status} turns=${run.modelTurns} changes=${run.changes.length}`);
+        }
+        report.integrationRepair.status = run.status;
+        report.integrationRepair.changedPaths = [...new Set(run.changes.map((change) => change.path))];
+        report.integrationRepair.plan = run.plan;
+        report.integrationRepair.agent = run.agent;
+        if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) {
+          report.integrationRepair.error = `项目集成修复超时：${run.status}`;
+        } else if (run.error) {
+          report.integrationRepair.error = run.error;
+        }
+      } catch (error) {
+        report.integrationRepair.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+    report.integrationRepair.wallMs = Date.now() - integrationStarted;
+    console.log(`  集成修复：${report.integrationRepair.status ?? 'skipped'} ` +
+      `files=${report.integrationRepair.writeFiles.length} ${(report.integrationRepair.wallMs / 1000).toFixed(0)}s` +
+      (report.integrationRepair.error ? ` error=${report.integrationRepair.error.slice(0, 180)}` : ''));
   }
 } finally {
   codeIntelligence.dispose();

@@ -194,4 +194,38 @@ describe("function-group tools", () => {
     await expect(tool.execute(tool.parse({ testExecutionStatus: "success", translationStatus: "success" })))
       .resolves.toMatchObject({ functionGroupTest: { status: "success", tests: { executed: 2, passed: 2, failed: 0 } } });
   });
+
+  it("treats a complete final test set as authoritative after a broken fixture", async () => {
+    const target = { path: "src/A.py", name: "a" };
+    const context = {
+      state: {
+        functionGroupTests: [
+          {
+            status: "failure" as const,
+            testPaths: ["tests/old.test.py"],
+            tests: { executed: 0, passed: 0, failed: 1, skipped: 0 },
+            functions: [{ target, status: "unverified" as const, executed: false, lineCoverage: null, branchCoverage: null }],
+            failures: [{ message: "fixture did not compile" }], stdout: "", stderr: "compile error", exitCode: 1,
+          },
+          {
+            status: "success" as const,
+            testPaths: ["tests/repaired.test.py"],
+            tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
+            functions: [{ target, status: "passed" as const, executed: true, lineCoverage: 100, branchCoverage: null }],
+            failures: [], stdout: "ok", stderr: "", exitCode: 0,
+          },
+        ],
+      },
+      runtime: {
+        sourceLanguage: "Python", targetLanguage: "Python", sourceProjectPath: "/tmp/source", targetProjectPath: "/tmp/target",
+        sourcePath: "src/a.py", targetPath: target.path, targetFunction: target,
+        sourceDirectory: "src", targetDirectory: "src", testRoots: ["tests"], testRunner: "pytest" as const,
+        targetTest: { executable: "python3", args: ["-m", "pytest"] },
+      },
+      runner: { run: async () => { throw new Error("unused"); } },
+    } satisfies ToolContext;
+    const tool = createFinishFunctionGroupTool()(context);
+    const result = await tool.execute(tool.parse({ testExecutionStatus: "success", translationStatus: "success" }));
+    expect(result.functionGroupTest).toMatchObject({ status: "success", reason: "verified", failures: [], testPaths: ["tests/repaired.test.py"] });
+  });
 });

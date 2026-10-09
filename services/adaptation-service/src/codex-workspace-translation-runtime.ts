@@ -371,8 +371,33 @@ export class CodexWorkspaceTranslationRuntime {
         this.recordInvocation(run, "translator", "workspace-write", prompt, result, run.request.historyView?.files ?? []);
         if (result.exitCode !== 0) throw new Error(`Codex Translator exited with code ${result.exitCode}: ${result.stderr.slice(0, 600)}`);
         const changes = await this.diffStaging(stage, run.request.writeFiles);
-        if (!changes.length) throw new Error("Codex Translator completed without changing an allowed source file.");
-        this.applyChanges(run, changes);
+        if (!changes.length) {
+          const feedbackKind = run.latestVerificationFeedback?.issue?.kind;
+          const feedbackReason = run.latestVerificationFeedback?.reason;
+          const testEnvironmentOnly = repair && (
+            feedbackKind === "test" || feedbackKind === "environment" ||
+            feedbackReason === "test-environment-failure" || feedbackReason === "coverage-unavailable"
+          );
+          if (!testEnvironmentOnly) {
+            const reason = repair
+              ? "Codex Translator completed without changing an allowed source file after production verifier feedback."
+              : "Codex Translator completed without changing an allowed source file.";
+            throw new Error(reason);
+          }
+          // Verification repairs may only fix a Host-owned test harness or
+          // fixture. Those files are deliberately outside the Codex staging
+          // copy and are never part of writeFiles, so a successful repair can
+          // legitimately produce no production diff. Keep the existing
+          // implementation, record the distinction, and let the caller rerun
+          // the real verifier against the repaired harness.
+          const repairRecord = run.verificationRepairs?.at(-1);
+          if (repairRecord) repairRecord.disposition = "test-environment";
+          this.event(run, "translating", "verifier 修复轮未产生生产代码 diff，按测试环境修复处理");
+        } else {
+          const repairRecord = run.verificationRepairs?.at(-1);
+          if (repairRecord) repairRecord.disposition = "production-code";
+          this.applyChanges(run, changes);
+        }
       } finally {
         await removeStagingTree(stage.root);
       }

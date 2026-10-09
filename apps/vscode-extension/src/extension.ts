@@ -1127,6 +1127,11 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
       assertModuleDocumentsSaved(run);
       const selectionVersion = moduleSelectionVersion;
       await host.services.ensureStarted();
+      // The explorer snapshot is Host-owned. It supplies the complete target
+      // module inventory so scope preparation can add only directly referenced
+      // dependency files; the Webview's candidate selection cannot widen it.
+      const relatedModules = [...moduleExplorerTargets.values()]
+        .filter((item, index, all) => item.kind === 'module' && all.findIndex(other => other.id === item.id) === index);
       const scope = await (candidate ? (async () => {
         const historyView = await host.codeIntelligence.createHistoryModulesView({ workspaceRoot: run.workspaceFolder.uri.fsPath,
           candidates: candidates.map(item => ({ repositoryId: item.sourceModule!.repositoryId,
@@ -1139,9 +1144,9 @@ async function startAdaptation(host: ExtensionHost, decisionNotes: string): Prom
         const usableCandidates = candidates.filter(item => identities.some(view => view.repositoryId === item.sourceModule!.repositoryId &&
           view.analysisRevision === item.sourceModule!.analysisRevision && view.projectId === item.sourceModule!.projectId && view.moduleId === item.sourceModule!.moduleId));
         return prepareModuleTranslationScope({ workspaceRoot: run.workspaceFolder.uri.fsPath,
-          target: run.target, candidates: usableCandidates, requirement: run.requirement, decisionNotes, historyView });
+          target: run.target, candidates: usableCandidates, relatedModules, requirement: run.requirement, decisionNotes, historyView });
       })() : prepareDirectModuleTranslationScope({ workspaceRoot: run.workspaceFolder.uri.fsPath,
-        target: run.target, requirement: run.requirement, decisionNotes }));
+        target: run.target, relatedModules, requirement: run.requirement, decisionNotes }));
       if (activeRun !== run || selectionVersion !== moduleSelectionVersion) {
         // A silent return here leaves the panel waiting for a reply that will
         // never come, which is indistinguishable from a running translation.
