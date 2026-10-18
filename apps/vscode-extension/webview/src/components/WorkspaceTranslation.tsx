@@ -7,8 +7,10 @@ const statuses: Record<WorkspaceTranslationRun['status'], string> = { analyzing:
   completed: '执行完成，待审阅', failed: '执行失败', cancelled: '已取消', interrupted: '执行已中断', 'rolling-back': '正在回滚', 'rolled-back': '已回滚' };
 const running = new Set(['analyzing', 'translating', 'compiling', 'testing', 'rolling-back']);
 
-export function WorkspaceTranslation({ provider, moduleScopeId, onFinished, onRunChange }: {
+export function WorkspaceTranslation({ provider, moduleScopeId, onFinished, onRunChange, autoStart = false, onFeedback, compact = false }: {
   provider: TranslationProvider; moduleScopeId?: string;
+  autoStart?: boolean; onFeedback?: (message: string) => void;
+  compact?: boolean;
   onFinished?: (completed: boolean) => void; onRunChange?: (run?: WorkspaceTranslationRun) => void;
 }) {
   const [profile, setProfile] = useState<TranslationResult['profile']>();
@@ -19,9 +21,15 @@ export function WorkspaceTranslation({ provider, moduleScopeId, onFinished, onRu
   const [reviewed, setReviewed] = useState(false);
   const runChange = useRef(onRunChange); runChange.current = onRunChange;
   const generation = useRef(0);
+  const autoStarted = useRef(false);
+  const feedback = useRef(onFeedback); feedback.current = onFeedback;
   useEffect(() => { runChange.current?.(undefined); }, [moduleScopeId]);
-  useEffect(() => { let active = true; void provider({ action: 'describe', ...(moduleScopeId ? { moduleScopeId } : {}) }).then(result => { if (active) setProfile(result.profile); })
-    .catch(cause => { if (active) setError(String(cause.message)); }); return () => { active = false; generation.current++; }; }, [provider, moduleScopeId]);
+  useEffect(() => { let active = true; void provider({ action: 'describe', ...(moduleScopeId ? { moduleScopeId } : {}) }).then(result => {
+    if (!active) return;
+    if (!result.profile || (moduleScopeId && result.profile.moduleScopeId !== moduleScopeId)) throw new Error('宿主未返回当前模块的生成配置，请重新启动任务。');
+    setProfile(result.profile);
+  })
+    .catch(cause => { if (active) { const message = cause instanceof Error ? cause.message : '读取生成配置失败'; setError(message); feedback.current?.(message); } }); return () => { active = false; generation.current++; }; }, [provider, moduleScopeId]);
 
   async function action(name: 'start' | 'read' | 'cancel' | 'resume' | 'rollback') {
     const attempt = ++generation.current;
@@ -30,8 +38,9 @@ export function WorkspaceTranslation({ provider, moduleScopeId, onFinished, onRu
       const start = { action: name, profileId: profile?.profileId,
         ...(moduleScopeId ? { moduleScopeId } : {}) };
       const result = await provider(name === 'start' ? start : { action: name, runId: run?.id ?? resumeId.trim() });
+      if (!result.run) throw new Error('服务未返回运行记录，请按运行编号读取状态后再继续。');
       if (generation.current === attempt) { setRun(result.run); runChange.current?.(result.run); if (result.run) setResumeId(result.run.id); }
-    } catch (cause) { if (generation.current === attempt) setError(cause instanceof Error ? cause.message : '翻译操作失败'); }
+    } catch (cause) { if (generation.current === attempt) { const message = cause instanceof Error ? cause.message : '翻译操作失败'; setError(message); feedback.current?.(message); } }
     finally { if (generation.current === attempt) setBusy(false); }
   }
   useEffect(() => {
@@ -48,22 +57,28 @@ export function WorkspaceTranslation({ provider, moduleScopeId, onFinished, onRu
   const canStart = Boolean(profile) && !busy && moduleScoped;
   /** The service is working right now: the page shows the phase animation. */
   const active = Boolean(run && running.has(run.status));
+  useEffect(() => {
+    if (!autoStart || !canStart || run || autoStarted.current || error) return;
+    autoStarted.current = true;
+    void action('start');
+  }, [autoStart, canStart, run, error]);
 
-  return <section className="workspace-translation" aria-label="多文件生成与验收">
-    <h2>多文件生成与验收</h2>
-    {profile ? <><p>{profile.sourceLanguage} → {profile.targetLanguage} · {profile.behavioralVerification ? '已配置行为测试' : '仅编译检查'}{profile.label ? ` · ${profile.label}` : ''}</p>
+  const profileContent = profile ? <><p>{profile.sourceLanguage} → {profile.targetLanguage} · {profile.behavioralVerification ? '已配置行为测试' : '仅编译检查'}{profile.label ? ` · ${profile.label}` : ''}</p>
       <p>写入工作区：<code>{profile.workspaceRoot}</code></p><p>允许修改：{profile.writeFiles.join('、')}</p>
-      {profile.warnings?.length ? <ul className="context-gaps">{profile.warnings.map((warning, index) => <li key={`${warning}:${index}`}>{warning}</li>)}</ul> : null}</> : null}
+      {profile.warnings?.length ? <ul className="context-gaps">{profile.warnings.map((warning, index) => <li key={`${warning}:${index}`}>{warning}</li>)}</ul> : null}</> : null;
+  return <section className={`workspace-translation${compact ? ' is-compact' : ''}`} aria-label="多文件生成与验收">
+    {compact ? <h3>代码生成与验收</h3> : <h2>多文件生成与验收</h2>}
+    {compact && active ? <details><summary>生成范围与验证配置</summary>{profileContent}</details> : profileContent}
     {moduleScoped && !run ? <p>开始后会直接写入上述文件并执行验证；可查看每个文件的差异并回滚本次修改。</p> : null}
     {!run ? <button type="button" className="primary-action" disabled={!canStart} onClick={() => void action('start')}>{moduleScoped ? '开始模块翻译并回填' : '使用所选证据生成代码'}</button> : null}
     {active ? null : <div className="translation-actions"><label>运行编号<input aria-label="运行编号" value={resumeId} onChange={event => { setResumeId(event.target.value); setRun(undefined); }} disabled={busy || Boolean(run && running.has(run.status))} /></label>
       <button type="button" className="secondary-action" disabled={busy || !resumeId.trim()} onClick={() => void action('read')}>读取运行</button></div>}
-    {error ? <p role="alert">{error}</p> : null}
+    {error ? <p role="alert">{error}{run ? <button type="button" disabled={busy} onClick={() => void action('read')}>重试刷新</button> : null}</p> : null}
     {run ? <>
       {active
-        // While the service works, the animated phase view is the page: the run
-        // controls below stay reachable, but no form is in the way.
-        ? <TranslationProgress run={run} onCancel={() => void action('cancel')} />
+        // The workbench owns progress in compact mode; keep cancellation here.
+        ? compact ? <div className="translation-compact-controls"><span>模型调用 {run.modelTurns} 次</span><button type="button" className="secondary-action" disabled={busy} onClick={() => void action('cancel')}>取消运行</button></div>
+          : <TranslationProgress run={run} onCancel={busy ? undefined : () => void action('cancel')} />
         : <p role="status">{statuses[run.status]} · {run.acceptance === 'behavior-verified' ? '行为测试通过' : '尚无行为验收通过记录'}</p>}
       {run.error ? <p role="alert">{run.error}</p> : null}
       {active ? null : <div className="translation-actions">

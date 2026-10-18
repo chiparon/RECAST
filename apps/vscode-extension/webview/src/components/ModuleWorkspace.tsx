@@ -32,6 +32,8 @@ import type {
 type StatusFilter = 'all' | 'implemented' | 'unimplemented' | 'unknown';
 
 interface ModuleWorkspaceProps {
+  navigationLocked?: boolean;
+  navigationOpen?: boolean;
   primaryContent?: boolean;
   repositories?: ProjectPickerProps['repositories'];
   onSelectProject?: ProjectPickerProps['onSelect'];
@@ -58,6 +60,8 @@ interface ModuleWorkspaceProps {
 }
 
 export function ModuleWorkspace({
+  navigationLocked = false,
+  navigationOpen = true,
   primaryContent = false,
   repositories = [],
   onSelectProject,
@@ -156,8 +160,8 @@ export function ModuleWorkspace({
   const visibleTree = remoteFiltering ? searchPage.nodes : filteredTree;
 
   return (
-    <div className="module-layout">
-      <aside className="module-sidebar" aria-label="模块工作区导航">
+    <div className={`module-layout${navigationOpen ? '' : ' is-navigation-collapsed'}`}>
+      <aside id="workbench-resources" className="module-sidebar" hidden={!navigationOpen} aria-label="模块工作区导航" inert={navigationLocked}>
         <div className="workspace-switch" role="tablist" aria-label="模块数据源">
           <button
             type="button"
@@ -331,9 +335,9 @@ export function ModuleWorkspace({
             />
           ) : null}
           {settingsOpen || primaryContent || (mode === 'target' && !noTarget) ? children : null}
-          {!settingsOpen && selectedNode?.kind === 'module' && (primaryContent || mode === 'target')
+          {!settingsOpen && (!primaryContent || navigationOpen) && selectedNode?.kind === 'module' && (primaryContent || mode === 'target')
             ? <HistorySelectionPreview node={selectedNode} /> : null}
-          {!settingsOpen && workspace.projectId && (primaryContent || mode === 'target') ? (
+          {!settingsOpen && (!primaryContent || navigationOpen) && workspace.projectId && (primaryContent || mode === 'target') ? (
             <ProjectUnderstandingOverview workspace={workspace} onRetry={onRetry} />
           ) : null}
           {!settingsOpen && workspace.projectId && (primaryContent || mode === 'target') ? afterUnderstanding : null}

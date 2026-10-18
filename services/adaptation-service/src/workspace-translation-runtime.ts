@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
-  WorkspaceCompilation, WorkspaceCompileCommand, WorkspaceEvidenceQuery, WorkspaceTranslationRequest, WorkspaceTranslationRun,
+  WorkspaceCompilation, WorkspaceCompileCommand, WorkspaceEvidenceQuery, WorkspaceTranslationRequest, WorkspaceTranslationRun, WorkspaceTranslationPlan,
 } from "@forexplore/contracts";
 import type { DeepSeekToolMessage } from "./deepseek-client";
 import { compileWorkspace, validateWorkspaceCompileCommand } from "./workspace-compiler";
@@ -32,6 +32,8 @@ export interface WorkspaceTranslationRuntimeOptions {
   /** Budget per start/resume, including Analyzer and repair turns. */
   maxModelTurns?: number;
   timeoutMs?: number;
+  /** Trusted host checkpoint; never supplied by HTTP/model input. Runs before any Translator write. */
+  reviewPlan?: (plan: WorkspaceTranslationPlan, signal: AbortSignal) => Promise<string | void>;
 }
 
 const evidenceDefaults = { maxQueries: 6, maxExcerptsPerQuery: 6, maxTotalChars: 60_000 } as const;
@@ -482,6 +484,7 @@ export class WorkspaceTranslationRuntime {
         continue;
       }
       let transition = false;
+      let planForReview: WorkspaceTranslationPlan | undefined;
       for (const call of calls) {
         log(`${analyzer ? 'Analyzer' : 'Translator'} 调用工具：${call.name}`);
         signal.throwIfAborted();
@@ -531,6 +534,7 @@ export class WorkspaceTranslationRuntime {
             }
             case "submit_plan": {
               run.plan = parseWorkspaceTranslationPlan(args, run.request);
+              planForReview = structuredClone(run.plan);
               run.completedSteps = [];
               analyzer = false;
               transition = true;
@@ -638,6 +642,11 @@ export class WorkspaceTranslationRuntime {
         }
         this.save(run);
         messages.push({ role: "tool", toolCallId: call.id, content: JSON.stringify(result) });
+      }
+      if (planForReview) {
+        const notes = await this.options.reviewPlan?.(planForReview, signal);
+        if (notes?.trim()) { revisionReason = `Host-reviewed plan constraints: ${notes}`; log('宿主已确认修改计划并补充执行约束'); }
+        signal.throwIfAborted();
       }
       if (transition) {
         readHashes.clear();

@@ -1,6 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import { isHostToWebviewMessage, isWebviewToHostMessage, webviewMessageRejectionReason } from './messages';
 
+describe('Project pipeline intent boundary', () => {
+  const input = { repositoryId: 'repo', projectId: 'project', requirement: 'Implement gateway', mode: 'assisted', topK: 4 };
+  it('accepts project intent while refusing page-supplied paths, commands and oversized documents', () => {
+    expect(isWebviewToHostMessage({ type: 'START_PROJECT_PIPELINE', input })).toBe(true);
+    for (const extra of [{ workspaceRoot: 'C:/other' }, { command: 'arbitrary' }, { requirement: 'x'.repeat(8001) }, { mode: 'unknown' }]) {
+      expect(isWebviewToHostMessage({ type: 'START_PROJECT_PIPELINE', input: { ...input, ...extra } })).toBe(false);
+    }
+  });
+  it('only accepts explicit review tokens and opaque action targets', () => {
+    const action = { type: 'PROJECT_PIPELINE_ACTION', action: 'review', runId: '11111111-2222-3333-4444-555555555555', review: {
+      reviewId: 'aaaaaaaa-2222-3333-4444-555555555555', evidenceHash: 'a'.repeat(64), decision: 'approve', candidateId: null, notes: 'Keep contracts',
+    } };
+    expect(isWebviewToHostMessage(action)).toBe(true);
+    expect(isWebviewToHostMessage({ ...action, review: { ...action.review, source: 'untrusted patch' } })).toBe(false);
+    expect(isWebviewToHostMessage({ type: 'PROJECT_PIPELINE_ACTION', action: 'export-report', runId: action.runId, destination: 'C:/arbitrary' })).toBe(false);
+  });
+});
+
 describe('Module translation handoff boundary', () => {
   it('accepts the module target id the explorer actually produces', () => {
     // A module target id is a module:// URI (project-explorer.ts). Validating it

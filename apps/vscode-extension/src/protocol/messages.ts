@@ -1,4 +1,5 @@
 import { validateModelKey } from '../model-credential';
+import type { ProjectPipelineDecision, ProjectPipelineRun, ProjectPipelineStart } from '../project-pipeline-types';
 import { parseLlmSettings, type LlmSettings } from '@forexplore/contracts';
 import type {
   WorkspaceTranslationRun,
@@ -50,6 +51,7 @@ export type TargetWorkspaceOutcome = 'cancelled' | 'added' | 'completed' | 'fail
 
 /** Messages the extension host posts into the Webview. */
 export type HostToWebviewMessage =
+  | { type: 'PROJECT_PIPELINE_STATE'; run: ProjectPipelineRun }
   | { type: 'REQUEST_SETTINGS_SAVE' }
   | { type: 'REFERENCE_FOLDERS_SELECTED'; requestId: string; paths: string[]; error?: string }
   | { type: 'MODEL_KEY_STATUS'; configured: boolean; message?: string }
@@ -78,6 +80,8 @@ export type HostToWebviewMessage =
  * candidate objects, validation evidence, or patches to be written.
  */
 export type WebviewToHostMessage =
+  | { type: 'START_PROJECT_PIPELINE'; input: ProjectPipelineStart }
+  | { type: 'PROJECT_PIPELINE_ACTION'; runId: string; action: 'read' | 'cancel' | 'review' | 'open-output' | 'open-report' | 'export-report' | 'open-diff'; review?: ProjectPipelineDecision }
   | { type: 'SETTINGS_VISIBILITY_CHANGED'; open: boolean }
   | { type: 'BROWSE_REFERENCE_FOLDERS'; requestId: string }
   | { type: 'CONFIGURE_MODEL_KEY' }
@@ -111,6 +115,7 @@ export type WebviewToHostMessage =
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
+  'PROJECT_PIPELINE_STATE',
   'REQUEST_SETTINGS_SAVE',
   'REFERENCE_FOLDERS_SELECTED',
   'MODEL_KEY_STATUS',
@@ -174,6 +179,23 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as Record<string, unknown>;
   switch (message.type) {
+    case 'START_PROJECT_PIPELINE': {
+      if (!hasOnlyKeys(message, ['type', 'input']) || !message.input || typeof message.input !== 'object') return false;
+      const input = message.input as Record<string, unknown>;
+      return hasOnlyKeys(input, ['repositoryId', 'projectId', 'requirement', 'mode', 'topK']) && isOpaqueIdentifier(input.repositoryId) && isOpaqueIdentifier(input.projectId)
+        && typeof input.requirement === 'string' && input.requirement.trim().length > 0 && input.requirement.length <= 8000
+        && ['automatic', 'assisted'].includes(String(input.mode)) && Number.isInteger(input.topK) && Number(input.topK) >= 1 && Number(input.topK) <= 10;
+    }
+    case 'PROJECT_PIPELINE_ACTION': {
+      if (typeof message.runId !== 'string' || !/^[a-f0-9-]{36}$/.test(message.runId)) return false;
+      if (message.action !== 'review') return hasOnlyKeys(message, ['type', 'runId', 'action']) && ['read', 'cancel', 'open-output', 'open-report', 'export-report', 'open-diff'].includes(String(message.action));
+      if (!hasOnlyKeys(message, ['type', 'runId', 'action', 'review']) || !message.review || typeof message.review !== 'object') return false;
+      const review = message.review as Record<string, unknown>;
+      return Object.keys(review).every(key => ['reviewId', 'evidenceHash', 'decision', 'candidateId', 'notes'].includes(key))
+        && typeof review.reviewId === 'string' && /^[a-f0-9-]{36}$/.test(review.reviewId) && typeof review.evidenceHash === 'string' && /^[a-f0-9]{64}$/.test(review.evidenceHash)
+        && ['approve', 'reject'].includes(String(review.decision)) && typeof review.notes === 'string' && review.notes.length <= 8000
+        && (review.candidateId === undefined || review.candidateId === null || typeof review.candidateId === 'string' && review.candidateId.length > 0 && review.candidateId.length <= 256);
+    }
     case 'SETTINGS_VISIBILITY_CHANGED':
       return hasOnlyKeys(message, ['type', 'open']) && typeof message.open === 'boolean';
     case 'WORKSPACE_TRANSLATION': {

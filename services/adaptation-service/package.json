@@ -13,6 +13,8 @@
     ".": "./src/index.ts",
     "./git-wave-transaction": "./src/git-wave-transaction.ts",
     "./module-patch-preparer": "./src/module-patch-preparer.ts",
+    "./workspace-translation-runtime": "./src/workspace-translation-runtime.ts",
+    "./workspace-compiler": "./src/workspace-compiler.ts",
     "./module-wave-execution": "./src/module-wave-execution.ts"
   },
   "types": "./src/index.ts",
