@@ -121,7 +121,7 @@ export function PatchStage({ state, onApply, onBack, onOpenTarget }: PatchStageP
               <div className="diff-hunk-header">{hunk.header}</div>
               {hunk.lines.map((line, index) => (
                 <div className={`diff-line is-${line.type}`} key={`${index}-${line.content}`}>
-                  <span>{line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' '}</span>
+                  <span className="diff-line-marker">{line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' '}</span>
                   <code>{line.content || ' '}</code>
                 </div>
               ))}

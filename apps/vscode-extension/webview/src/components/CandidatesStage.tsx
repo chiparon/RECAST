@@ -236,6 +236,9 @@ function CandidateDetail({ target, candidate }: { target: ModuleTarget | null; c
 
 function CodeComparison({ target, candidate }: { target: ModuleTarget | null; candidate: SearchCandidate }) {
   const targetSource = target?.source?.trim();
+  const targetModule = candidate.sourceModule;
+  const moduleMatch = candidate.moduleMatch;
+
   return (
     <section className="code-comparison" aria-label="目标模块与参考实现代码对比">
       <header className="code-comparison-header">
@@ -246,6 +249,57 @@ function CodeComparison({ target, candidate }: { target: ModuleTarget | null; ca
           <Columns2 size={12} /> 参考实现 <small>{candidate.language}</small>
         </span>
       </header>
+
+      {targetModule && moduleMatch ? (
+        <div className="module-comparison-summary">
+          <div className="comparison-column">
+            <h4>目标需求</h4>
+            <p className="comparison-purpose">{target?.name}</p>
+            {target?.requirement && (
+              <p className="comparison-requirement">{target.requirement.slice(0, 120)}{target.requirement.length > 120 ? '...' : ''}</p>
+            )}
+          </div>
+          <div className="comparison-column">
+            <h4>参考模块职责</h4>
+            <p className="comparison-purpose">{targetModule.purpose || candidate.summary}</p>
+          </div>
+
+          <div className="comparison-column comparison-full-width">
+            <h4>接口匹配度</h4>
+            <div className="comparison-api-match">
+              <div className="api-match-stat">
+                <span className="api-match-label">已匹配</span>
+                <strong className="api-match-value is-matched">{moduleMatch.matchedApis.length}</strong>
+                <span className="api-match-apis">{moduleMatch.matchedApis.slice(0, 3).join('、')}{moduleMatch.matchedApis.length > 3 ? '...' : ''}</span>
+              </div>
+              <div className="api-match-stat">
+                <span className="api-match-label">待验证</span>
+                <strong className="api-match-value is-missing">{moduleMatch.missingApis.length}</strong>
+                <span className="api-match-apis">{moduleMatch.missingApis.slice(0, 3).join('、')}{moduleMatch.missingApis.length > 3 ? '...' : ''}</span>
+              </div>
+            </div>
+          </div>
+
+          {(candidate.dependencies.length > 0 || targetModule.dependsOn?.length) ? (
+            <div className="comparison-column comparison-full-width">
+              <h4>依赖对比</h4>
+              <div className="comparison-dependencies">
+                <div>
+                  <span className="dep-label">参考模块依赖：</span>
+                  <span className="dep-list">{candidate.dependencies.slice(0, 4).join('、')}{candidate.dependencies.length > 4 ? `等 ${candidate.dependencies.length} 项` : ''}</span>
+                </div>
+                {targetModule.dependsOn && targetModule.dependsOn.length > 0 ? (
+                  <div>
+                    <span className="dep-label">模块间依赖：</span>
+                    <span className="dep-list">{targetModule.dependsOn.slice(0, 4).join('、')}{targetModule.dependsOn.length > 4 ? `等 ${targetModule.dependsOn.length} 项` : ''}</span>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="code-comparison-panes">
         <div className="code-comparison-pane is-target">
           {targetSource ? (
