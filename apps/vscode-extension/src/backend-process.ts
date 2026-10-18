@@ -30,6 +30,7 @@ export class BackendProcess {
   private probePending = false;
   private disposed = false;
   readonly translationToken = process.env.ADAPTATION_WORKSPACE_TRANSLATION_TOKEN || randomBytes(32).toString('hex');
+  readonly moduleGenerationToken = process.env.ADAPTATION_MODULE_GENERATION_TOKEN || randomBytes(32).toString('hex');
   constructor(private readonly configuration: () => BackendLaunchConfiguration | Promise<BackendLaunchConfiguration>,
     private readonly log: (message: string) => void,
     private readonly launch: typeof spawn = spawn,
@@ -143,6 +144,7 @@ export class BackendProcess {
         ADAPTATION_PROJECT_ROOT: root, ADAPTATION_SKELETON_PROJECT_PATH: root,
         ADAPTATION_SEMANTIC_INDEX_ENABLED: 'true', SEMANTIC_QUERY_PORT_URL: `http://127.0.0.1:${config.semanticPort}`,
         ADAPTATION_WORKSPACE_TRANSLATION_ENABLED: 'true', ADAPTATION_WORKSPACE_TRANSLATION_TOKEN: this.translationToken,
+        ADAPTATION_MODULE_GENERATION_ENABLED: 'true', ADAPTATION_MODULE_GENERATION_TOKEN: this.moduleGenerationToken,
         ADAPTATION_WORKSPACE_COMPILE_COMMAND: JSON.stringify(compile),
         ADAPTATION_WORKSPACE_VERIFICATION: config.verification ? JSON.stringify(config.verification) : '',
       } });

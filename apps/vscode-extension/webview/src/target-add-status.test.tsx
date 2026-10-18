@@ -78,15 +78,15 @@ it('renders every target-selection phase and keeps a retry beside the failure', 
  */
 it('shows a live index state for a target the host is still indexing', async () => {
   const { container, post } = await mountPanel('migration');
-  expect(container.querySelector('.target-empty-state h1')?.textContent).toContain('选择目标工程');
+  expect(container.querySelector('.project-launch-bar')?.textContent).toContain('请先导入目标代码');
   await act(async () => post({ type: 'CODE_INTELLIGENCE_STATUS', presentation: { status: 'ready', storage: 'seekdb',
     repositories: [{ repositoryId: 'repo-1', displayName: 'engine', role: 'target', analysisStatus: 'indexing',
       activeRevision: null, selectedRevision: null, revisions: [], languages: [], projects: [],
       selectedProjectId: null, summary: { status: 'missing' } }] } }));
-  const empty = container.querySelector('.target-empty-state')!;
-  expect(empty.querySelector('h1')?.textContent).toContain('正在建立项目索引');
+  const empty = container.querySelector('.pipeline-import-feedback')!;
+  expect(empty.textContent).toContain('正在建立项目索引');
   expect(empty.textContent).toContain('engine');
-  expect(empty.querySelector('.is-spinning')).not.toBeNull();
+  expect(container.querySelector('[role="log"]')).toBeNull();
 });
 
 it('settles an import from the durable ready state when the final result message was lost', async () => {

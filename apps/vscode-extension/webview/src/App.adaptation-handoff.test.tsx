@@ -47,7 +47,14 @@ async function translationHandoff(reply: (target: ModuleTarget, candidate: Searc
     serviceStatus: { moduleSearch: 'connected', adaptation: 'connected', executionMode: 'real' },
     searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek' } }));
   const button = (text: string) => [...container.querySelectorAll('button')].find(item => item.textContent?.includes(text))!;
-  await act(async () => button('查找 4 个候选方案').click());
+  await act(async () => button('单模块调试').click());
+  await act(async () => {
+    const input = container.querySelector<HTMLTextAreaElement>('#pipeline-requirement')!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, '实现限额模块');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    button('半自动流水线').click();
+  });
+  await act(async () => button('开始执行').click());
   await act(async () => button('Java limit module').click());
   await act(async () => button('准备模块翻译与回填').click());
   return { container, sent, button, post };

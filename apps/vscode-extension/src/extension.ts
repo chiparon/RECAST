@@ -3,6 +3,7 @@ import { setModelCredentialProvider } from './local-fetch';
 import { BackendProcess, type BackendLaunchConfiguration } from './backend-process';
 import { ConfiguredModelReranker } from './model-reranker';
 import { WorkspaceTranslationHost } from './workspace-translation-host';
+import { ProjectPipelineHost } from './project-pipeline-host';
 import { prepareDirectModuleTranslationScope, prepareModuleTranslationScope } from './module-translation-handoff';
 import { localFetch } from './local-fetch';
 import { createHash } from 'node:crypto';
@@ -118,6 +119,8 @@ const workspaceTranslation = new WorkspaceTranslationHost(() => ({ url: backendE
 let moduleSelectionVersion = 0;
 function invalidateModuleTranslation(): void { moduleSelectionVersion++; workspaceTranslation.clearModuleScope(); }
 let activeRun: ActiveMigrationRun | null = null;
+let projectPipelineHost: ProjectPipelineHost | undefined;
+let projectPipelineRoot: string | undefined;
 let moduleExplorerTargets = new Map<string, ModuleTarget>();
 let moduleExplorerChildren: ExplorerChildrenIndex = new Map();
 let activeCodeIntelligenceHost: CodeIntelligenceHost | null = null;
@@ -177,7 +180,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let codeIntelligence: CodeIntelligenceHost;
   const backend = new BackendProcess(async () => {
     const configuration = vscode.workspace.getConfiguration('forexplore');
-    const workspaceRoot = activeRun?.workspaceFolder.uri.fsPath ?? selectedTargetWorkspaceFolders()[0]?.uri.fsPath
+    const workspaceRoot = projectPipelineRoot ?? activeRun?.workspaceFolder.uri.fsPath ?? selectedTargetWorkspaceFolders()[0]?.uri.fsPath
       ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspaceRoot) throw new Error('请先打开目标工程。');
     if (!vscode.workspace.isTrusted) throw new Error('请先信任工作区，再启动模型后端。');
@@ -237,6 +240,11 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
   activeCodeIntelligenceHost = codeIntelligence;
+  projectPipelineHost = new ProjectPipelineHost({ context, services, codeIntelligence,
+    endpoint: () => ({ url: backendEndpoint(), token: backend.moduleGenerationToken }), publish,
+    selectRoot: root => { projectPipelineRoot = root; },
+  });
+  context.subscriptions.push(projectPipelineHost);
   const moduleMigrationPreviews = new ModuleMigrationPreviewProvider();
   const moduleMigration = new ModuleMigrationHost({
     context,
@@ -650,7 +658,15 @@ async function handlePanelMessage(
   host: ExtensionHost,
   message: WebviewToHostMessage,
 ): Promise<void> {
+  if (projectPipelineHost?.busy && ['START_SEARCH', 'SELECT_CANDIDATE', 'START_ADAPT', 'APPLY_CURRENT_RUN', 'WORKSPACE_TRANSLATION',
+    'ADD_TARGET_WORKSPACE', 'SAVE_SETTINGS', 'SELECT_WORKSPACE_TARGET', 'SELECT_CODE_INTELLIGENCE_PROJECT', 'SELECT_CODE_INTELLIGENCE_REVISION', 'REFRESH_REPOSITORY', 'RETRY_PROJECT_ANALYSIS'].includes(message.type)) {
+    throw new Error('项目流水线运行中，工程、模型设置和模块写入范围已锁定；请完成或取消后再切换。');
+  }
   switch (message.type) {
+    case 'START_PROJECT_PIPELINE':
+    case 'PROJECT_PIPELINE_ACTION':
+      if (!projectPipelineHost) throw new Error('项目流水线宿主尚未初始化。');
+      await projectPipelineHost.handle(message); return;
     case 'WORKSPACE_TRANSLATION': {
       const panel = TranslationPanel.current;
       if (!vscode.workspace.isTrusted) { panel?.post({ type: 'WORKSPACE_TRANSLATION_ERROR', requestId: message.requestId, message: '请先信任工作区。' }); return; }
@@ -692,6 +708,7 @@ async function handlePanelMessage(
       return;
     case 'READY':
       await publishModelKeyStatus(host.context);
+      await projectPipelineHost?.restore();
       return;
     case 'CONFIGURE_MODEL_KEY':
     case 'CLEAR_MODEL_KEY':

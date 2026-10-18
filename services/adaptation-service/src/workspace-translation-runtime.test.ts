@@ -46,6 +46,31 @@ async function finished(runtime: WorkspaceTranslationRuntime, id: string) {
 }
 
 describe('workspace behavioral acceptance', () => {
+  it('waits for host plan review before writes and forwards review constraints to Translator', async () => {
+    let release!: (notes: string) => void;
+    let reviewing = false;
+    const { root, options } = await setup(scripted([call('submit_plan', plan), messages => {
+      expect(JSON.stringify(messages)).toContain('保持公开接口');
+      return call('read_file', { path: 'target.mjs' });
+    }, ...prefix().slice(2), call('finish')]), false);
+    const runtime = new WorkspaceTranslationRuntime({ ...options, reviewPlan: async () => { reviewing = true; return new Promise<string>(resolve => { release = resolve; }); } });
+    runtimes.push(runtime);
+    const started = runtime.start(request);
+    for (let count = 0; count < 100 && !reviewing; count++) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(reviewing).toBe(true); expect(await readFile(join(root, 'target.mjs'), 'utf8')).toBe('// original\n');
+    release('保持公开接口');
+    expect((await finished(runtime, started.id)).status).toBe('completed');
+  });
+
+  it('stops generation when the host rejects its modification plan', async () => {
+    const { root, options } = await setup(scripted([call('submit_plan', plan)]), false);
+    const runtime = new WorkspaceTranslationRuntime({ ...options, reviewPlan: async () => { throw new Error('Plan rejected by reviewer'); } });
+    runtimes.push(runtime);
+    const result = await finished(runtime, runtime.start(request).id);
+    expect(result).toMatchObject({ status: 'failed', error: 'Plan rejected by reviewer' });
+    expect(await readFile(join(root, 'target.mjs'), 'utf8')).toBe('// original\n');
+  });
+
   it('rejects compile-only completion, repairs a real failed behavior, and supports restart-safe rollback', async () => {
     const { runtime, root, options } = await setup(scripted([...prefix(bad), call('run_tests'), call('finish'), messages => {
       expect(messages.at(-1)?.content).toContain('passing behavioral verification');
