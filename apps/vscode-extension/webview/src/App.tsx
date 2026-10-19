@@ -1,30 +1,23 @@
-import { LLM_PRESETS } from '@forexplore/contracts';
 import { browseReferenceFolders } from './reference-folder-picker';
 import { RecastLogo } from './components/RecastLogo';
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { GitBranch, Settings2 } from 'lucide-react';
+import { PanelLeft, Settings2 } from 'lucide-react';
 import { createTranslationProvider } from './workspace-translation-provider';
-import { AgentRunLog, WorkspaceTranslation } from './components/WorkspaceTranslation';
-import type { WorkspaceTranslationRun } from '@forexplore/contracts';
+import { PipelineWorkbench } from './components/PipelineWorkbench';
+import { ProjectPipelineWorkbench } from './components/ProjectPipelineWorkbench';
+import type { ProjectPipelineRun } from '../../src/project-pipeline-types';
 import type { CodeIntelligencePresentation, RepositoryStatus, ServiceStatus } from '../../src/ui-types';
 import type { ModuleExplorerMode, ModuleExplorerNode } from '../../src/ui-types';
 import {
   initialWorkflowState,
-  getStepStatus,
   selectedCandidate,
   workflowReducer,
-  type WorkflowStage,
   type WorkflowState,
 } from '@forexplore/workflow-core';
 import type { PanelInitPayload, PanelSettingsPresentation } from '../../src/protocol/messages';
-import { AdaptationStage } from './components/AdaptationStage';
-import { CandidatesStage } from './components/CandidatesStage';
 import { FooterStatus } from './components/FooterStatus';
-import { PatchStage } from './components/PatchStage';
-import { RequirementStage } from './components/RequirementStage';
-import { StepRail } from './components/StepRail';
 import { ModuleWorkspace } from './components/ModuleWorkspace';
-import { idleTargetAdd, type TargetAddUiState } from './components/ProjectPicker';
+import { idleTargetAdd, targetAddMessage, type TargetAddUiState } from './components/ProjectPicker';
 import { SettingsPanel } from './components/SettingsPanel';
 import { errorEvent } from './errors';
 import { createMessageBus, type MessageBus } from './vscode-api';
@@ -114,10 +107,13 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [refreshingExplorer, setRefreshingExplorer] = useState(false);
   const [targetAdd, setTargetAdd] = useState<TargetAddUiState>(idleTargetAdd);
-  const [visibleStep, setVisibleStep] = useState<WorkflowStage>('target');
   const [moduleTranslation, setModuleTranslation] = useState<{ moduleScopeId: string } | null>(null);
-  const [translationRun, setTranslationRun] = useState<WorkspaceTranslationRun>();
+  const [pipelineActive, setPipelineActive] = useState(false);
+  const [executionScope, setExecutionScope] = useState<'project' | 'module'>('project');
+  const [projectRun, setProjectRun] = useState<ProjectPipelineRun>();
+  const [importingHistory, setImportingHistory] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [resourcesOpen, setResourcesOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsSaveMessage, setSettingsSaveMessage] = useState('');
   useEffect(() => {
@@ -144,6 +140,10 @@ export default function App() {
     bus.post({ type: 'READY' });
     return bus.subscribe((message) => {
       switch (message.type) {
+        case 'PROJECT_PIPELINE_STATE':
+          setProjectRun(message.run);
+          setError(null);
+          break;
         case 'REQUEST_SETTINGS_SAVE':
           window.dispatchEvent(new Event('recast-save-settings'));
           break;
@@ -163,7 +163,6 @@ export default function App() {
           setError(null);
           if (message.payload.target && targetIdRef.current !== message.payload.target.id) {
             dispatch({ type: 'SELECT_TARGET', target: message.payload.target });
-            setVisibleStep('requirement');
           }
           dispatch({ type: 'SET_TOP_K', value: message.payload.settings.topK });
           break;
@@ -240,7 +239,6 @@ export default function App() {
           setPayload((current) => current ? { ...current, target: message.target } : current);
           dispatch({ type: 'SELECT_TARGET', target: message.target });
           dispatch({ type: 'SET_TOP_K', value: settingsRef.current.topK });
-          setVisibleStep('requirement');
           setExplorerMode('target');
           setSelectedNodeId(null);
           setSettingsOpen(false);
@@ -250,7 +248,6 @@ export default function App() {
           dispatch({ type: 'RESET' });
           setPayload((current) => current ? { ...current, target: null } : current);
           setSelectedNodeId(null);
-          setVisibleStep('target');
           break;
         case 'SETTINGS_UPDATED':
           setSettingsSaveMessage('设置已保存');
@@ -274,30 +271,28 @@ export default function App() {
     });
   }, [bus]);
 
-  useEffect(() => {
-    setVisibleStep(state.stage === 'complete' ? 'patch' : state.stage);
-  }, [state.stage]);
-
   // A reply that never arrives must not look like an eternal translation. The
   // host is still free to finish: a late result still moves this panel on.
   useEffect(() => {
-    if (state.pending !== 'adapt') return;
+    if (state.pending !== 'adapt' && state.pending !== 'search') return;
+    const operation = state.pending;
     const timer = setTimeout(() => {
-      const reason = '宿主在 10 分钟内没有回复翻译请求；已复位本次等待。若宿主随后返回结果，面板会自动更新。';
+      const reason = `宿主在 10 分钟内没有回复${operation === 'search' ? '检索' : '翻译'}请求；已复位本次等待。若宿主随后返回结果，面板会自动更新。`;
       setError(reason);
-      dispatch({ type: 'ADAPT_FAILURE', message: reason });
+      dispatch({ type: operation === 'search' ? 'SEARCH_FAILURE' : 'ADAPT_FAILURE', message: reason });
     }, 600_000);
     return () => clearTimeout(timer);
   }, [state.pending]);
 
-  function handleSearch(): void {
+  function handleSearch(requirement: string): void {
     if (!state.target) return;
+    dispatch({ type: 'SET_REQUIREMENT', value: requirement });
     setModuleTranslation(null);
     setError(null);
     dispatch({ type: 'SEARCH_START' });
     bus.post({
       type: 'START_SEARCH',
-      requirement: state.requirement.trim(),
+      requirement: requirement.trim(),
       topK: state.topK,
     });
   }
@@ -344,14 +339,6 @@ export default function App() {
 
   function handleOpenTarget(): void {
     bus.post({ type: 'OPEN_TARGET' });
-  }
-
-  function handleCopyTargetPath(): void {
-    bus.post({ type: 'COPY_TARGET_PATH' });
-  }
-
-  function handleRevealTargetInExplorer(): void {
-    bus.post({ type: 'REVEAL_TARGET_IN_EXPLORER' });
   }
 
   function handleRefreshModuleExplorer(): void {
@@ -414,11 +401,18 @@ export default function App() {
     }
   }
 
-  function handleStepChange(step: WorkflowStage): void {
-    if (getStepStatus(step, state.stage) === 'upcoming') return;
-    setExplorerMode('target');
-    setSettingsOpen(false);
-    setVisibleStep(step);
+  async function handleImportHistory(): Promise<void> {
+    setImportingHistory(true);
+    try {
+      const paths = await browseReferenceFolders(bus);
+      const repositoryPaths = [...new Set([...settingsRef.current.repositoryPaths, ...paths])];
+      if (repositoryPaths.length > 20) throw new Error('最多配置 20 个历史仓，请在设置中整理已有路径。');
+      if (paths.length) handleSaveSettings({ ...settingsRef.current, repositoryPaths });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '导入历史仓失败');
+    } finally {
+      setImportingHistory(false);
+    }
   }
 
   if (!payload || !moduleExplorer) {
@@ -429,7 +423,7 @@ export default function App() {
     );
   }
 
-  const candidate = selectedCandidate(state);
+  const indexingTarget = codeIntelligence?.repositories.find(repository => repository.role === 'target' && repository.analysisStatus === 'indexing');
 
   return (
     <div className="app">
@@ -438,19 +432,32 @@ export default function App() {
           <RecastLogo />
           <strong>RECAST</strong>
         </div>
-        <div className="workbench-mode-label"><GitBranch size={14} />复用迁移</div>
+        <div className="pipeline-scope-switch" role="group" aria-label="执行范围">
+          <button type="button" disabled={pipelineActive} aria-pressed={executionScope === 'project'} onClick={() => setExecutionScope('project')}>整个项目</button>
+          <button type="button" disabled={pipelineActive} aria-pressed={executionScope === 'module'} onClick={() => setExecutionScope('module')}>单模块调试</button>
+        </div>
+        <div className="workbench-header-actions">
+        <button type="button" className={`workbench-resources-button${resourcesOpen ? ' is-active' : ''}`} aria-expanded={resourcesOpen}
+          aria-controls="workbench-resources" onClick={() => setResourcesOpen(open => !open)}>
+          <PanelLeft size={14} />工程资源
+        </button>
         <button
           type="button"
           className={`header-settings-button${settingsOpen ? ' is-active' : ''}`}
           onClick={() => setSettingsOpen((open) => !open)}
           aria-pressed={settingsOpen}
+          disabled={pipelineActive}
         >
           <Settings2 size={14} /> 设置
         </button>
+        </div>
       </header>
 
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       <ModuleWorkspace
+        primaryContent
+        navigationOpen={resourcesOpen}
+        navigationLocked={pipelineActive}
         repositories={codeIntelligence?.repositories ?? []}
         onSelectProject={(repositoryId, revision, projectId) => {
           setSelectedNodeId(null);
@@ -483,7 +490,6 @@ export default function App() {
         onRetry={(scope, force) => bus.post({ type: 'RETRY_PROJECT_ANALYSIS', ...scope, force })}
         onOpenSettings={() => setSettingsOpen(true)}
         settingsOpen={settingsOpen}
-        afterUnderstanding={<AgentRunLog run={translationRun} enabled={Boolean(moduleTranslation)} />}
       >
         {settingsOpen ? (
           <SettingsPanel
@@ -502,53 +508,24 @@ export default function App() {
             onSave={handleSaveSettings}
             onCancel={() => setSettingsOpen(false)}
           />
-        ) : (
-          <main className="stage-body">
-            <div className="migration-progress"><StepRail stage={state.stage} activeStep={visibleStep} onStepChange={handleStepChange} /></div>
-            {!state.target ? <div className="context-empty"><GitBranch size={25} /><strong>选择待实现的目标模块</strong></div> : null}
-            {visibleStep === 'requirement' && state.target ? (
-              <RequirementStage
-                key={state.target.id}
-                state={state}
-                target={state.target}
-                dispatch={dispatch}
-                onSearch={handleSearch}
-                onCopyTargetPath={handleCopyTargetPath}
-                onRevealTarget={handleRevealTargetInExplorer}
-              />
-            ) : null}
-
-            {visibleStep === 'candidates' ? (
-              <CandidatesStage
-                state={state}
-                dispatch={dispatch}
-                adaptationProvider={LLM_PRESETS[payload.settings.llm?.provider ?? 'deepseek'].label}
-                onSelectCandidate={handleSelectCandidate}
-                onAdapt={handleAdapt}
-              />
-            ) : null}
-
-            {moduleTranslation ? <div hidden={visibleStep !== 'adaptation' && visibleStep !== 'patch'}>
-              <WorkspaceTranslation key={moduleTranslation.moduleScopeId} provider={translation} moduleScopeId={moduleTranslation.moduleScopeId}
-                onFinished={(completed) => dispatch({ type: 'MODULE_TRANSLATION_FINISHED', completed })}
-                onRunChange={setTranslationRun} />
-            </div> : null}
-            {visibleStep === 'adaptation' && !moduleTranslation ? (
-              <AdaptationStage state={state} candidate={candidate}
-                onBack={() => dispatch({ type: 'RETURN_TO_CANDIDATES' })}
-                onRetry={handleAdapt} />
-            ) : null}
-
-            {visibleStep === 'patch' && state.adaptation ? (
-              <PatchStage
-                state={state}
-                onApply={handleApply}
-                onBack={() => dispatch({ type: 'RETURN_TO_CANDIDATES' })}
-                onOpenTarget={handleOpenTarget}
-              />
-            ) : null}
-          </main>
-        )}
+        ) : null}
+        <div className="pipeline-container" hidden={settingsOpen}>
+          {executionScope === 'project' ? <ProjectPipelineWorkbench bus={bus} run={projectRun}
+            scope={moduleExplorer.target.repositoryId && moduleExplorer.target.projectId ? { repositoryId: moduleExplorer.target.repositoryId, projectId: moduleExplorer.target.projectId } : undefined}
+            projectName={moduleExplorer.target.projectId ? moduleExplorer.target.name : ''} topK={payload.settings.topK}
+            historyPaths={payload.settings.repositoryPaths} importing={targetAdd.status === 'pending' || settingsSaving || importingHistory}
+            importMessage={targetAdd.status !== 'idle' ? targetAddMessage(targetAdd) : indexingTarget ? `正在建立项目索引：${indexingTarget.displayName}` : importingHistory ? '请选择历史仓目录…' : undefined}
+            error={error} onActivityChange={setPipelineActive} onImportHistory={() => void handleImportHistory()} onImportTarget={() => { setExplorerMode('target'); setResourcesOpen(true); handleAddTarget('browse'); }}
+            onStart={input => { setError(null); bus.post({ type: 'START_PROJECT_PIPELINE', input }); }} />
+          : <PipelineWorkbench state={state} dispatch={dispatch} historyPaths={payload.settings.repositoryPaths}
+            targetName={moduleExplorer.target.projectId ? moduleExplorer.target.name : ''}
+            importing={targetAdd.status === 'pending' || settingsSaving || importingHistory} error={error}
+            importMessage={targetAdd.status !== 'idle' ? targetAddMessage(targetAdd) : indexingTarget ? `正在建立项目索引：${indexingTarget.displayName}` : importingHistory ? '请选择历史仓目录…' : settingsSaving ? '正在保存历史仓配置…' : undefined}
+            moduleScopeId={moduleTranslation?.moduleScopeId} translation={translation}
+            onImportHistory={() => void handleImportHistory()} onImportTarget={() => { setExplorerMode('target'); setResourcesOpen(true); handleAddTarget('browse'); }}
+            onStart={handleSearch} onSelectCandidate={handleSelectCandidate} onAdapt={handleAdapt}
+            onApply={handleApply} onOpenTarget={handleOpenTarget} onActivityChange={setPipelineActive} />}
+        </div>
       </ModuleWorkspace>
 
       <FooterStatus

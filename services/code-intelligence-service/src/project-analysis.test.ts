@@ -169,6 +169,24 @@ describe('project understanding lifecycle', () => {
     expect(await projects.read(scope)).toMatchObject({ state: 'ready', proposal: { hierarchy: { modelDecisionCount: 1 } } });
   });
 
+  it('uses an explicit large-project plan when the host marks it as already bounded', async () => {
+    const { runtime, index, scopes } = await setup();
+    const scope = scopes[0]!;
+    const plan = vi.fn(async () => result(index, scope));
+    const decide = vi.fn(async (request: ModuleHierarchyDecisionRequest) => coherentDecision(request));
+    const projects = new ProjectAnalysisCoordinator({
+      store: runtime.store,
+      plan,
+      hierarchyPlanner: { decide },
+      maxAgentProjectFiles: 3,
+      allowLargeAgentPlan: true,
+    });
+    await projects.ensure(scope);
+    expect(plan).toHaveBeenCalledTimes(1);
+    expect(decide).not.toHaveBeenCalled();
+    expect(await projects.read(scope)).toMatchObject({ state: 'ready', modeling: { strategy: 'agent' } });
+  });
+
   it.each(['unconfigured', 'failed', 'invalid'] as const)('does not publish a structural tree as an agent result when the model is %s', async (mode) => {
     const { runtime, scopes } = await setup();
     const scope = scopes[0]!;
@@ -316,7 +334,7 @@ describe('project understanding lifecycle', () => {
       expect(artifact.planHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     }
     expect(artifacts.filter((a) => a.kind === 'module-summary' && a.status === 'current')).toHaveLength(2);
-    expect((await runtime.store.listSearchDocuments(index)).filter((d) => d.kind === 'summary')).toHaveLength(6);
+    expect((await runtime.store.listSearchDocuments(index)).filter((d) => d.kind === 'summary')).toHaveLength(8);
   });
 
   it('retries a failed projection without making another model request', async () => {

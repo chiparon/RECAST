@@ -1,4 +1,4 @@
-import type { AnalysisReport, FilePatch } from "@forexplore/contracts";
+import type { AnalysisReport, FilePatch, ModuleProtocol } from "@forexplore/contracts";
 
 export type JsonValue =
   string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -56,6 +56,10 @@ export type FunctionGroupVerificationInput = {
   functions: FunctionGroupVerificationFunction[];
   /** Target functions for which no trustworthy source reference was found. */
   unmatchedFunctions?: VerificationFunction[];
+  /** Bounded shared protocol view; advisory context only. */
+  moduleProtocol?: ModuleProtocol;
+  /** Host facts carried across verifier attempts; never inferred from terminal claims. */
+  testEvidence?: VerificationTestEvidence;
 };
 
 export type RequirementFunctionGroupVerificationInput = {
@@ -66,6 +70,8 @@ export type RequirementFunctionGroupVerificationInput = {
   targetProjectPath: string;
   requirement: string;
   functions: RequirementFunctionGroupVerificationFunction[];
+  moduleProtocol?: ModuleProtocol;
+  testEvidence?: VerificationTestEvidence;
 };
 
 export type VerificationIssueKind =
@@ -87,7 +93,8 @@ export type VerificationReason =
   | "test-environment-failure"
   | "mapping-invalid"
   | "agent-timeout"
-  | "model-failure";
+  | "model-failure"
+  | "unresolved-test-failure";
 
 export type TargetFunctionCoverage = {
   name: string;
@@ -114,6 +121,15 @@ export type FunctionGroupFunctionResult = {
   branchCoverage: number | null;
   /** Host-derived explanation for the observed function result. */
   reason?: VerificationReason;
+  /** Concrete Host diagnostic when per-function coverage could not be collected. */
+  coverageIssue?: string;
+};
+
+export type ProtocolCheck = {
+  ruleId: string;
+  status: "passed" | "failed" | "ambiguous" | "not-applicable";
+  testName?: string;
+  note?: string;
 };
 
 export type FunctionGroupVerificationResult = {
@@ -121,6 +137,64 @@ export type FunctionGroupVerificationResult = {
   issue?: VerificationIssue;
   functions: FunctionGroupFunctionResult[];
   reason?: VerificationReason;
+  protocolChecks?: ProtocolCheck[];
+  testEvidence?: VerificationTestEvidence;
+};
+
+export type VerificationTestCase = {
+  id: string;
+  status: "passed" | "failed" | "skipped";
+  message?: string;
+};
+
+export type VerificationTestVersion = {
+  path: string;
+  sha256: string;
+  /** Immutable Host snapshot, relative to the target project. */
+  artifactPath: string;
+};
+
+export type VerificationTestCorrection = {
+  failureId: string;
+  reason: string;
+  /** Exact excerpt from the supplied public requirement. */
+  requirementEvidence: string;
+};
+
+export type VerificationTestEvidence = {
+  runs: Array<{
+    id: string;
+    status: "success" | "failure";
+    tests: { executed: number; passed: number; failed: number; skipped: number };
+    testCases: VerificationTestCase[];
+    versions: VerificationTestVersion[];
+    /** Host revision count at execution, including auxiliary fixtures written through its tools. */
+    revisionCount?: number;
+  }>;
+  failures: Array<{
+    id: string;
+    runId: string;
+    testId: string;
+    message: string;
+    versions: VerificationTestVersion[];
+    status: "unresolved" | "resolved";
+    resolution?: {
+      kind: "unchanged-test-replayed" | "reviewed-test-correction";
+      runId: string;
+      reason: string;
+      requirementEvidence?: string;
+      reviewNote?: string;
+    };
+  }>;
+  revisions: Array<{
+    path: string;
+    before?: VerificationTestVersion;
+    after: VerificationTestVersion;
+    corrections?: Array<VerificationTestCorrection & {
+      status: "proposed" | "confirmed" | "unconfirmed";
+      reviewNote?: string;
+    }>;
+  }>;
 };
 
 export type VerificationPhase = "prepare" | "verify";

@@ -1,4 +1,5 @@
 import { validateModelKey } from '../model-credential';
+import type { ProjectPipelineRun, ProjectPipelineStart } from '../project-pipeline-types';
 import { parseLlmSettings, type LlmSettings } from '@forexplore/contracts';
 import type {
   WorkspaceTranslationRun,
@@ -50,6 +51,7 @@ export type TargetWorkspaceOutcome = 'cancelled' | 'added' | 'completed' | 'fail
 
 /** Messages the extension host posts into the Webview. */
 export type HostToWebviewMessage =
+  | { type: 'PROJECT_PIPELINE_STATE'; run: ProjectPipelineRun }
   | { type: 'REQUEST_SETTINGS_SAVE' }
   | { type: 'REFERENCE_FOLDERS_SELECTED'; requestId: string; paths: string[]; error?: string }
   | { type: 'MODEL_KEY_STATUS'; configured: boolean; message?: string }
@@ -78,6 +80,8 @@ export type HostToWebviewMessage =
  * candidate objects, validation evidence, or patches to be written.
  */
 export type WebviewToHostMessage =
+  | { type: 'START_PROJECT_PIPELINE'; input: ProjectPipelineStart }
+  | { type: 'PROJECT_PIPELINE_ACTION'; runId: string; action: 'read' | 'cancel' | 'open-output' | 'open-report' | 'export-report' | 'open-diff' }
   | { type: 'SETTINGS_VISIBILITY_CHANGED'; open: boolean }
   | { type: 'BROWSE_REFERENCE_FOLDERS'; requestId: string }
   | { type: 'CONFIGURE_MODEL_KEY' }
@@ -112,6 +116,7 @@ export type WebviewToHostMessage =
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
+  'PROJECT_PIPELINE_STATE',
   'REQUEST_SETTINGS_SAVE',
   'REFERENCE_FOLDERS_SELECTED',
   'MODEL_KEY_STATUS',
@@ -175,6 +180,17 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as Record<string, unknown>;
   switch (message.type) {
+    case 'START_PROJECT_PIPELINE': {
+      if (!hasOnlyKeys(message, ['type', 'input']) || !message.input || typeof message.input !== 'object') return false;
+      const input = message.input as Record<string, unknown>;
+      return hasOnlyKeys(input, ['repositoryId', 'projectId', 'requirement', 'topK']) && isOpaqueIdentifier(input.repositoryId) && isOpaqueIdentifier(input.projectId)
+        && typeof input.requirement === 'string' && input.requirement.trim().length > 0 && input.requirement.length <= 8000
+        && Number.isInteger(input.topK) && Number(input.topK) >= 1 && Number(input.topK) <= 10;
+    }
+    case 'PROJECT_PIPELINE_ACTION': {
+      if (typeof message.runId !== 'string' || !/^[a-f0-9-]{36}$/.test(message.runId)) return false;
+      return hasOnlyKeys(message, ['type', 'runId', 'action']) && ['read', 'cancel', 'open-output', 'open-report', 'export-report', 'open-diff'].includes(String(message.action));
+    }
     case 'SETTINGS_VISIBILITY_CHANGED':
       return hasOnlyKeys(message, ['type', 'open']) && typeof message.open === 'boolean';
     case 'WORKSPACE_TRANSLATION': {

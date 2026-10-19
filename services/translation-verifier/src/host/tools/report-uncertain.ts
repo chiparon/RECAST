@@ -6,6 +6,7 @@ import {
   type ToolContext,
 } from "./common.js";
 import { type FinishIssue } from "./finish.js";
+import { testEvidence } from "../test-evidence.js";
 
 export type ReportUncertainInput = {
   issue: FinishIssue;
@@ -23,6 +24,7 @@ type FunctionGroupReportUncertainResult = {
   testExecutionStatus: FunctionGroupTestRun["status"];
   issue: FinishIssue;
   functionGroupTest: FunctionGroupTestRun;
+  testEvidence?: import("../../types.js").VerificationTestEvidence;
 };
 
 function latestFunctionGroupTest(context: ToolContext): FunctionGroupTestRun | undefined {
@@ -106,6 +108,7 @@ export function createReportUncertainTool(): HostToolFactory {
           testExecutionStatus: functionGroupTest.status,
           issue: { ...input.issue },
           functionGroupTest,
+          testEvidence: structuredClone(testEvidence(context)),
         };
       }
       const targetTest = context.state.lastTargetTest;

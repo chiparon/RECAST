@@ -6,6 +6,8 @@ import type {
   TargetFunctionCoverage,
   VerificationFunction,
   VerificationReason,
+  VerificationTestCase,
+  VerificationTestEvidence,
 } from "../../types.js";
 import type { AgentRunBudget } from "../agent.js";
 import { readFile } from "node:fs/promises";
@@ -77,6 +79,8 @@ export type FunctionGroupTestRun = {
   stderr: string;
   exitCode: number | null;
   reason?: VerificationReason;
+  testCases?: VerificationTestCase[];
+  testEvidence?: VerificationTestEvidence;
 };
 
 export type FunctionGroupTestRunner = {
@@ -109,6 +113,7 @@ export type ToolState = {
   lastTargetTest?: TargetTestResult;
   lastFunctionGroupTest?: FunctionGroupTestRun;
   functionGroupTests?: FunctionGroupTestRun[];
+  testEvidence?: VerificationTestEvidence;
 };
 
 export type ToolContext = {
@@ -117,6 +122,8 @@ export type ToolContext = {
   runtime: ToolRuntimeContext;
   runner: BoundTestRunner;
   functionGroupRunner?: FunctionGroupTestRunner;
+  /** Trusted Host callback, never controlled by tool arguments or Agent claims. */
+  reviewTestCorrection?: import("../test-evidence.js").TestCorrectionReviewer;
 };
 
 export function relativePath(value: unknown, label = "path"): string {

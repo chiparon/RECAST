@@ -153,7 +153,9 @@ describe('live project explorer module selection', () => {
     const result = await buildProjectExplorer({ explorerData: async () => [entry()] });
     const id = result.presentation.target.tree[0]!.targetId!;
     expect(result.targets.get(id)).toMatchObject({ kind: 'module', name: 'Payments',
-      module: { repositoryId: 'target', analysisRevision: 'revision', projectId: 'project', sourceFiles: ['payment.ts', 'receipt.ts'], coreApis: ['pay'] } });
+      documentation: 'Payments with receipts',
+      module: { repositoryId: 'target', analysisRevision: 'revision', projectId: 'project', moduleId: 'payments',
+        description: 'Payments with receipts', sourceFiles: ['payment.ts', 'receipt.ts'], coreApis: ['pay'] } });
     expect(result.presentation.target.analysis?.hierarchy).toMatchObject({ rootCount: 1, moduleCount: 1,
       subsystemCount: 0, leafCount: 0, unknownCount: 1, maxDepth: 0 });
     expect(result.presentation.target.tree[0]?.refinement).toBeUndefined();

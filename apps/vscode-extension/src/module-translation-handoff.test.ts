@@ -1,10 +1,10 @@
 // @vitest-environment node
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ModuleTarget, SearchCandidate } from '@forexplore/contracts';
-import { prepareModuleTranslationScope } from './module-translation-handoff';
+import { prepareIntegrationTranslationScope, prepareModuleTranslationScope } from './module-translation-handoff';
 import { WorkspaceTranslationHost } from './workspace-translation-host';
 import { isWebviewToHostMessage } from './protocol/messages';
 
@@ -65,6 +65,17 @@ it('keeps the target write scope when three reviewed candidates are selected', a
   await expect(prepareModuleTranslationScope({ ...input, candidates: [...candidates, { ...candidates[0]!, sourceModule: { ...candidates[0]!.sourceModule!, moduleId: 'fourth' } }] })).rejects.toThrow('1～3');
 });
 
+it('excludes previous history views and verifier harnesses from target visibility', async () => {
+  const { root, input } = await setup();
+  for (const directory of ['.forexpore/history-views/old', '.translation-verifier-tests/old/tests', '.translation-verifier-coverage/old', '.agent-tmp']) {
+    await mkdir(path.join(root, directory), { recursive: true });
+    await writeFile(path.join(root, directory, 'private.ts'), 'export const privateEvidence = 1;');
+  }
+  const scope = await prepareModuleTranslationScope(input);
+  expect(scope.profile.workspaceFiles.some(file => file.includes('private.ts'))).toBe(false);
+  expect(scope.profile.writeFiles).toEqual(['first.ts', 'second.ts']);
+});
+
 it('adds only a referenced target dependency to the interactive write scope', async () => {
   const { root, input } = await setup();
   await writeFile(path.join(root, 'first.ts'), 'import type { PaymentContract } from "./contract";\nexport const first = (value: PaymentContract) => value;');
@@ -118,4 +129,30 @@ it('does not resubmit a possibly accepted start after a transport failure', asyn
   expect((await host.handle(start)).type).toBe('WORKSPACE_TRANSLATION_ERROR');
   expect((await host.handle(start)).type).toBe('WORKSPACE_TRANSLATION_ERROR');
   expect(submissions).toBe(1);
+});
+
+it('carries the complete integration protocol through the scope and Host request', async () => {
+  const { root, host, requests } = await setup();
+  const protocol = { version: 1 as const, invariants: [{ id: 'rule', rule: 'Public observable guarantee', source: 'requirement' as const, status: 'fixed' as const, scope: ['different-module'] }], boundaries: [], sharedContracts: [], openQuestions: [{ id: 'question', question: 'Unspecified status', source: 'observed' as const, status: 'ambiguous' as const }] };
+  const scope = await prepareIntegrationTranslationScope({ workspaceRoot: root, targetLanguage: 'TypeScript', requirement: 'Public requirements', writeFiles: ['first.ts', 'second.ts'], globalProtocol: protocol, context: [{ id: 'integration-module-plans', kind: 'summary', content: 'OLD_MODULE_PLAN' }, { id: 'integration-verification-history', kind: 'summary', content: 'OLD_VERIFY_HISTORY' }] });
+  protocol.invariants[0]!.rule = 'Mutated after scope creation';
+  const scopeId = host.rememberModuleScope(scope);
+  const described = await host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-describe', action: 'describe', moduleScopeId: scopeId });
+  if (described.type !== 'WORKSPACE_TRANSLATION_RESULT' || !described.profile) throw new Error('Missing profile');
+  await host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-start', action: 'start', moduleScopeId: scopeId, profileId: described.profile.profileId });
+  const request = requests.find(item => item.body)?.body;
+  expect(request.taskKind).toBe('project-integration');
+  expect(request.globalProtocol.invariants[0].rule).toBe('Public observable guarantee');
+  expect(request.globalProtocol.openQuestions[0].status).toBe('ambiguous');
+  expect(request.context).toEqual([]);
+  expect(JSON.stringify(request)).not.toMatch(/OLD_MODULE_PLAN|OLD_VERIFY_HISTORY/);
+});
+
+
+it('checks the actual Integration envelope before submission with the original 2 MiB limit', async () => {
+  const { root } = await setup();
+  await expect(prepareIntegrationTranslationScope({ workspaceRoot: root, targetLanguage: 'TypeScript',
+    requirement: 'Public requirements', writeFiles: ['first.ts'],
+    globalProtocol: { version: 1, invariants: [{ id: 'large-public-protocol', rule: '界'.repeat(720_000), source: 'requirement', status: 'fixed' }], boundaries: [], sharedContracts: [], openQuestions: [] },
+  })).rejects.toThrow('existing 2 MiB envelope');
 });

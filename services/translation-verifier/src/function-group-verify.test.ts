@@ -24,6 +24,22 @@ const input: FunctionGroupVerificationInput = {
 };
 
 describe("createFunctionGroupVerifier", () => {
+  it("keeps execution evidence without labeling an uncertain requirement verified", async () => {
+    const verify = createFunctionGroupVerifier({ run: async () => ({
+      outcome: "uncertain" as const, testExecutionStatus: "success" as const,
+      issue: { kind: "unknown" as const, description: "A public requirement remains ambiguous." },
+      functionGroupTest: { status: "success" as const, reason: "verified" as const, testPaths: ["tests/group.py"],
+        tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
+        functions: input.functions.map(({ target }) => ({ target, status: "passed" as const,
+          executed: true, lineCoverage: 100, branchCoverage: null })),
+        failures: [], stdout: "", stderr: "", exitCode: 0 },
+    }) });
+    const result = await verify(input, "single-agent-function-group", "verify");
+    expect(result.status).toBe("failure");
+    expect(result.reason).toBeUndefined();
+    expect(result.functions.every(fn => fn.executed)).toBe(true);
+  });
+
   it("dispatches the function-group single-agent strategy", async () => {
     let task: AgentTask | undefined;
     const verify = createFunctionGroupVerifier({

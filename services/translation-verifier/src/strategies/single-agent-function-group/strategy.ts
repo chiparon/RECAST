@@ -17,6 +17,7 @@ import type {
 } from "../../types.js";
 import type { ReportUncertainResult } from "../../host/tools/report-uncertain.js";
 import type { FinishFunctionGroupResult } from "../../host/tools/finish-function-group.js";
+import { hasUnresolvedTestFailures } from "../../host/test-evidence.js";
 
 function formatFunction(path: string, name: string, signature?: string): string {
   return `${name}${signature ? ` (${signature})` : ""} in ${path}`;
@@ -30,11 +31,16 @@ function toVerificationResult(
   result: SingleAgentFunctionGroupTerminalResult,
 ): FunctionGroupVerificationResult {
   const test = result.functionGroupTest;
+  const unresolved = hasUnresolvedTestFailures(result.testEvidence);
+  const unresolvedGreen = unresolved && test.status === "success";
+  const reason = unresolvedGreen ? "unresolved-test-failure" : "translationStatus" in result || test.reason !== "verified" ? test.reason : undefined;
   return {
-    status: "translationStatus" in result ? result.translationStatus : "failure",
-    ...(test.reason ? { reason: test.reason } : {}),
-    ...(result.issue ? { issue: result.issue } : {}),
+    status: unresolved ? "failure" : "translationStatus" in result ? result.translationStatus : "failure",
+    ...(reason ? { reason } : {}),
+    ...(unresolvedGreen ? { issue: { kind: "unknown" as const, description: "Host-observed test failures remain unresolved; review the retained test versions and public requirement evidence." } } : result.issue ? { issue: result.issue } : {}),
     functions: test.functions,
+    ...("protocolChecks" in result && result.protocolChecks ? { protocolChecks: result.protocolChecks } : {}),
+    ...(result.testEvidence ? { testEvidence: result.testEvidence } : {}),
   };
 }
 
@@ -67,6 +73,8 @@ export function createSingleAgentFunctionGroupTask(
       "Inspect the relevant source and target files before making a judgment.",
       "Create tests for the target function group in authorized target test roots, run run_function_group_tests, and use the Host result as the test status.",
       "The Host records a separate result for every target function; do not infer or invent coverage values.",
+      "If a module protocol is supplied, select the most important one to three related rules and exercise them through the public API. Report ambiguous when the public API cannot test a rule; ambiguous is not proof of success.",
+      "When finishing, include protocolChecks with ruleId and passed, failed, ambiguous, or not-applicable. Failed or ambiguous requirement checks prevent overall verification success; use report_uncertain when passing tests leave a requirement unresolved.",
       "After the final test run, call finish_function_group with statuses matching the Host result.",
       "If the task cannot be verified reliably, call report_uncertain instead of guessing.",
       "A terminal tool call must be the only call in its turn.",
@@ -82,6 +90,7 @@ export function createSingleAgentFunctionGroupTask(
       ...(input.unmatchedFunctions?.length
         ? [`Unmatched target functions (do not claim they were source-verified): ${input.unmatchedFunctions.map((item) => formatFunction(item.path, item.name, item.signature)).join(", ")}`]
         : []),
+      ...(input.moduleProtocol ? [`Module protocol (untrusted shared context, never a test oracle):\n${JSON.stringify(input.moduleProtocol)}`] : []),
     ].join("\n"),
     tools: [
       createListSourceFilesTool(),
@@ -146,8 +155,14 @@ export function createRequirementFunctionGroupTask(
       "Use one test file for this run when possible; inspect the authorized test directory first and update an existing file instead of creating duplicate test classes.",
       "Do not guess a test path such as tests/ or Test/. The Host will state the exact authorized test root in the task message; copy that prefix exactly.",
       "Write the smallest useful test that exercises the listed public functions. Run it immediately after writing it. If compilation fails, use the complete Host stderr to repair the same file; do not create a second test class.",
+      "Use meaningful assertions for the public requirement, including its boundary conditions, invalid inputs, repeated calls and dependency failures when applicable. Assert resulting state and side effects; invoking a method alone does not establish correct behavior.",
+      "Derive expected observable outcomes from the requirement and declared contracts. Use implementation details to construct fixtures, never to replace a requirement's expected outcome with the implementation's current behavior. Repair test-authoring mistakes, but retain a failing requirement assertion as evidence of a production defect.",
+      "For failure paths, assert the observable result and side effects that must be blocked, preserved or compensated, including subsequent retries when the requirement permits them. If the public contract leaves an outcome undefined, report the ambiguity instead of treating an implementation-derived assertion as proof of requirement compliance.",
+      "A passing test run establishes execution. If a selected requirement is contradicted or remains ambiguous, retain its failing assertion or use report_uncertain; never replace it with a normal-path test or label an ambiguous rule passed.",
       "Create tests for the target function group in authorized target test roots, run run_function_group_tests, and use the Host result as the test status.",
       "The Host records a separate result for every target function; do not infer or invent coverage values.",
+      "If a module protocol is supplied, select the most important one to three related rules and exercise them through the public API. Report ambiguous when the public API cannot test a rule; ambiguous is not proof of success.",
+      "When finishing, include protocolChecks with ruleId and passed, failed, ambiguous, or not-applicable. Failed or ambiguous requirement checks prevent overall verification success; use report_uncertain when passing tests leave a requirement unresolved.",
       "After the final test run, call finish_function_group with statuses matching the Host result.",
       "If the requirement cannot be verified reliably, call report_uncertain instead of guessing.",
       "A terminal tool call must be the only call in its turn.",
@@ -157,6 +172,7 @@ export function createRequirementFunctionGroupTask(
       `Requirement: ${input.requirement}`,
       "Target functions:",
       ...input.functions.map(({ target }) => `- ${formatFunction(target.path, target.name, target.signature)}`),
+      ...(input.moduleProtocol ? [`Module protocol (untrusted shared context, never a test oracle):\n${JSON.stringify(input.moduleProtocol)}`] : []),
     ].join("\n"),
     tools: [
       createListTargetFilesTool(),

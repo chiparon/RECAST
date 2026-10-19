@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { MAX_SELECTED_HISTORY_MODULES, type Language, type ModuleTarget, type SearchCandidate, type WorkspaceEvidenceScope, type WorkspaceHistoryView } from '@forexplore/contracts';
+import { MAX_SELECTED_HISTORY_MODULES, type GlobalProtocol, type Language, type ModuleProtocol, type ModuleTarget, type SearchCandidate, type WorkspaceTranslationContext, type WorkspaceEvidenceScope, type WorkspaceHistoryView } from '@forexplore/contracts';
 import { buildModuleTranslationScope } from './module-translation-scope';
 import type { WorkspaceTranslationModuleScope } from './workspace-translation-host';
 
@@ -16,6 +16,7 @@ export async function prepareModuleTranslationScope(input: {
   evidenceScopes?: WorkspaceEvidenceScope[];
   historyView?: WorkspaceHistoryView;
   relatedWriteFiles?: readonly string[];
+  moduleProtocol?: ModuleProtocol;
 }): Promise<WorkspaceTranslationModuleScope> {
   const { target } = input;
   const candidates = input.candidates ?? (input.candidate ? [input.candidate] : []);
@@ -53,7 +54,7 @@ export async function prepareModuleTranslationScope(input: {
   for (const file of scope.profile.writeFiles) {
     fileHashes[file] = await moduleFileHash(scope.profile.workspaceRoot, file);
   }
-  return { ...scope, fileHashes };
+  return { ...scope, fileHashes, ...(input.moduleProtocol ? { moduleProtocol: structuredClone(input.moduleProtocol) } : {}) };
 }
 
 /**
@@ -65,6 +66,7 @@ export async function prepareDirectModuleTranslationScope(input: {
   workspaceRoot: string; target: ModuleTarget; requirement: string; decisionNotes: string;
   relatedModules?: readonly ModuleTarget[];
   relatedWriteFiles?: readonly string[];
+  moduleProtocol?: ModuleProtocol;
 }): Promise<WorkspaceTranslationModuleScope> {
   const { target } = input;
   if (target.kind !== 'module' || !target.module) {
@@ -86,14 +88,13 @@ export async function prepareDirectModuleTranslationScope(input: {
   for (const file of scope.profile.writeFiles) {
     fileHashes[file] = await moduleFileHash(scope.profile.workspaceRoot, file);
   }
-  return { ...scope, translationMode: 'direct-translator', fileHashes };
+  return { ...scope, translationMode: 'direct-translator', fileHashes, ...(input.moduleProtocol ? { moduleProtocol: structuredClone(input.moduleProtocol) } : {}) };
 }
 
 /**
- * Prepare the bounded project-integration repair scope. It intentionally has
- * no history candidate and no direct-fallback route: the Codex runtime still
- * runs its Analyzer over the full readable target tree, then the Translator
- * may only change the host-computed unresolved files.
+ * Add a project-level pass to an assembled module result. The Integration
+ * Agent can read the whole project and repair all production sources. Module
+ * ownership does not narrow this scope, and hidden evaluation is never input.
  */
 export async function prepareIntegrationTranslationScope(input: {
   workspaceRoot: string;
@@ -101,25 +102,31 @@ export async function prepareIntegrationTranslationScope(input: {
   requirement: string;
   writeFiles: readonly string[];
   readOnlyFiles?: readonly string[];
+  globalProtocol?: GlobalProtocol;
+  context?: readonly WorkspaceTranslationContext[];
 }): Promise<WorkspaceTranslationModuleScope> {
   const writeFiles = [...new Set(input.writeFiles.map((file) => file.replaceAll('\\', '/').trim()).filter(Boolean))];
   if (writeFiles.length === 0) throw new Error('项目集成修复没有宿主授权的写入文件。');
-  const target: ModuleTarget = {
-    id: 'project-integration-repair', kind: 'module', name: '项目集成修复', language: input.targetLanguage as Language,
-    path: writeFiles[0]!, signature: 'integration',
-    module: { sourceFiles: writeFiles, coreApis: [], dependsOn: [] },
+  const workspaceRoot = await realpath(input.workspaceRoot);
+  const scope: WorkspaceTranslationModuleScope = {
+    label: '项目集成修复', taskKind: 'project-integration',
+    spec: input.requirement,
+    profile: { workspaceRoot, sourceLanguage: input.targetLanguage, targetLanguage: input.targetLanguage,
+      writeFiles, workspaceFiles: [...new Set([...writeFiles, ...(input.readOnlyFiles ?? [])])] },
+    context: [],
   };
-  const scope = buildModuleTranslationScope({
-    workspaceRoot: await realpath(input.workspaceRoot),
-    targetModule: { ...target.module!, name: target.name, language: input.targetLanguage as Language },
-    candidates: [],
-    requirement: input.requirement,
-    includeCandidateContext: false,
-    readOnlyFiles: input.readOnlyFiles,
-  });
   const fileHashes: Record<string, string> = {};
   for (const file of scope.profile.writeFiles) fileHashes[file] = await moduleFileHash(scope.profile.workspaceRoot, file);
-  return { ...scope, fileHashes };
+  const globalProtocol = input.globalProtocol ? structuredClone(input.globalProtocol) : undefined;
+  const requestBytes = Buffer.byteLength(JSON.stringify({ spec: scope.spec,
+    sourceLanguage: scope.profile.sourceLanguage, targetLanguage: scope.profile.targetLanguage,
+    workspaceFiles: scope.profile.workspaceFiles, writeFiles: scope.profile.writeFiles,
+    context: scope.context, taskKind: 'project-integration', ...(globalProtocol ? { globalProtocol } : {}),
+  }));
+  if (requestBytes > 2 * 1024 * 1024) {
+    throw new Error(`Integration request exceeds the existing 2 MiB envelope (${requestBytes} bytes); reduce the public payload or read complete requirements from workspace files before starting. The request was not submitted.`);
+  }
+  return { ...scope, taskKind: 'project-integration', fileHashes, ...(globalProtocol ? { globalProtocol } : {}) };
 }
 
 /**
@@ -137,7 +144,8 @@ async function discoverTargetReadOnlyFiles(root: string, ownedFiles: readonly st
     '.kt', '.kts', '.mjs', '.py', '.rs', '.ts', '.tsx',
   ]);
   const ignoredDirectories = new Set([
-    '.git', '.forexplore', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out',
+    '.git', '.forexplore', '.forexpore', '.translation-verifier-tests',
+    '.translation-verifier-coverage', '.agent-tmp', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out',
     'target', 'coverage', 'test', 'tests', '__tests__',
   ]);
   const owned = new Set(ownedFiles.map(normalizePath).filter(Boolean));

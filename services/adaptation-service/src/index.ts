@@ -181,3 +181,18 @@ export type { CodexWorkspaceTranslationRuntimeOptions } from "./codex-workspace-
 export { createWorkspaceTranslationModelClient } from "./workspace-translation-agent";
 export type { WorkspaceTranslationModelClient } from "./workspace-translation-agent";
 export { compileWorkspace, validateWorkspaceCompileCommand } from "./workspace-compiler";
+export {
+  ensureGlobalProtocol,
+  loadGlobalProtocol,
+  mergeGlobalProtocol,
+  normaliseGlobalProtocol,
+  persistGlobalProtocol,
+  projectModuleProtocol,
+  protocolTaskIdentity,
+} from "./protocol-sidecar";
+export type {
+  ModuleProtocolProjectionRequest,
+  ProtocolEnsureResult,
+  ProtocolLoadResult,
+  ProtocolTaskIdentityInput,
+} from "./protocol-sidecar";

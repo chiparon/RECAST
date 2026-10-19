@@ -39,10 +39,15 @@ export const workspaceAnalyzerTools: DeepSeekToolDefinition[] = [
   blockerTool,
   tool("submit_plan", "Submit a complete implementation plan in dependency order. Group cyclic dependencies in one step.", {
     summary: string,
-    mappings: records({ source: string, targetPath: string, targetSymbol: string }),
+    mappings: records({ source: string, targetPath: string, targetSymbol: { type: ["string", "null"] } }),
     dependencies: records({ name: string, strategy: { enum: ["reuse", "replace", "adapt", "translate"] }, detail: string }),
     steps: records({ id: string, description: string, files: strings, dependsOn: strings }),
-  }),
+    evidence: strings,
+    risks: strings,
+    coverage: strings,
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    notes: string,
+  }, ["summary", "mappings", "dependencies", "steps"]),
 ];
 
 export const workspaceTranslatorTools: DeepSeekToolDefinition[] = [
@@ -117,13 +122,15 @@ export function object(value: unknown): Record<string, unknown> {
 
 export function validateWorkspaceTranslationRequest(value: unknown): asserts value is WorkspaceTranslationRequest {
   const input = object(value);
-  const allowed = ["spec", "sourceLanguage", "targetLanguage", "context", "workspaceFiles", "writeFiles", "evidenceScopes", "historyView", "translationMode"];
+  const integration = input.taskKind === "project-integration";
+  const allowed = ["spec", "sourceLanguage", "targetLanguage", "context", "workspaceFiles", "writeFiles", "evidenceScopes", "historyView", "translationMode", "taskKind", "moduleProtocol", "globalProtocol"];
   if (Object.keys(input).some((key) => !allowed.includes(key)) || !nonempty(input.spec) || input.spec.length > 64_000 ||
     !nonempty(input.sourceLanguage) || !nonempty(input.targetLanguage) ||
     input.sourceLanguage.length > 80 || input.targetLanguage.length > 80 ||
     !stringArray(input.workspaceFiles) || !stringArray(input.writeFiles) ||
     (input.translationMode !== undefined && !["analyzer-translator", "direct-translator"].includes(String(input.translationMode))) ||
-    !input.writeFiles.length || input.writeFiles.length > 128 || input.workspaceFiles.length > 256 ||
+    (input.taskKind !== undefined && !["module", "project-integration"].includes(String(input.taskKind))) ||
+    !input.writeFiles.length || input.writeFiles.length > (integration ? 4096 : 128) || input.workspaceFiles.length > (integration ? 8192 : 256) ||
     !Array.isArray(input.context) || input.context.length > 256) throw new Error("Invalid workspace translation request.");
   if (input.evidenceScopes !== undefined) {
     if (!Array.isArray(input.evidenceScopes) || input.evidenceScopes.length > MAX_RETRIEVAL_SCOPES) {
@@ -140,6 +147,19 @@ export function validateWorkspaceTranslationRequest(value: unknown): asserts val
       const key = `${scope.repositoryId}@${scope.analysisRevision}`;
       if (scopes.has(key)) throw new Error("Duplicate evidence scope.");
       scopes.add(key);
+    }
+  }
+  for (const field of ["moduleProtocol", "globalProtocol"] as const) {
+    const protocol = input[field];
+    if (protocol === undefined) continue;
+    if (!protocol || typeof protocol !== "object" || Array.isArray(protocol) ||
+        (protocol as Record<string, unknown>).version !== 1 ||
+        !Array.isArray((protocol as Record<string, unknown>).invariants) ||
+        !Array.isArray((protocol as Record<string, unknown>).boundaries) ||
+        !Array.isArray((protocol as Record<string, unknown>).sharedContracts) ||
+        !Array.isArray((protocol as Record<string, unknown>).openQuestions) ||
+        JSON.stringify(protocol).length > 96_000) {
+      throw new Error(`Invalid ${field}.`);
     }
   }
   if (input.historyView !== undefined) {
@@ -197,33 +217,103 @@ export function validateWorkspaceTranslationRequest(value: unknown): asserts val
 
 export function parseWorkspaceTranslationPlan(value: unknown, request: WorkspaceTranslationRequest): WorkspaceTranslationPlan {
   const plan = object(value);
-  if (!nonempty(plan.summary) || !Array.isArray(plan.mappings) || !plan.mappings.length ||
+  if (!nonempty(plan.summary) || !Array.isArray(plan.mappings) ||
     !Array.isArray(plan.dependencies) || !Array.isArray(plan.steps) || !plan.steps.length || plan.steps.length > 128) {
     throw new Error("Plan requires summary, mappings, dependencies and implementation steps.");
   }
-  const allowed = new Set(request.writeFiles);
-  const covered = new Set<string>();
-  const preceding = new Set<string>();
-  for (const raw of plan.steps) {
+  const allowed = new Map(request.writeFiles.map((path) => [planPathKey(path), path]));
+  const steps: Array<{ id: string; description: string; files: string[]; dependsOn: string[]; index: number }> = [];
+  const stepIds = new Set<string>();
+  for (const [index, raw] of plan.steps.entries()) {
     const step = object(raw);
-    if (!nonempty(step.id) || preceding.has(step.id) || !nonempty(step.description) ||
-      !stringArray(step.files) || !step.files.length || step.files.some((path) => !allowed.has(path)) ||
-      !stringArray(step.dependsOn) || step.dependsOn.some((id) => !preceding.has(id))) {
-      throw new Error("Steps must have unique IDs, allowed files, and dependencies on preceding steps.");
+    if (!nonempty(step.id) || stepIds.has(step.id) || !nonempty(step.description) ||
+      !stringArray(step.files) || !step.files.length || !stringArray(step.dependsOn)) {
+      throw new Error("Steps must have unique IDs, allowed files, and valid dependencies.");
     }
-    preceding.add(step.id);
-    step.files.forEach((path) => covered.add(path));
+    const files = step.files.map((path) => canonicalPlanFile(path, allowed));
+    const dependsOn = [...new Set(step.dependsOn)];
+    stepIds.add(step.id);
+    steps.push({ id: step.id, description: step.description, files, dependsOn, index });
   }
+  for (const step of steps) {
+    if (step.dependsOn.some((id) => id === step.id || !stepIds.has(id))) {
+      throw new Error("Steps must have unique IDs, allowed files, and valid dependencies.");
+    }
+  }
+  const normalizedSteps = topologicallyOrderSteps(steps);
   for (const raw of plan.mappings) {
     const mapping = object(raw);
-    if (!nonempty(mapping.source) || !nonempty(mapping.targetSymbol) || !nonempty(mapping.targetPath) || !covered.has(mapping.targetPath)) {
-      throw new Error("Each mapping must reference a target file covered by a plan step.");
+    if (!nonempty(mapping.source) || !nonempty(mapping.targetPath) ||
+      (mapping.targetSymbol !== null && mapping.targetSymbol !== undefined && typeof mapping.targetSymbol !== "string")) {
+      throw new Error("Each mapping must include a source and target path.");
     }
+    canonicalPlanFile(mapping.targetPath, allowed, "Mappings must reference an allowed write file.");
   }
   for (const raw of plan.dependencies) {
     const dependency = object(raw);
     if (!nonempty(dependency.name) || !nonempty(dependency.detail) ||
       !["reuse", "replace", "adapt", "translate"].includes(String(dependency.strategy))) throw new Error("Invalid dependency strategy.");
   }
-  return structuredClone(plan) as unknown as WorkspaceTranslationPlan;
+  const normalized = structuredClone(plan) as Record<string, unknown>;
+  normalized.steps = normalizedSteps.map(({ id, description, files, dependsOn }) => ({ id, description, files, dependsOn }));
+  normalized.mappings = (normalized.mappings as Array<Record<string, unknown>>).map((mapping) => ({
+    ...mapping,
+    targetPath: canonicalPlanFile(mapping.targetPath, allowed),
+    targetSymbol: mapping.targetSymbol == null ? "" : mapping.targetSymbol,
+  }));
+  for (const field of ["protocolRulesUsed", "boundaryAssumptions", "semanticRisks"] as const) {
+    if (normalized[field] !== undefined) normalized[field] = Array.isArray(normalized[field])
+      ? (normalized[field] as unknown[]).filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map(item => item.trim().slice(0, 500)).slice(0, 32)
+      : [];
+  }
+  if (normalized.protocolCandidates !== undefined) {
+    normalized.protocolCandidates = Array.isArray(normalized.protocolCandidates)
+      ? (normalized.protocolCandidates as unknown[]).filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+        .map(item => ({
+          scope: Array.isArray(item.scope) ? item.scope.filter((value): value is string => typeof value === "string").slice(0, 16) : [],
+          topic: (["state", "identity", "ordering", "failure", "retry", "scope"] as const).includes(item.topic as "state" | "identity" | "ordering" | "failure" | "retry" | "scope") ? item.topic as "state" | "identity" | "ordering" | "failure" | "retry" | "scope" : "scope",
+          rule: typeof item.rule === "string" ? item.rule.trim().slice(0, 500) : "",
+          ...(typeof item.note === "string" && item.note.trim() ? { note: item.note.trim().slice(0, 500) } : {}),
+        })).filter(item => item.rule).slice(0, 32)
+      : [];
+  }
+  return normalized as unknown as WorkspaceTranslationPlan;
+}
+
+function planPathKey(path: string): string {
+  let normalized = path.replaceAll("\\", "/");
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function canonicalPlanFile(value: unknown, allowed: ReadonlyMap<string, string>, outOfScopeMessage = "Steps must have unique IDs, allowed files, and valid dependencies."): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("Plan contains an invalid workspace file path.");
+  let path = value.replaceAll("\\", "/");
+  while (path.startsWith("./")) path = path.slice(2);
+  validateWorkspacePath(path);
+  const canonical = allowed.get(planPathKey(path));
+  if (!canonical) throw new Error(outOfScopeMessage);
+  return canonical;
+}
+
+function topologicallyOrderSteps(steps: ReadonlyArray<{ id: string; description: string; files: string[]; dependsOn: string[]; index: number }>): Array<{ id: string; description: string; files: string[]; dependsOn: string[]; index: number }> {
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const remaining = new Map(steps.map((step) => [step.id, step.dependsOn.length]));
+  const dependents = new Map<string, string[]>();
+  for (const step of steps) for (const dependency of step.dependsOn) dependents.set(dependency, [...(dependents.get(dependency) ?? []), step.id]);
+  const ready = steps.filter((step) => step.dependsOn.length === 0).sort((a, b) => a.index - b.index).map((step) => step.id);
+  const result: typeof steps[number][] = [];
+  while (ready.length) {
+    const id = ready.shift()!;
+    const step = byId.get(id)!;
+    result.push(step);
+    for (const dependent of dependents.get(id) ?? []) {
+      const count = remaining.get(dependent)! - 1;
+      remaining.set(dependent, count);
+      if (count === 0) ready.push(dependent);
+    }
+    ready.sort((a, b) => byId.get(a)!.index - byId.get(b)!.index);
+  }
+  if (result.length !== steps.length) throw new Error("Steps must form an acyclic dependency graph.");
+  return result;
 }

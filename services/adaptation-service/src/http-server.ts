@@ -1,6 +1,6 @@
 import { modelSettingsScope, requestModelSettings } from './model-request';
 import { isLocalIdeRequest } from './model-request';
-import { parseRetrievalRerank, rankRetrieval, type RetrievalRerankInput } from './retrieval-rerank';
+import { parseRetrievalRerank, rankRetrieval, rankRetrievalWithReferences, type RetrievalRerankInput } from './retrieval-rerank';
 import { modelCredentialScope, requestModelCredential } from './model-credential';
 import {
   createServer,
@@ -365,8 +365,10 @@ export function createHttpServer(options: HttpServerOptions): Server {
         let input: RetrievalRerankInput;
         try { input = parseRetrievalRerank(await readBody(request)); }
         catch { throw new HttpError(400, 'Invalid bounded rerank request.'); }
-        const order = await (options.retrievalRerank ?? rankRetrieval)(input, requestSignal(request));
-        json(response, 200, { order, provider: modelSettingsScope.getStore()?.provider ?? 'deepseek',
+        const ranked = input.selectReferences
+          ? await rankRetrievalWithReferences(input, requestSignal(request))
+          : {order: await (options.retrievalRerank ?? rankRetrieval)(input, requestSignal(request))};
+        json(response, 200, { ...ranked, provider: modelSettingsScope.getStore()?.provider ?? 'deepseek',
           model: modelSettingsScope.getStore()?.model ?? 'environment' }, options.corsOrigin);
         return;
       }

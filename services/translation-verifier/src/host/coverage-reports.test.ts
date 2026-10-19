@@ -2,6 +2,15 @@ import { describe, it, expect } from "vitest";
 import { parseJacocoReport, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx } from "./coverage-reports.js";
 const loc = (start: number, end = start) => ({ start: { line: start, column: 0 }, end: { line: end, column: 20 } });
 describe("framework coverage reports", () => {
+  it("matches a qualified Java method without parameters and keeps overloads ambiguous", () => {
+    const method = (desc: string) => `<method name="run" desc="${desc}"><counter type="METHOD" missed="0" covered="1"/></method>`;
+    const xml = (methods: string) => `<report><package name="demo"><class name="demo/Service" sourcefilename="Service.java">${methods}</class><class name="demo/Other" sourcefilename="Service.java">${method("()V")}</class></package></report>`;
+    const subject = { path: "Service.java", name: "run", signature: "Service.run" };
+    expect(parseJacocoReport(xml(method("()V")), subject, "package demo;")).toMatchObject({ executed: true });
+    expect(() => parseJacocoReport(xml(method("()V") + method("(I)V")), subject, "package demo;")).toThrow("2 matches");
+    expect(parseJacocoReport(xml(method("()V") + method("(I)V")), { ...subject, signature: "Service.run(int value)" }, "package demo;").executed).toBe(true);
+  });
+
   it("merges JUnit leaves without counting parent suites twice", () => {
     expect(parseJUnit('<testsuites><testsuite tests="99"><testsuite tests="3" failures="1" errors="0" skipped="1"/></testsuite><testsuite tests="1" failures="0" errors="1" skipped="0"/></testsuites>')).toEqual({ executed: 3, passed: 1, failed: 2, skipped: 1 });
     expect(() => parseJUnit('<testsuite tests="1" skipped="2"/>')).toThrow();
@@ -62,6 +71,24 @@ describe("framework coverage reports", () => {
     </classes></package></packages></coverage>`;
     expect(parseCobertura(xml, { path: "Policies.cs", name: "Evaluate", signature: "AttachmentValidationPipeline.Evaluate(AttachmentInput attachment)" }, "/project/src").executed).toBe(true);
   });
+  it("distinguishes covered and uncovered C# overloads including extension and default parameters", () => {
+    const xml = `<coverage><packages><package><classes><class name="App.DomainExtensions" filename="Extensions.cs"><methods>
+      <method name="StableFingerprint" signature="(App.OrderRequest)"><lines><line number="1" hits="1"/></lines></method>
+      <method name="StableFingerprint" signature="(App.AttachmentInput,System.Int32)"><lines><line number="2" hits="0"/></lines></method>
+    </methods></class></classes></package></packages></coverage>`;
+    const subject = { path: "Extensions.cs", name: "StableFingerprint" };
+    expect(() => parseCobertura(xml, { ...subject, signature: "DomainExtensions.StableFingerprint" })).toThrow("Cannot uniquely locate");
+    expect(parseCobertura(xml, { ...subject, signature: "DomainExtensions.StableFingerprint(this OrderRequest order)" }).executed).toBe(true);
+    expect(parseCobertura(xml, { ...subject, signature: "DomainExtensions.StableFingerprint(this AttachmentInput attachment, int limit = 4)" }).executed).toBe(false);
+    expect(() => parseCobertura(xml, { ...subject, signature: "DomainExtensions.StableFingerprint(PluginInvocation invocation)" })).toThrow("Cannot uniquely locate");
+  });
+  it("maps real Coverlet async state machines to their declaring method and rejects ambiguous overloads", () => {
+    const state = (owner: string, ordinal: number) => `<class name="${owner}/&lt;SubmitAsync&gt;d__${ordinal}" filename="Service.cs"><methods><method name="MoveNext" signature="()"><lines><line number="5" hits="1"/></lines></method></methods></class>`;
+    const report = (classes: string) => `<coverage><sources><source>/project</source></sources><packages><package><classes>${classes}</classes></package></packages></coverage>`;
+    const subject = { path: "Service.cs", name: "SubmitAsync", signature: "AssetService.SubmitAsync" };
+    expect(parseCobertura(report(state("App.AssetService", 1) + state("App.OrderService", 2)), subject, "/project")).toMatchObject({ executed: true, lineCoverage: 100 });
+    expect(() => parseCobertura(report(state("App.AssetService", 1) + state("App.AssetService", 2)), subject, "/project")).toThrow("Cannot uniquely locate");
+  });
 });
 
 const subject = { path: "src/main/java/example/Order.java", name: "calculatePrice", signature: "public int calculatePrice(int quantity)" };
@@ -94,6 +121,28 @@ describe("JaCoCo and Surefire reports", () => {
     const xml = report(method("([Ljava/lang/String;I)I"));
     expect(parseJacocoReport(xml, { ...subject, signature: "int calculatePrice(String[] values, int count)" }, source).executed).toBe(true);
     expect(parseJacocoReport(xml, { ...subject, signature: "([Ljava/lang/String;I)I" }, source).executed).toBe(true);
+  });
+  it.each([
+    ["java.util.Map<String, java.util.List<? extends Number>> values, int count", "(Ljava/util/Map;I)I"],
+    ["final java.util.Map<String, java.util.List<Integer>>[][] values, int count", "([[Ljava/util/Map;I)I"],
+    ["int count, Map<String, List<? super Integer>>... values", "(I[Ljava/util/Map;)I"],
+  ])("matches erased nested Java generic parameter types without splitting their commas: %s", (parameters, desc) => {
+    expect(parseJacocoReport(report(method(desc)), { ...subject, signature: `Order.calculatePrice(${parameters})` }, source).executed).toBe(true);
+  });
+  it("keeps generic and non-generic overload coverage separate, including uncovered generic methods", () => {
+    const xml = report(method("(Ljava/util/List;)I", false) + method("(Ljava/lang/String;)I", true));
+    expect(parseJacocoReport(xml, { ...subject, signature: "Order.calculatePrice(List<String> values)" }, source)).toMatchObject({ executed: false, lineCoverage: 0 });
+    expect(parseJacocoReport(xml, { ...subject, signature: "Order.calculatePrice(String value)" }, source).executed).toBe(true);
+    expect(() => parseJacocoReport(xml, { ...subject, signature: "Order.calculatePrice" }, source)).toThrow("2 matches");
+    expect(() => parseJacocoReport(xml, { ...subject, signature: "Order.calculatePrice(Set<String> values)" }, source)).toThrow("0 matches");
+  });
+  it("rejects malformed generic lists and keeps duplicate erased descriptors ambiguous", () => {
+    const xml = report(method("(Ljava/util/Map;)I"));
+    for (const parameters of ["Map<String, Integer values", "Map<String>> values"]) {
+      expect(() => parseJacocoReport(xml, { ...subject, signature: `Order.calculatePrice(${parameters})` }, source)).toThrow("0 matches");
+    }
+    expect(() => parseJacocoReport(report(method("(Ljava/util/List;)I") + method("(Ljava/util/List;)I")),
+      { ...subject, signature: "Order.calculatePrice(List<String> values)" }, source)).toThrow("2 matches");
   });
   it("refuses other source files, packages, malformed XML and invalid counters", () => {
     expect(() => parseJacocoReport(report(), { ...subject, path: "src/Other.java" }, source)).toThrow("0 matches");

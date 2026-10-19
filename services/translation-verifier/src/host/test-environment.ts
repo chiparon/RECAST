@@ -128,20 +128,106 @@ async function resolveJavaEnvironment(root: string): Promise<TestEnvironment> {
     ? mavenTestSourceRoots(config).length > 0
     : gradleTestSourceRoots(config).length > 0;
   let cleanup: (() => Promise<void>) | undefined;
-  if (!hasConfiguredSourceRoot && !(await directoryExists(join(root, "src/test/java")))) {
-    const generated = await createEphemeralDirectory(root, "src/test/java");
-    roots = unique([generated.relativePath, ...roots]);
-    cleanup = generated.cleanup;
+  let targetTest: TargetTest;
+  if (candidate.framework === "maven" && !hasConfiguredSourceRoot && !(await directoryExists(join(root, "src/test/java")))) {
+    // A production Maven skeleton frequently has no JUnit dependency and its
+    // target/ directory may be owned by a Docker build. Use a disposable
+    // Host-owned test project with JUnit/Surefire/JaCoCo instead of writing
+    // dependencies or reports into the product project.
+    // A resolver unit test or a freshly created skeleton may not have been
+    // compiled yet. In that case there is no production classpath for a
+    // temporary harness to reference; preserve the ordinary Maven test root
+    // and let the normal compile gate establish the classpath first. Once
+    // target/classes or a production jar exists, use the isolated harness.
+    const compiledOutput = await mavenCompiledOutput(root, config);
+    if (compiledOutput) {
+      const harness = await createMavenHarness(root, config, compiledOutput);
+      roots = [harness.testsRelative];
+      targetTest = harness.targetTest;
+      cleanup = harness.cleanup;
+    } else {
+      const generated = await createEphemeralDirectory(root, "src/test/java");
+      roots = [generated.relativePath];
+      targetTest = { executable: await wrapperOrCommand(root, "mvnw"), args: [...MAVEN_COVERAGE_GOALS] };
+      cleanup = generated.cleanup;
+    }
+  } else {
+    targetTest = {
+      executable: await wrapperOrCommand(root, candidate.framework === "maven" ? "mvnw" : "gradlew"),
+      args: candidate.framework === "maven" ? [...MAVEN_COVERAGE_GOALS] : ["test"],
+    };
   }
   const testRoots = await validateTestRoots(root, roots, candidate.framework);
   return {
     framework: candidate.framework,
     testRoots,
-    targetTest: {
-      executable: await wrapperOrCommand(root, candidate.framework === "maven" ? "mvnw" : "gradlew"),
-      args: candidate.framework === "maven" ? [...MAVEN_COVERAGE_GOALS] : ["test"],
-    },
+    targetTest,
     ...(cleanup ? { cleanup } : {}),
+  };
+}
+
+async function mavenCompiledOutput(root: string, pom: string): Promise<{ jar?: string; classes?: string } | undefined> {
+  const target = join(root, "target");
+  const classes = await directoryExists(join(target, "classes"));
+  const artifactId = (pom.match(/<artifactId>\s*([^<]+)\s*<\/artifactId>/i)?.[1] ?? "").trim();
+  const jars = (await readdir(target).catch(() => [] as string[]))
+    .filter(name => name.endsWith(".jar") && !name.endsWith("-sources.jar") && !name.endsWith("-javadoc.jar"));
+  const jarName = jars.find(name => artifactId && name.startsWith(`${artifactId}-`)) ?? jars[0];
+  if (!jarName && !classes) return undefined;
+  return { ...(jarName ? { jar: join(target, jarName) } : {}), ...(classes ? { classes: join(target, "classes") } : {}) };
+}
+
+async function createMavenHarness(root: string, productionPom: string, compiled: { jar?: string; classes?: string }): Promise<{
+  testsRelative: string;
+  targetTest: TargetTest;
+  cleanup: () => Promise<void>;
+}> {
+  const artifactId = (productionPom.match(/<artifactId>\s*([^<]+)\s*<\/artifactId>/i)?.[1] ?? "target-project").trim();
+  const version = (productionPom.match(/<version>\s*([^<]+)\s*<\/version>/i)?.[1] ?? "0.0.0").trim();
+  const release = (productionPom.match(/<maven\.compiler\.release>\s*([^<]+)\s*<\/maven\.compiler\.release>/i)?.[1] ??
+    productionPom.match(/<release>\s*([^<]+)\s*<\/release>/i)?.[1] ?? "21").trim();
+  const harnessRelative = `.translation-verifier-tests/${randomUUID()}`;
+  const harnessRoot = join(root, harnessRelative);
+  const testsRelative = `${harnessRelative}/tests`;
+  const pomRelative = `${harnessRelative}/pom.xml`;
+  const productionJar = compiled.jar?.replaceAll("\\", "/");
+  const productionClasses = (compiled.classes ?? join(root, "target", "classes")).replaceAll("\\", "/");
+  const productionSources = join(root, "src", "main", "java").replaceAll("\\", "/");
+  await mkdir(join(harnessRoot, "tests"), { recursive: true });
+  await writeFile(join(harnessRoot, "pom.xml"), `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>forexplore.verifier</groupId><artifactId>translation-verifier-harness</artifactId><version>1.0.0</version>
+  <properties><maven.compiler.release>${release}</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <production.classes>${productionClasses}</production.classes><production.sources>${productionSources}</production.sources>
+  </properties>
+  <dependencies>
+    <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.11.4</version></dependency>
+    ${productionJar ? `<dependency><groupId>target.production</groupId><artifactId>${artifactId}</artifactId><version>${version}</version><scope>system</scope><systemPath>${productionJar}</systemPath></dependency>` : ""}
+  </dependencies>
+  <build>
+    <!-- JaCoCo report reads the Maven project's outputDirectory, not classDirectories. -->
+    <outputDirectory>\${production.classes}</outputDirectory>
+    <testSourceDirectory>\${project.basedir}/tests</testSourceDirectory>
+    <plugins>
+      <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.0</version><configuration><useModulePath>false</useModulePath><reportsDirectory>\${surefire.reportsDirectory}</reportsDirectory></configuration></plugin>
+      <plugin><groupId>org.jacoco</groupId><artifactId>jacoco-maven-plugin</artifactId><version>0.8.13</version><configuration><destFile>\${jacoco.dataFile}</destFile><dataFile>\${jacoco.dataFile}</dataFile><outputDirectory>\${jacoco.outputDirectory}</outputDirectory></configuration></plugin>
+      <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version><configuration><release>\${maven.compiler.release}</release>${productionJar ? "" : "<additionalClasspathElements><additionalClasspathElement>\${production.classes}</additionalClasspathElement></additionalClasspathElements>"}</configuration></plugin>
+    </plugins>
+  </build>
+</project>
+`, "utf8");
+  return {
+    testsRelative,
+    targetTest: {
+      executable: await wrapperOrCommand(root, "mvnw"),
+      args: ["-f", pomRelative, ...MAVEN_COVERAGE_GOALS],
+    },
+    cleanup: async () => {
+      await removeGeneratedTree(harnessRoot);
+      try { await rmdir(join(root, ".translation-verifier-tests")); } catch { /* sibling harnesses may remain */ }
+    },
   };
 }
 
@@ -150,7 +236,11 @@ async function resolveDotnetEnvironment(root: string): Promise<TestEnvironment> 
   const projects: string[] = [];
   for (const name of entries) {
     const path = name.replaceAll("\\", "/");
-    if (!path.endsWith(".csproj") || path.split("/").some(part => ["obj", "bin", ".git"].includes(part))) continue;
+    // Harnesses created by the Host live under .translation-verifier-tests.
+    // They are disposable test environments, never user test projects. If a
+    // previous Agent run was interrupted before cleanup, do not rediscover
+    // that stale project and bind every later verifier attempt to it.
+    if (!path.endsWith(".csproj") || path.split("/").some(part => ["obj", "bin", ".git", ".translation-verifier-tests"].includes(part))) continue;
     const text = await readText(join(root, path));
     if (/<IsTestProject>\s*true\s*<\/IsTestProject>/i.test(text) || /Include=["']Microsoft\.NET\.Test\.Sdk["']/i.test(text)) projects.push(path);
   }
@@ -168,7 +258,7 @@ async function resolveDotnetEnvironment(root: string): Promise<TestEnvironment> 
   // carry a test dependency or requiring the user to edit the skeleton.
   const productionProjects = entries
     .map((name) => name.replaceAll("\\", "/"))
-    .filter((name) => name.endsWith(".csproj") && !name.split("/").some((part) => ["obj", "bin", ".git"].includes(part)));
+    .filter((name) => name.endsWith(".csproj") && !name.split("/").some((part) => ["obj", "bin", ".git", ".translation-verifier-tests"].includes(part)));
   if (productionProjects.length !== 1) throw new Error("C# target project must contain one production project when no test project is present.");
   const productionProject = productionProjects[0]!;
   const productionAbsolute = join(root, productionProject);

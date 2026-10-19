@@ -317,9 +317,10 @@ describe('revision store hardening', () => {
 
     await new SeekDbProjection(store).projectModuleArtifacts(index);
     const summaries = (await store.listSearchDocuments(index)).filter((document) => document.kind === 'summary');
-    expect(summaries).toHaveLength(6);
+    expect(summaries).toHaveLength(8);
     expect([...new Set(summaries.map((document) => JSON.parse(document.text).moduleId))].sort()).toEqual(['audit', 'payments']);
-    expect(new Set(summaries.map((document) => document.searchDocumentId)).size).toBe(6);
+    expect(new Set(summaries.map((document) => document.searchDocumentId)).size).toBe(8);
+    expect(summaries.filter((document) => JSON.parse(document.text).view === 'identity')).toHaveLength(2);
     expect(summaries.filter((document) => JSON.parse(document.text).view === 'interface')).toHaveLength(2);
     expect(summaries.filter((document) => JSON.parse(document.text).view === 'dependency')).toHaveLength(2);
   });

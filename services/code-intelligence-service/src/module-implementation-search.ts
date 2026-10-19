@@ -15,6 +15,7 @@ import { searchModules } from './module-matching.js';
 import type { ModuleReranker } from './module-reranker.js';
 import { projectPlanHash } from './project-analysis.js';
 import { RecallKernel } from './recall-kernel.js';
+import { resolveModuleRetrievalTarget } from './module-search-query.js';
 
 export interface ModuleImplementationSearchRequest {
   target: ModuleTarget;
@@ -24,7 +25,7 @@ export interface ModuleImplementationSearchRequest {
 }
 
 export interface ModuleImplementationSearchPort {
-  search(request: ModuleImplementationSearchRequest, signal?: AbortSignal): Promise<SearchCandidate[]>;
+  search(request: ModuleImplementationSearchRequest, signal?: AbortSignal, reranker?: ModuleReranker): Promise<SearchCandidate[]>;
 }
 
 /**
@@ -335,26 +336,30 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
     this.#recall = new RecallKernel(store);
   }
 
-  async search(request: ModuleImplementationSearchRequest, signal?: AbortSignal): Promise<SearchCandidate[]> {
+  async search(request: ModuleImplementationSearchRequest, signal?: AbortSignal, scopedReranker?: ModuleReranker): Promise<SearchCandidate[]> {
+    const reranker = scopedReranker ?? this.reranker;
     if (request.target.kind === 'module') {
+      // Resolve before the cache key: a re-published summary in the same source
+      // revision must invalidate old results just like a revision change does.
+      request = { ...request, target: await resolveModuleRetrievalTarget(this.store, request.target, signal) };
       const repositoryIds = [...new Set(request.repositoryIds)].sort();
-      const rerankerKey = this.reranker?.cacheKey?.() ?? this.reranker?.model ?? '';
+      const rerankerKey = reranker?.cacheKey?.() ?? reranker?.model ?? '';
       const key = JSON.stringify({ target: request.target, requirement: request.requirement, topK: request.topK,
         repositoryIds, reranker: rerankerKey });
       const cached = this.#moduleCache.get(key);
-      if (cached && cached.expiresAt > Date.now() && await this.#cacheRevisionsCurrent(repositoryIds, cached.revisions, signal)) {
+      if (!scopedReranker && cached && cached.expiresAt > Date.now() && await this.#cacheRevisionsCurrent(repositoryIds, cached.revisions, signal)) {
         return cloneCandidates(cached.value);
       }
       if (cached) this.#moduleCache.delete(key);
-      const result = await searchModules(this.store, { ...request, repositoryIds }, signal, this.reranker, this.#recall);
+      const result = await searchModules(this.store, { ...request, repositoryIds }, signal, reranker, this.#recall);
       const revisions = new Map((await Promise.all(repositoryIds.map(async (repositoryId) => {
         const repository = await this.store.getRepository(repositoryId, signal);
         return repository?.activeRevision ? [repositoryId, repository.activeRevision] as const : null;
       }))).filter((entry): entry is readonly [string, string] => entry !== null));
       // Do not cache a hybrid-order fallback after a model failure: a later
       // request should get a chance to rerank once the provider recovers.
-      const rerankSucceeded = !this.reranker || result.every((candidate) => Boolean(candidate.moduleMatch?.reranker));
-      if (rerankSucceeded) {
+      const rerankSucceeded = !reranker || result.every((candidate) => Boolean(candidate.moduleMatch?.reranker));
+      if (rerankSucceeded && !scopedReranker) {
         this.#moduleCache.set(key, { expiresAt: Date.now() + ModuleImplementationSearchService.#moduleCacheTtlMs,
           revisions, value: cloneCandidates(result) });
         while (this.#moduleCache.size > ModuleImplementationSearchService.#moduleCacheMaxEntries) {

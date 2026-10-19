@@ -41,6 +41,12 @@ export interface ModuleTarget {
     repositoryId?: string;
     analysisRevision?: string;
     projectId?: string;
+    /** Reviewed module identity and behavior summary; independent of user input. */
+    moduleId?: string;
+    purpose?: string;
+    description?: string;
+    /** Bounded declaration and referenced port/type names from this module's indexed files. */
+    symbolNames?: string[];
     sourceFiles: string[];
     coreApis: string[];
     dependsOn: string[];

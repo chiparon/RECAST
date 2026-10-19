@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { recordTestRun, snapshotTest } from "../test-evidence.js";
 import {
   assertTestPath,
   relativePath,
@@ -68,7 +69,9 @@ export function createRunFunctionGroupTestsTool(): HostToolFactory {
           }
           if (!testStat.isFile()) throw new Error(`Test path is not a file: ${path}`);
         }
+        const versions = await Promise.all(input.paths.map(path => snapshotTest(context, path)));
         const result = await context.functionGroupRunner!.run(input.paths);
+        recordTestRun(context, result, versions);
         context.budget?.assertActive();
         context.state.lastFunctionGroupTest = result;
         context.state.functionGroupTests ??= [];

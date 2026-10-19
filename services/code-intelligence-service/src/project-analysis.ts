@@ -21,6 +21,12 @@ export interface ProjectAnalysisOptions {
   maxFilesPerModule?: number;
   /** Repository-wide limit because the legacy planner reads repository metadata. */
   maxAgentProjectFiles?: number;
+  /**
+   * The caller supplied a complete, already bounded project plan. Such a plan
+   * must not be replaced by adaptive fallback merely because the indexed
+   * repository is large; the caller owns the plan's context and validation.
+   */
+  allowLargeAgentPlan?: boolean;
   onChange?(): void;
   project?(index: StructuralIndex): Promise<void>;
 }
@@ -215,7 +221,8 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
         record.state = 'analyzing';
         await persist();
         const planStarted = performance.now();
-        const useAgent = Boolean(this.options.plan) && index.files.length <= (this.options.maxAgentProjectFiles ?? 120);
+        const useAgent = Boolean(this.options.plan) &&
+          (this.options.allowLargeAgentPlan === true || index.files.length <= (this.options.maxAgentProjectFiles ?? 120));
         let result: ProjectAnalysisResult;
         if (useAgent) {
           result = await this.options.plan!({ ...scope, objective: projectAnalysisObjective });

@@ -1,5 +1,5 @@
 import { MAVEN_COVERAGE_GOALS } from "./test-runner.js";
-import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -46,6 +46,18 @@ describe("resolveTestEnvironment", () => {
     await expect(access(join(root, "src/test/java"))).resolves.toBeUndefined();
     await environment.cleanup?.();
     await expect(access(join(root, "src/test/java"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("matches an isolated Maven harness to the compiled project's Java release", async () => {
+    const root = await project();
+    await mkdir(join(root, "target/classes"), { recursive: true });
+    await writeFile(join(root, "pom.xml"), "<project><artifactId>demo</artifactId><version>1</version><properties><maven.compiler.release>17</maven.compiler.release></properties></project>");
+    const environment = await resolveTestEnvironment({ targetLanguage: "Java", targetProjectPath: root });
+    const harnessPom = join(root, environment.targetTest.args[1]!);
+    expect(await readFile(harnessPom, "utf8")).toContain("<maven.compiler.release>17</maven.compiler.release>");
+    expect(await readFile(harnessPom, "utf8")).toContain("<outputDirectory>\${production.classes}</outputDirectory>");
+    expect(await readFile(harnessPom, "utf8")).not.toContain("<classDirectories>");
+    await environment.cleanup?.();
   });
 
   it("uses pytest testpaths from project configuration", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectModule } from "@forexplore/contracts";
-import { buildModuleFunctionMapping, callableApiName, expandClassLevelFunctions } from "./module-function-mapping.js";
+import { buildModuleFunctionMapping, callableApiName, discoverExecutableFunctions, expandClassLevelFunctions } from "./module-function-mapping.js";
 
 const target = (coreApis: string[], sourceFiles = ["src/OrderService.cs", "src/PriceRule.cs"]): ProjectModule => ({
   id: "target", name: "Orders", kind: "feature", description: "orders", sourceFiles, coreApis,
@@ -8,6 +8,37 @@ const target = (coreApis: string[], sourceFiles = ["src/OrderService.cs", "src/P
 });
 
 describe("module function mapping", () => {
+  it("discovers new concrete services independently of stale interface APIs", () => {
+    const functions = discoverExecutableFunctions({
+      "Attachment.java": `public interface Attachment { void scan(); }
+        class Intake { @Deprecated public void accept(String tenant) {} private void helper() {} }
+        class Delivery { public void dispatch(String key) {} public void dispatch(String key, boolean retry) {} }
+        abstract class Policy { public abstract void check(); }`,
+    });
+    expect(functions).toEqual([
+      { path: "Attachment.java", name: "accept", signature: "Intake.accept" },
+      { path: "Attachment.java", name: "dispatch", signature: "Delivery.dispatch(String key)" },
+      { path: "Attachment.java", name: "dispatch", signature: "Delivery.dispatch(String key, boolean retry)" },
+    ]);
+  });
+
+  it("uses existing grammars for C# expression bodies and TypeScript public methods", () => {
+    expect(discoverExecutableFunctions({
+      "Price.cs": "public class Price { public int Calculate(int value) => value; private void Hidden() {} }",
+      "retry.ts": "export function retry() { return true; } export class Queue { deliver() {} private hidden() {} }",
+    }).map(fn => fn.signature)).toEqual(["Price.Calculate", "retry", "Queue.deliver"]);
+  });
+
+  it("keeps discovered file ownership and executable interface default methods", () => {
+    const contents = { "First.java": "interface First { default void run() {} }",
+      "Second.java": "interface Second { default void run() {} }" };
+    const functions = discoverExecutableFunctions(contents);
+    const mapping = buildModuleFunctionMapping(target(["Stale"], Object.keys(contents)), undefined, contents, functions);
+    expect(mapping.unmatchedFunctions).toEqual(functions);
+    expect(mapping.nonExecutableFunctions).toEqual([]);
+    expect(mapping.unmatchedFunctions.map(fn => fn.path)).toEqual(["First.java", "Second.java"]);
+  });
+
   it("expands class-level C# APIs to coverage-addressable methods", () => {
     const result = expandClassLevelFunctions(
       [{ path: "src/Telemetry.cs", name: "TraceFactory" }],
@@ -16,7 +47,7 @@ describe("module function mapping", () => {
     expect(result).toEqual([{
       path: "src/Telemetry.cs",
       name: "Start",
-      signature: "TraceFactory.Start(string traceId, string operation)",
+      signature: "TraceFactory.Start",
     }]);
   });
 
@@ -25,6 +56,36 @@ describe("module function mapping", () => {
       [{ path: "src/Telemetry.cs", name: "CheckAsync", signature: "AssetUpgradeGateway.Telemetry.MetricsHealthProbe.CheckAsync" }],
       () => undefined,
     )).toEqual([{ path: "src/Telemetry.cs", name: "CheckAsync", signature: "AssetUpgradeGateway.Telemetry.MetricsHealthProbe.CheckAsync" }]);
+  });
+
+  it("expands incomplete method identities into every overload of the declaring class", () => {
+    const source = `public class AssetAggregate {
+      public EventEnvelope MarkDelivered(EventEnvelope envelope, DateTimeOffset now) { return envelope; }
+      public AssetEvent MarkDelivered(AssetEvent assetEvent, DateTimeOffset now) { return assetEvent; }
+      public class Nested { public void MarkDelivered(string ignored) {} }
+      // public void MarkDelivered(bool commentedOut) {}
+    }
+    public class Other { public void MarkDelivered(int unrelated) {} }`;
+    expect(expandClassLevelFunctions([
+      { path: "Domain.cs", name: "MarkDelivered", signature: "Namespace.AssetAggregate.MarkDelivered" },
+    ], () => source)).toEqual([
+      { path: "Domain.cs", name: "MarkDelivered", signature: "AssetAggregate.MarkDelivered(EventEnvelope envelope, DateTimeOffset now)" },
+      { path: "Domain.cs", name: "MarkDelivered", signature: "AssetAggregate.MarkDelivered(AssetEvent assetEvent, DateTimeOffset now)" },
+    ]);
+    const precise = { path: "Domain.cs", name: "MarkDelivered", signature: "AssetAggregate.MarkDelivered(EventEnvelope envelope, DateTimeOffset now)" };
+    expect(expandClassLevelFunctions([precise], () => source)).toEqual([precise]);
+  });
+
+  it("expands overloaded extension methods with their source parameter signatures", () => {
+    expect(expandClassLevelFunctions([
+      { path: "Extensions.cs", name: "StableFingerprint", signature: "DomainExtensions.StableFingerprint" },
+    ], () => `public static class DomainExtensions {
+      public static string StableFingerprint(this OrderRequest order) => "x";
+      public static string StableFingerprint(this AttachmentInput attachment, int limit = 4) => "y";
+    }`)).toEqual([
+      { path: "Extensions.cs", name: "StableFingerprint", signature: "DomainExtensions.StableFingerprint(this OrderRequest order)" },
+      { path: "Extensions.cs", name: "StableFingerprint", signature: "DomainExtensions.StableFingerprint(this AttachmentInput attachment, int limit = 4)" },
+    ]);
   });
 
   it("normalizes signatures and maps every unique API", () => {
@@ -71,6 +132,32 @@ describe("module function mapping", () => {
     );
     expect(result.unmatchedFunctions.map((item) => item.path)).toEqual([
       "src/AuthorizationAndQuotaPolicies.cs", "src/AuthorizationAndQuotaPolicies.cs", "src/AttachmentPolicies.cs",
+    ]);
+  });
+
+  it("does not send interface and enum declarations to executable coverage", () => {
+    const result = buildModuleFunctionMapping(
+      target(["AssetKind", "IWorkflowDispatcher.DispatchAsync", "ConcreteService.Run"] , ["src/Contracts.cs", "src/Service.cs"]),
+      undefined,
+      {
+        "src/Contracts.cs": "public enum AssetKind { Unknown } public interface IWorkflowDispatcher { Task DispatchAsync(); }",
+        "src/Service.cs": "public sealed class ConcreteService { public void Run() {} }",
+      },
+    );
+    expect(result.nonExecutableFunctions.map((item) => item.name)).toEqual(["AssetKind", "DispatchAsync"]);
+    expect(result.unmatchedFunctions.map((item) => item.name)).toEqual(["Run"]);
+  });
+
+  it("resolves qualified types and expands generic methods without default parameter mismatches", () => {
+    const contents = { "src/Contracts.cs": "public enum AssetKind { Unknown } public record AssetEvent(string Id);",
+      "src/Domain.cs": "public static class DomainExtensions { public static T Resolve<T>(this IEnumerable<T> values) => default; public static string StableFingerprint(string value, int limit = 4) => value; }" };
+    const mapping = buildModuleFunctionMapping(target([
+      "AssetUpgradeGateway.Domain.AssetKind", "AssetUpgradeGateway.AssetEvent", "AssetUpgradeGateway.Domain.DomainExtensions",
+    ], Object.keys(contents)), undefined, contents);
+    expect(mapping.nonExecutableFunctions.map(fn => fn.name)).toEqual(["AssetKind", "AssetEvent"]);
+    expect(expandClassLevelFunctions(mapping.unmatchedFunctions, path => contents[path as keyof typeof contents])).toEqual([
+      { path: "src/Domain.cs", name: "Resolve", signature: "DomainExtensions.Resolve" },
+      { path: "src/Domain.cs", name: "StableFingerprint", signature: "DomainExtensions.StableFingerprint" },
     ]);
   });
 });

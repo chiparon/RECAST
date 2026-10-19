@@ -21,10 +21,10 @@ describe('hierarchical summary projection', () => {
     const stored = artifact(modules);
     const hash = projectPlanHash((stored.payload as ProjectAnalysisRecord).proposal);
     const documents = seekDbProjectionInternals.summaryDocuments(index, stored, index.analysisRevision);
-    expect(documents).toHaveLength(6);
-    expect(new Set(documents.map((document) => document.searchDocumentId)).size).toBe(6);
+    expect(documents).toHaveLength(8);
+    expect(new Set(documents.map((document) => document.searchDocumentId)).size).toBe(8);
     const parent = documents.filter((document) => JSON.parse(document.text).moduleId === 'parent');
-    expect(parent).toHaveLength(3);
+    expect(parent).toHaveLength(4);
     expect(parent.every((document) => document.kind === 'summary' && JSON.parse(document.text).nodeKind === 'subsystem' && JSON.parse(document.text).depth === 0)).toBe(true);
     expect(JSON.parse(parent.find((document) => JSON.parse(document.text).view === 'dependency')!.text).sourceFiles).toEqual(['src/parser.ts']);
     expect(documents.filter((document) => JSON.parse(document.text).moduleId === 'leaf').every((document) => JSON.parse(document.text).depth === 1)).toBe(true);
@@ -34,7 +34,7 @@ describe('hierarchical summary projection', () => {
 
   it('keeps legacy flat identities and bounds ancestor source samples', () => {
     const legacy = seekDbProjectionInternals.summaryDocuments(index, artifact([leaf]), index.analysisRevision);
-    expect(legacy).toHaveLength(3);
+    expect(legacy).toHaveLength(4);
     expect(legacy[0]!.searchDocumentId).toBe(seekDbProjectionInternals.documentId(index, 'summary', 'summary\0leaf'));
     expect(JSON.parse(legacy[0]!.text)).toMatchObject({ nodeKind: 'module', depth: 0, parentId: null });
     const parent = { ...leaf, id: 'parent', nodeKind: 'subsystem' as const, sourceFiles: [] };

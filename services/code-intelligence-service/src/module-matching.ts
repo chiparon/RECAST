@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { indexModuleHierarchy } from '@forexplore/contracts';
-import type { ModuleTarget, ProjectAnalysisRecord, ProjectModule, RepositoryRevisionScope, SearchCandidate } from '@forexplore/contracts';
+import type { ModuleTarget, ProjectAnalysisRecord, ProjectModule, RepositoryRevisionScope, SearchCandidate, SearchDocumentRecord, SymbolRecord } from '@forexplore/contracts';
 import type { IndexStore } from './index-store.js';
 import { projectPlanHash } from './project-analysis.js';
 import type { ModuleReranker } from './module-reranker.js';
-import { RecallKernel } from './recall-kernel.js';
+import { RecallKernel, reciprocalRankOffset } from './recall-kernel.js';
+import { buildModuleSearchQuery, resolveModuleRetrievalTarget } from './module-search-query.js';
 import { moduleSearchBudgetMs } from './seekdb-timeouts.js';
 
 export interface ModuleMatchRequest {
@@ -29,13 +30,18 @@ export interface ModuleSearchTiming {
   failedStage?: ModuleSearchStage;
 }
 
-type ModuleSearchStage = 'queueMs' | 'recallAndAggregateMs' | 'candidatePrepareMs' | 'rerankMs' | 'revisionCheckMs';
-
-/** The retrieval signals the shared kernel preserves for a recalled document. */
-interface ScoredDocument {
-  searchDocumentId: string;
-  retrievalScore?: { semantic?: number; lexical?: number; fusion?: number };
+export interface ModuleRecallObservation {
+  repositoryId: string;
+  analysisRevision: string;
+  projectId: string;
+  moduleId: string;
+  channels: string[];
+  score: number;
+  channelRanks?: Record<string, number>;
+  channelScores?: Record<string, number>;
 }
+
+type ModuleSearchStage = 'queueMs' | 'recallAndAggregateMs' | 'candidatePrepareMs' | 'rerankMs' | 'revisionCheckMs';
 
 interface ModuleHit extends RepositoryRevisionScope {
   repositoryName: string;
@@ -45,42 +51,170 @@ interface ModuleHit extends RepositoryRevisionScope {
   score: number;
   semanticScore: number;
   semanticOrderScore: number;
+  channelScores?: Map<string, number>;
+  channelRanks?: Map<string, number>;
+  fileEvidence?: Map<string, { score: number; fragment?: string; fragmentScore: number }>;
 }
 
 function compareHits(a: ModuleHit, b: ModuleHit): number {
-  return b.score - a.score || JSON.stringify([a.repositoryId, a.projectId, a.module.id])
+  return b.score - a.score || Number(a.module.nodeKind === 'subsystem') - Number(b.module.nodeKind === 'subsystem') ||
+    JSON.stringify([a.repositoryId, a.projectId, a.module.id])
     .localeCompare(JSON.stringify([b.repositoryId, b.projectId, b.module.id]));
 }
 
-/** Give the model both hybrid and semantic candidates, without duplicate manifests. */
+/** Give the model both ranking signals, preserving distinct module identities. */
 function shortlistHits(hits: ModuleHit[], budget: number): ModuleHit[] {
   const hybrid = [...hits].sort(compareHits);
   const semantic = [...hits].sort((a, b) => b.semanticOrderScore - a.semanticOrderScore || compareHits(a, b));
   const selected: ModuleHit[] = [];
   const seen = new Set<string>();
-  for (let index = 0; index < hits.length && selected.length < budget; index++) {
-    for (const hit of [hybrid[index], semantic[index]]) {
-      if (!hit || selected.length >= budget) continue;
-      const manifest = JSON.stringify([hit.repositoryId, hit.analysisRevision, hit.projectId, [...hit.module.sourceFiles].sort()]);
-      if (seen.has(manifest)) continue;
-      seen.add(manifest);
-      selected.push(hit);
-    }
+  const perRepository = new Map<string, number>();
+  const configuredRepositoryLimit = Number(process.env.CODE_INTELLIGENCE_MODULE_SHORTLIST_REPOSITORY_LIMIT ?? '0');
+  const repositoryLimit = configuredRepositoryLimit > 0 && Number.isInteger(configuredRepositoryLimit)
+    ? Math.min(configuredRepositoryLimit, budget)
+    : new Set(hits.map(hit => hit.repositoryId)).size > 1 ? Math.max(4, Math.ceil(budget / 3)) : budget;
+  const append = (hit: ModuleHit | undefined, diversify: boolean): void => {
+    if (!hit || selected.length >= budget || diversify && (perRepository.get(hit.repositoryId) ?? 0) >= repositoryLimit) return;
+    const identity = JSON.stringify([hit.repositoryId, hit.analysisRevision, hit.projectId, hit.module.id]);
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    selected.push(hit);
+    perRepository.set(hit.repositoryId, (perRepository.get(hit.repositoryId) ?? 0) + 1);
+  };
+  // Cosine scales and rank-fusion heads differ across repositories. Preserve
+  // each repository's best hybrid and semantic evidence before the global cut,
+  // so a large corpus cannot hide a smaller corpus from the model entirely.
+  const bestHybrid = new Map<string, ModuleHit>();
+  const bestSemantic = new Map<string, ModuleHit>();
+  for (const hit of hybrid) if (!bestHybrid.has(hit.repositoryId)) bestHybrid.set(hit.repositoryId, hit);
+  for (const hit of semantic) if (!bestSemantic.has(hit.repositoryId)) bestSemantic.set(hit.repositoryId, hit);
+  for (const hit of [...bestHybrid.values()].sort(compareHits)) {
+    append(hit, true);
+    append(bestSemantic.get(hit.repositoryId), true);
   }
+  for (let index = 0; index < hits.length && selected.length < budget; index++) {
+    append(hybrid[index], true);
+    append(semantic[index], true);
+  }
+  // Fill unused slots when only a few repositories contain relevant modules.
+  for (const hit of hybrid) append(hit, false);
   return selected.sort(compareHits);
-}
-
-function hybridRelevance(document: ScoredDocument, fallback: number): number {
-  const fusion = document.retrievalScore?.fusion;
-  // SeekDB uses two-channel RRF with offset 61; its theoretical maximum is 2/61.
-  // Other stores may expose raw lexical counts as fusion, so retain the kernel's
-  // normalised ranking when the value is outside that RRF range.
-  return fusion !== undefined && Number.isFinite(fusion) && fusion >= 0 && fusion <= 2 / 61
-    ? fusion * 61 / 2 : fallback;
 }
 
 function normalizedApi(api: string): string {
   return api.replace(/\(.*$/s, '').split(/[\s.:]+/).at(-1)?.replaceAll('_', '').toLowerCase() ?? '';
+}
+
+function isSourceFile(file: string): boolean {
+  return /\.(?:[cm]?[jt]sx?|java|cs|py|go|rs)$/i.test(file) && !/(?:^|\/)(?:package-info|module-info)\.java$/i.test(file);
+}
+
+function apiTerms(apis: readonly string[]): string[] {
+  return [...new Set(apis.filter(api => !/\b(?:class|interface|enum|record|struct)\s+\w/.test(api)).flatMap(api =>
+    api.replace(/\(.*$/s, '').trim().split(/\s+/).at(-1)!.split(/[.:#]+/).slice(-2))
+    .filter(term => term.length > 2))];
+}
+
+/** Strip comments/imports from display evidence, leaving the stored source intact. */
+function implementationExcerpt(text: string, apis: readonly string[], limit: number): string {
+  const cleaned = text.replace(/^[\t ]*\/\*[\s\S]*?\*\/[\t ]*/gm, '')
+    .replace(/^[\t ]*("""|''')[\s\S]*?\1[\t ]*$/gm, '')
+    .split(/\r?\n/).filter(line => !/^\s*(?:\/\/|#(?!\[)|package\s|import\s|from\s+\S+\s+import\s)/.test(line) &&
+      !/^\s*(?:global\s+)?using\s+(?:static\s+)?(?:[\w.]+\s*=\s*)?[\w.]+\s*;\s*$/.test(line))
+    .join('\n').trim();
+  const terms = apis.map(api => api.replace(/\(.*$/s, '').split(/[\s.:#]+/).at(-1)!).filter(term => term.length > 2);
+  const positions = terms.map(term => cleaned.toLowerCase().indexOf(term.toLowerCase())).filter(index => index >= 0);
+  const anchor = positions.length ? Math.min(...positions) : 0;
+  return cleaned.slice(Math.max(0, anchor - 80), Math.max(0, anchor - 80) + limit).trim();
+}
+
+function evidenceTerms(text: string): Set<string> {
+  return new Set(text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().match(/[a-z][a-z0-9]{2,}/g) ?? []);
+}
+
+/** Keep a strong match to one named responsibility in the model's shortlist,
+ * even when a multi-purpose query has a slightly higher generic cosine head. */
+function apiIdentityOverlap(required: readonly string[], module: ProjectModule): number {
+  const common = new Set(['async', 'await', 'get', 'set', 'is', 'can', 'run', 'submit', 'create', 'update', 'delete', 'register',
+    'search', 'query', 'find', 'check', 'add', 'remove', 'load', 'save', 'start', 'stop', 'close', 'init', 'execute',
+    'service', 'coordinator', 'gateway', 'adapter', 'factory', 'policy', 'impl', 'model', 'manager', 'context', 'lifecycle',
+    'processing', 'public', 'private', 'static', 'virtual', 'override', 'void']);
+  const words = (name: string): Set<string> => new Set([...evidenceTerms(name.replace(/^I(?=[A-Z])/, ''))].filter(word => !common.has(word)));
+  const identities = [...apiTerms((module.coreApis ?? []).slice(0, 64)), ...module.sourceFiles.slice(0, 12).map(file =>
+    file.split('/').at(-1)!.replace(/\.[^.]+$/, ''))].map(words).filter(group => group.size);
+  const targets = apiTerms(required).map(words).filter(group => group.size);
+  return Math.max(0, ...targets.flatMap(target => identities.map(identity =>
+    [...target].filter(word => identity.has(word)).length / target.size)));
+}
+
+/** Select a real callable body rather than a constant, constructor or file header. */
+function representativeSymbol(symbols: readonly SymbolRecord[], hit: ModuleHit, fragment: string | undefined, target?: ModuleTarget): SymbolRecord | undefined {
+  const apis = new Set((hit.module.coreApis ?? []).map(normalizedApi));
+  const exactApis = new Set((hit.module.coreApis ?? []).map(api => api.replace(/\(.*$/s, '').split(/[\s.:#]+/).at(-1)?.toLowerCase()));
+  const terms = evidenceTerms([hit.module.name, hit.module.purpose, hit.module.description, ...apis].filter(Boolean).join(' '));
+  const targetTerms = evidenceTerms([target?.module?.description, target?.module?.purpose,
+    ...(target?.module?.coreApis ?? [])].filter(Boolean).join(' '));
+  for (const word of ['async', 'get', 'set', 'run', 'service', 'module', 'application', 'existing', 'implement', 'public', 'private']) targetTerms.delete(word);
+  const score = (symbol: SymbolRecord): number => {
+    const lines = symbol.sourceRange.endLine - symbol.sourceRange.startLine;
+    const name = normalizedApi(symbol.name);
+    const matches = [...evidenceTerms(symbol.name)].filter(term => terms.has(term)).length;
+    const targetMatches = [...evidenceTerms(symbol.name)].filter(term => targetTerms.has(term)).length;
+    const recalled = fragment && new RegExp(`\\b${symbol.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`).test(fragment) ? 3 : 0;
+    const utilityPenalty = /^(?:toString|hashCode|equals|clone)$/.test(symbol.name) ? 8
+      : /^(?:get|set|is)[A-Z_]/.test(symbol.name) ? lines < 8 ? 8 : 2 : 0;
+    return (exactApis.has(symbol.name.toLowerCase()) ? 6 : apis.has(name) ? 4 : 0) + matches + targetMatches * 2 + recalled + Math.min(lines, 30) / 30 -
+      utilityPenalty;
+  };
+  return symbols.filter(symbol => ['method', 'function'].includes(symbol.kind) &&
+    symbol.sourceRange.endLine > symbol.sourceRange.startLine && !/;\s*$/.test(symbol.signature ?? ''))
+    .sort((a, b) => score(b) - score(a) || a.sourceRange.startLine - b.sourceRange.startLine)[0];
+}
+
+/** Prefer API-bearing production files and recalled implementations over file-list order. */
+function representativeFiles(hit: ModuleHit, limit = 3): string[] {
+  const files = [...new Set(hit.module.sourceFiles)];
+  const sources = files.filter(isSourceFile);
+  const production = sources.filter(file => !isTestFile(file));
+  const candidates = production.length ? production : sources.length ? sources : files;
+  const terms = apiTerms(hit.module.coreApis ?? []).map(term => term.toLowerCase());
+  const score = (file: string): number => {
+    const basename = file.split('/').at(-1)!.replace(/\.[^.]+$/, '').toLowerCase();
+    const api = terms.filter(term => basename === term || basename === term.replace(/^i(?=[a-z])/, '')).length;
+    return api * 2 + (hit.fileEvidence?.get(file)?.score ?? 0) * reciprocalRankOffset;
+  };
+  return candidates.sort((a, b) => score(b) - score(a) || a.localeCompare(b)).slice(0, limit);
+}
+
+/** Keep all representative files visible within the backend's 2,000-character preview. */
+function rerankDocument(candidate: SearchCandidate): string {
+  const files = candidate.moduleMatch?.previewFiles ?? [candidate.path];
+  const configuredChars = Number(process.env.CODE_INTELLIGENCE_MODULE_RERANK_DOCUMENT_CHARS ?? '2000');
+  const maxChars = Number.isInteger(configuredChars) && configuredChars >= 800 && configuredChars <= 8_000 ? configuredChars : 2_000;
+  const evidence = files.map((file, index) => {
+    const marker = `// ${file}\n`;
+    const start = candidate.preview.indexOf(marker);
+    const next = files[index + 1] ? candidate.preview.indexOf(`// ${files[index + 1]}\n`, start + marker.length) : -1;
+    const source = start >= 0 ? candidate.preview.slice(start + marker.length, next >= 0 ? next : undefined) : '';
+    return `${file.length > 90 ? '…' + file.slice(-89) : file}\n${implementationExcerpt(source, [], 320)}`;
+  });
+  return [candidate.title.slice(0, 100),
+    `Responsibilities: ${candidate.summary.slice(0, 400)}`,
+    candidate.sourceModule?.purpose ? `Purpose: ${candidate.sourceModule.purpose.slice(0, 150)}` : '',
+    `Core APIs: ${candidate.signature.slice(0, 180)}`,
+    `Implementation evidence:\n${evidence.join('\n\n')}`].filter(Boolean).join('\n').slice(0, maxChars);
+}
+
+function isTestFile(path: string): boolean {
+  return /(?:^|\/)(?:tests?|__tests__)(?:\/|$)|(?:[._-](?:test|spec)\.[^.]+$)|(?:Tests?\.cs$)|(?:^|\/)test_[^/]+\.py$/i.test(path);
+}
+
+function productionEvidenceWeight(targetFiles: readonly string[], candidateFiles: readonly string[]): number {
+  const sources = candidateFiles.filter(path => /\.(?:[cm]?[jt]sx?|java|cs|py|go|rs)$/i.test(path));
+  const targetSources = targetFiles.filter(path => /\.(?:[cm]?[jt]sx?|java|cs|py|go|rs)$/i.test(path));
+  // Tests can still serve as reference evidence, but a production translation
+  // should not lose implementation candidates to a module containing only tests.
+  return sources.length && sources.every(isTestFile) && !(targetSources.length && targetSources.every(isTestFile)) ? 0.5 : 1;
 }
 
 async function mapBounded<T, R>(items: readonly T[], concurrency: number, work: (item: T) => Promise<R>): Promise<R[]> {
@@ -96,10 +230,9 @@ async function mapBounded<T, R>(items: readonly T[], concurrency: number, work: 
 }
 
 /**
- * A process-wide admission gate for module searches.  A single search fans out
- * to four repositories and each repository issues a text and vector query; a
- * second caller must wait instead of making the eight-connection pool queue
- * dozens of statements behind a slow full-text scan.
+ * A process-wide admission gate for module searches. A single search fans out
+ * to four repositories and each view issues text and vector queries. Additional
+ * callers wait instead of adding their recall work to the shared connection pool.
  */
 export class ModuleSearchConcurrencyGate {
   #active = 0;
@@ -153,19 +286,27 @@ export class ModuleSearchConcurrencyGate {
 }
 
 function configuredModuleSearchConcurrency(): number {
-  // One admitted request fans out to four repositories and each repository runs
-  // text and vector SQL together (up to eight pool sessions).  A second request
-  // would exceed the default eight-connection pool, so the safe default is one;
-  // deployments with a larger database budget can opt into 2..32 explicitly.
+  // One admitted request already runs multiple repository/view lookups through
+  // the shared pool. Serialize database-heavy recalls by default; deployments
+  // with a larger database budget can opt into 2..32 explicitly.
   const value = Number(process.env.CODE_INTELLIGENCE_MODULE_SEARCH_CONCURRENCY ?? 1);
   return Number.isInteger(value) && value >= 1 && value <= 32 ? value : 1;
+}
+
+function configuredRepositoryConcurrency(): number {
+  // Lower fan-out reduces pool waits but can lengthen the critical path across
+  // repositories. Retain the measured default, with an explicit tuning option.
+  const value = Number(process.env.CODE_INTELLIGENCE_MODULE_REPOSITORY_CONCURRENCY ?? 4);
+  return Number.isInteger(value) && value >= 1 && value <= 4 ? value : 4;
 }
 
 const moduleSearchGate = new ModuleSearchConcurrencyGate(configuredModuleSearchConcurrency());
 
 /** Module metadata is fetched only for recalled IDs; no full structural index is hydrated. */
 export async function searchModules(store: IndexStore, request: ModuleMatchRequest, parentSignal?: AbortSignal, reranker?: ModuleReranker,
-  recall = new RecallKernel(store), observeTiming?: (timing: Readonly<ModuleSearchTiming>) => void): Promise<SearchCandidate[]> {
+  recall = new RecallKernel(store), observeTiming?: (timing: Readonly<ModuleSearchTiming>) => void,
+  observeCandidates?: (candidates: readonly SearchCandidate[]) => void,
+  observeRecall?: (hits: readonly ModuleRecallObservation[]) => void): Promise<SearchCandidate[]> {
   const started = performance.now();
   const timing: ModuleSearchTiming = { queueMs: 0, recallAndAggregateMs: 0, candidatePrepareMs: 0, rerankMs: 0,
     revisionCheckMs: 0, executionMs: 0, totalMs: 0, rerankCandidateCount: 0, outcome: 'error' };
@@ -192,7 +333,7 @@ export async function searchModules(store: IndexStore, request: ModuleMatchReque
     release = await moduleSearchGate.acquire(parentSignal);
     beginStage('recallAndAggregateMs');
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(moduleSearchBudgetMs), ...(parentSignal ? [parentSignal] : [])]);
-    const result = await searchModuleSnapshot(store, request, signal, reranker, recall, beginStage, timing, releaseDatabaseSlot);
+    const result = await searchModuleSnapshot(store, request, signal, reranker, recall, beginStage, timing, releaseDatabaseSlot, observeCandidates, observeRecall);
     timing.outcome = 'success';
     return result;
   } catch (error) {
@@ -214,38 +355,42 @@ export async function searchModules(store: IndexStore, request: ModuleMatchReque
 
 async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchRequest, signal: AbortSignal, reranker: ModuleReranker | undefined,
   recall: RecallKernel, beginStage: (stage: ModuleSearchStage) => void, timing: ModuleSearchTiming,
-  releaseDatabaseSlot: () => void): Promise<SearchCandidate[]> {
+  releaseDatabaseSlot: () => void, observeCandidates?: (candidates: readonly SearchCandidate[]) => void,
+  observeRecall?: (hits: readonly ModuleRecallObservation[]) => void): Promise<SearchCandidate[]> {
   if (!Number.isInteger(request.topK) || request.topK < 1 || request.topK > 10) throw new Error('Module search topK must be between 1 and 10.');
   const repositoryIds = [...new Set(request.repositoryIds)];
   if (repositoryIds.length === 0 || repositoryIds.length > 32) throw new Error('Module search requires between 1 and 32 historical repositories.');
   if (!store.searchSearchDocuments || !store.getModuleArtifacts || !store.getProject || !store.getSourcePreview) throw new Error('Module search requires bounded index-store queries.');
-  const query = [request.target.name, request.target.signature, request.target.documentation, request.requirement, ...(request.target.module?.coreApis ?? [])].filter(Boolean).join('\n');
-  if (!query.trim() || query.length > 32_000) throw new Error('Module query must contain between 1 and 32000 characters.');
-  const requiredApis = [...new Set(request.target.module?.coreApis ?? [])];
+  const target = await resolveModuleRetrievalTarget(store, request.target, signal);
+  const configuredRecallLimit = Number(process.env.CODE_INTELLIGENCE_MODULE_RECALL_LIMIT ?? String(request.topK * 8));
+  const limitPerView = Number.isInteger(configuredRecallLimit) && configuredRecallLimit >= 1 && configuredRecallLimit <= 96
+    ? configuredRecallLimit : Math.min(96, Math.max(16, request.topK * 8));
+  const { plans, rerankQuery } = buildModuleSearchQuery(target, request.requirement);
+  const maximumFusion = plans.reduce((sum, plan) => sum + plan.weight * (plan.views?.length ?? 3), 0) / reciprocalRankOffset;
+  const requiredApis = [...new Set(target.module?.coreApis ?? [])];
   const profile = process.env.RECAST_SEARCH_PROFILE === '1';
   const profileStart = profile ? Date.now() : 0;
-  const allHits = (await mapBounded(repositoryIds, 4, async (repositoryId) => {
+  const repositoryConcurrency = configuredRepositoryConcurrency();
+  const repositories = (await mapBounded(repositoryIds, repositoryConcurrency, async (repositoryId) => {
     signal.throwIfAborted();
     const repository = await store.getRepository(repositoryId, signal);
-    if (!repository?.activeRevision || repository.role !== 'history') return [];
+    if (!repository?.activeRevision || repository.role !== 'history') return undefined;
     const scope = { repositoryId, analysisRevision: repository.activeRevision };
     const revision = await store.getRevision(scope, signal);
-    if (revision?.status !== 'ready') return [];
-    // Shared kernel: the code identity is one plan, recall runs over every view.
-    // A module can now be reached through a matching implementation fragment, not
-    // only through a matching summary.
-    const recallStart = profile ? Date.now() : 0;
-    const outcome = await recall.recall({
-      scope,
-      plans: [{ label: 'code-identity', query, weight: 1 }],
-      limitPerView: Math.min(120, Math.max(24, request.topK * 12)),
-      signal,
-    });
+    return revision?.status === 'ready' ? { repository, scope, revision } : undefined;
+  })).filter((entry) => entry !== undefined);
+  const recallStarted = profile ? Date.now() : 0;
+  const outcomes = await recall.recallBatch(repositories.map(({ scope }) => ({ scope, plans, limitPerView, signal })), repositoryConcurrency);
+  const byScope = new Map(repositories.map(({ scope }, index) => [JSON.stringify([scope.repositoryId, scope.analysisRevision]), outcomes[index]!]));
+  if (profile) console.log(`      [profile] 批量召回=${Date.now() - recallStarted}ms 仓库数=${repositories.length}`);
+  const allHits = (await mapBounded(repositories, repositoryConcurrency, async ({ repository, scope, revision }) => {
+    const repositoryId = scope.repositoryId;
+    // Each view gets a question derived from the target module itself.
+    const outcome = byScope.get(JSON.stringify([scope.repositoryId, scope.analysisRevision]))!;
     // Older projections indexed whitespace gaps between declarations. They
     // contain no implementation evidence, even when their paths match the query.
     const documents = outcome.documents.filter((document) => document.kind !== 'source-fragment' || document.text.trim());
-    const recallMs = profile ? Date.now() - recallStart : 0;
-    if (profile) console.log(`      [profile]   ${repository.displayName}: recall=${recallMs}ms docs=${documents.length} 视图=${[...new Set(documents.map((d) => d.kind))].join('|') || '无'}`);
+    if (profile) console.log(`      [profile]   ${repository.displayName}: docs=${documents.length} 视图=${[...new Set(documents.map((d) => d.kind))].join('|') || '无'}`);
     // Summary documents carry their own module artifact. Implementation and
     // declaration hits do not, so their ownership is resolved against the module
     // artifacts recalled for this query - never by hydrating the whole revision.
@@ -280,7 +425,8 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       }
     }
     const byModule = new Map<string, ModuleHit>();
-    const scoreModule = (document: ScoredDocument, artifactId: string, moduleId: string, record: ProjectAnalysisRecord): void => {
+    const identityScores = new Map<string, number>();
+    const scoreModule = (document: SearchDocumentRecord, artifactId: string, moduleId: string, record: ProjectAnalysisRecord): void => {
       const tree = trees.get(artifactId)!;
       const node = tree.byId.get(moduleId);
       const project = projects.get(record.projectId);
@@ -289,21 +435,48 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       if (module.sourceFiles.length === 0) return;
       const available = new Set((module.coreApis ?? []).map(normalizedApi).filter(Boolean));
       const apiScore = requiredApis.length ? requiredApis.filter((api) => available.has(normalizedApi(api))).length / requiredApis.length : 0;
+      const key = JSON.stringify([record.projectId, module.id]);
+      if (!identityScores.has(key)) identityScores.set(key, apiIdentityOverlap(requiredApis, module));
+      const identityScore = identityScores.get(key)!;
       const semantic = document.retrievalScore?.semantic;
       const lexical = document.retrievalScore?.lexical ?? 0;
-      const fused = RecallKernel.normalise(outcome, document.searchDocumentId);
+      const evidenceWeight = productionEvidenceWeight(target.module?.sourceFiles ?? [target.path], module.sourceFiles);
+      const provenance = outcome.provenance.get(document.searchDocumentId) ?? [];
+      const hit = byModule.get(key) ?? { ...scope, repositoryName: repository.displayName, projectId: project.projectId,
+        projectPath: project.relativePath, module, score: 0, semanticScore: 0, semanticOrderScore: 0,
+        channelScores: new Map<string, number>(), channelRanks: new Map<string, number>(),
+        fileEvidence: new Map<string, { score: number; fragment?: string; fragmentScore: number }>() };
+      // Summary, source and symbol IDs are different documents even when they
+      // support the same module. Fuse at the module identity, retaining its best
+      // hit per channel so large modules cannot win by their document count.
+      for (const entry of provenance) {
+        const channel = JSON.stringify([entry.planLabel, entry.view]);
+        const contribution = entry.weight / (reciprocalRankOffset + entry.rank);
+        hit.channelScores!.set(channel, Math.max(hit.channelScores!.get(channel) ?? 0, contribution));
+        hit.channelRanks!.set(channel, Math.min(hit.channelRanks!.get(channel) ?? Number.POSITIVE_INFINITY, entry.rank));
+      }
+      const fused = [...hit.channelScores!.values()].reduce((sum, score) => sum + score, 0) / maximumFusion;
       const relevance = semantic !== undefined && Number.isFinite(semantic) ? Math.max(0, Math.min(1, semantic))
         : lexical > 0 ? lexical / (lexical + 10) : fused;
-      const semanticOrderScore = 0.8 * relevance + 0.2 * apiScore;
-      const score = 0.8 * hybridRelevance(document, fused) + 0.2 * apiScore;
-      const key = JSON.stringify([record.projectId, module.id]);
-      const previous = byModule.get(key);
-      if ((previous?.score ?? -1) < score) byModule.set(key, {
-        ...scope, repositoryName: repository.displayName, projectId: project.projectId,
-        projectPath: project.relativePath, module, score, semanticScore: relevance,
-        semanticOrderScore: Math.max(previous?.semanticOrderScore ?? 0, semanticOrderScore),
-      });
-      else if (previous) previous.semanticOrderScore = Math.max(previous.semanticOrderScore, semanticOrderScore);
+      hit.score = (0.8 * fused + 0.2 * apiScore) * evidenceWeight;
+      hit.semanticScore = Math.max(hit.semanticScore, relevance);
+      hit.semanticOrderScore = Math.max(hit.semanticOrderScore, (0.8 * relevance + 0.2 * Math.max(apiScore, identityScore)) * evidenceWeight);
+      if (document.relativePath) {
+        const file = hit.fileEvidence!.get(document.relativePath) ?? { score: 0, fragmentScore: 0 };
+        const contribution = provenance.reduce((sum, entry) => sum + entry.weight / (reciprocalRankOffset + entry.rank), 0);
+        file.score = Math.max(file.score, contribution);
+        if (document.kind === 'source-fragment' && implementationExcerpt(document.text, module.coreApis ?? [], 300)) {
+          const fragmentScore = contribution + apiTerms(module.coreApis ?? []).filter(term => document.text.includes(term)).length / reciprocalRankOffset;
+          if (!file.fragment || fragmentScore > file.fragmentScore) {
+            // Choose the implementation before bounding it; a long license or
+            // class comment must not consume the entire evidence allowance.
+            file.fragment = implementationExcerpt(document.text, module.coreApis ?? [], 4_000);
+            file.fragmentScore = fragmentScore;
+          }
+        }
+        hit.fileEvidence!.set(document.relativePath, file);
+      }
+      byModule.set(key, hit);
     };
     const seenDeclarations = new Set<string>();
     documents.forEach((document) => {
@@ -334,7 +507,7 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
     });
     return [...byModule.values()];
   })).flat();
-  if (profile) console.log(`      [profile] 召回+聚合(含4并发/仓库)=${Date.now() - profileStart}ms 仓库数=${repositoryIds.length}`);
+  if (profile) console.log(`      [profile] 召回+聚合(仓库并发=${repositoryConcurrency})=${Date.now() - profileStart}ms 仓库数=${repositoryIds.length}`);
 
   beginStage('candidatePrepareMs');
   // Older module projections can contain a documentation-only or otherwise
@@ -348,27 +521,65 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
       return false;
     }
   });
-  // Top4 receives up to 16 distinct candidates (bounded by the model's 20-item
+  // Read-only diagnostics expose every module surviving view ownership and language
+  // validation, before shortlist truncation. They never enter ranking or persistence.
+  try { observeRecall?.(usableHits.map(hit => ({ repositoryId: hit.repositoryId, analysisRevision: hit.analysisRevision,
+    projectId: hit.projectId, moduleId: hit.module.id,
+    channels: [...(hit.channelScores?.keys() ?? [])].map(key => { try { const [plan, view] = JSON.parse(key); return `${plan}:${view}`; } catch { return key; } }),
+    score: hit.score,
+    channelRanks: Object.fromEntries([...(hit.channelRanks ?? [])].map(([key, rank]) => {
+      try { const [plan, view] = JSON.parse(key); return [`${plan}:${view}`, rank]; } catch { return [key, rank]; }
+    })),
+    channelScores: Object.fromEntries([...(hit.channelScores ?? [])].map(([key, score]) => {
+      try { const [plan, view] = JSON.parse(key); return [`${plan}:${view}`, score]; } catch { return [key, score]; }
+    })),
+  })) ); } catch { /* observation must never affect search */ }
+  // Top4 receives up to 20 distinct candidates (bounded by the model's 20-item
   // contract). Keeping both orders protects useful semantic matches while
   // allowing lexical/vector agreement to bring missed implementations back.
-  const hits = reranker ? shortlistHits(usableHits, Math.min(20, Math.max(12, request.topK * 4)))
+  const configuredShortlist = Number(process.env.CODE_INTELLIGENCE_MODULE_SEARCH_SHORTLIST ?? '20');
+  const shortlistBudget = Number.isInteger(configuredShortlist) && configuredShortlist >= request.topK && configuredShortlist <= 64
+    ? configuredShortlist : 20;
+  const hits = reranker ? shortlistHits(usableHits, shortlistBudget)
     : usableHits.sort(compareHits).slice(0, request.topK);
+  // Parent/child candidates often share files. Keep these bounded local reads
+  // within this request; no revision-independent source cache is introduced.
+  const previewCache = new Map<string, ReturnType<NonNullable<IndexStore['getSourcePreview']>>>();
+  const symbolCache = new Map<string, ReturnType<NonNullable<IndexStore['querySymbols']>>>();
+  const sliceCache = new Map<string, ReturnType<NonNullable<IndexStore['getSourceSlice']>>>();
   const result = await mapBounded(hits, 4, async (hit): Promise<SearchCandidate> => {
     signal.throwIfAborted();
     const files = [...new Set(hit.module.sourceFiles)];
-    const previewFiles = files.slice(0, 3);
+    const previewFiles = representativeFiles(hit);
     const parts = await mapBounded(previewFiles, 3, async (file) => {
       signal.throwIfAborted();
-      const source = await store.getSourcePreview!(hit, file, 4_000, signal);
+      const key = JSON.stringify([hit.repositoryId, hit.analysisRevision, file]);
+      if (!previewCache.has(key)) previewCache.set(key, store.getSourcePreview!(hit, file, 4_000, signal));
+      const source = await previewCache.get(key)!;
       if (source === null) throw new Error(`Module source is missing from its revision: ${file}`);
-      return { text: `// ${file}\n${source.text}`, truncated: source.truncated };
+      const fragment = hit.fileEvidence?.get(file)?.fragment;
+      if (isSourceFile(file) && store.querySymbols && store.getSourceSlice) {
+        if (!symbolCache.has(key)) symbolCache.set(key, store.querySymbols(hit,
+          { relativePaths: [file], kinds: ['method', 'function'], limit: 200 }, signal));
+        const { symbols } = await symbolCache.get(key)!;
+        const symbol = representativeSymbol(symbols.filter(s => s.relativePath === file), hit, fragment, target);
+        if (symbol) {
+          const sliceKey = JSON.stringify([key, symbol.sourceRange]);
+          if (!sliceCache.has(sliceKey)) sliceCache.set(sliceKey, store.getSourceSlice(hit, file, symbol.sourceRange, 4_000, signal));
+          const slice = await sliceCache.get(sliceKey)!;
+          if (slice?.text.trim()) return { text: `// ${file}\n${implementationExcerpt(slice.text, [], 4_000)}`, truncated: true };
+        }
+      }
+      // A whitespace-only fragment must not hide a readable source preview.
+      const text = fragment?.trim() || implementationExcerpt(source.text, [], 4_000);
+      return { text: `// ${file}\n${text}`, truncated: Boolean(fragment?.trim()) || source.truncated };
     });
     const available = new Set((hit.module.coreApis ?? []).map(normalizedApi).filter(Boolean));
     const matchedApis = requiredApis.filter((api) => available.has(normalizedApi(api)));
     return {
       id: `module-${createHash('sha256').update(JSON.stringify([hit.repositoryId, hit.analysisRevision, hit.projectId, hit.module.id])).digest('hex')}`,
       title: hit.module.name, repository: hit.repositoryName, license: 'Unknown', kind: 'module',
-      language: moduleLanguage(hit.module.language, files), path: files[0]!,
+      language: moduleLanguage(hit.module.language, files), path: previewFiles[0]!,
       signature: (hit.module.coreApis ?? []).join('\n'), summary: hit.module.description,
       score: { overall: hit.score, semantic: hit.semanticScore, symbol: 0, contract: requiredApis.length ? matchedApis.length / requiredApis.length : 0 },
       preview: parts.map((part) => part.text).join('\n\n'), dependencies: [...hit.module.dependsOn],
@@ -386,13 +597,14 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
   // call. The revision check below is deliberately also outside the slot: it is
   // a small consistency read, whereas recall is the pool-heavy part.
   releaseDatabaseSlot();
+  // Experiment observers receive a detached snapshot, never mutable ranking inputs.
+  observeCandidates?.(structuredClone(result));
   let ranked = result;
   if (reranker && result.length > 0) {
     beginStage('rerankMs');
     timing.rerankCandidateCount = result.length;
     try {
-      const ordering = await reranker.rank(query, result.map((candidate) => [candidate.title, candidate.summary,
-        candidate.signature, candidate.dependencies.join('\n'), candidate.preview].join('\n')), signal);
+      const ordering = await reranker.rank(rerankQuery, result.map(rerankDocument), signal);
       if (!Array.isArray(ordering) || ordering.length !== result.length ||
           ordering.some((item) => !item || !Number.isInteger(item.index) || item.index < 0 || item.index >= result.length ||
             !Number.isFinite(item.score) || item.score < 0 || item.score > 1) ||
@@ -426,4 +638,5 @@ function moduleLanguage(language: string | undefined, files: string[]): ModuleTa
   return found;
 }
 
-export const moduleMatchingInternals = { normalizedApi, mapBounded, configuredModuleSearchConcurrency, moduleSearchGate };
+export const moduleMatchingInternals = { normalizedApi, mapBounded, configuredModuleSearchConcurrency, moduleSearchGate,
+  configuredRepositoryConcurrency, productionEvidenceWeight, shortlistHits, representativeFiles, representativeSymbol, implementationExcerpt, rerankDocument };

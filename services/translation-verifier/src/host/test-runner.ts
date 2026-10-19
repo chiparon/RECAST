@@ -1,21 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, readdir, readFile, writeFile, realpath, rm } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, writeFile, realpath, rm } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { promisify } from "node:util";
-import { parseJacocoReport, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx, jsonReport, type PythonFunction } from "./coverage-reports.js";
+import { parseJacocoReport, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx, parseJUnitTestCases, parseNodeTestCases, parseTrxTestCases, jsonReport, type PythonFunction } from "./coverage-reports.js";
 import { MAX_TEST_OUTPUT_CHARS, readProjectFile, resolveSafePath, type FunctionGroupTestRun, type FunctionGroupTestRunner, type ToolContext, type TargetTestResult, type TargetCoverageResult, type TestSummary } from "./tools/common.js";
-import type { VerificationFunction, VerificationReason } from "../types.js";
+import type { TargetFunctionCoverage, VerificationFunction, VerificationReason, VerificationTestCase } from "../types.js";
 
 const JACOCO = "org.jacoco:jacoco-maven-plugin:0.8.13";
 export const MAVEN_COVERAGE_GOALS = [`${JACOCO}:prepare-agent`, "test", `${JACOCO}:report`] as const;
 const MAVEN_REPORT_PATH = "target/site/jacoco/jacoco.xml";
 const MAVEN_TEST_REPORTS = "target/surefire-reports";
+const LEGACY_MAVEN_COVERAGE = "target/translation-verifier-coverage";
 type CoverageRun = {
   dataDirectory: string;
   args: string[];
   env?: Record<string, string>;
   pythonFunctions?: Array<{ path: string; functions: PythonFunction[] }>;
+  surefireReportsDirectory?: string;
+  jacocoReportPath?: string;
 };
 type RunnerContext = Omit<ToolContext, "runner" | "state">;
 export type BoundTestRunner = {
@@ -66,17 +69,19 @@ export function bindFunctionGroupTestRunner(context: RunnerContext): FunctionGro
         return {
           ...(source ? { source: { ...source } } : {}),
           target: { ...mapping.target },
-          status: executed ? "passed" as const : "unverified" as const,
+          status: executed && result.status === "success" && (result.tests?.executed ?? 0) > 0 ? "passed" as const : "unverified" as const,
           executed,
           lineCoverage: coverage?.status === "available" ? coverage.targetFunction.lineCoverage : null,
           branchCoverage: coverage?.status === "available" ? coverage.targetFunction.branchCoverage : null,
           reason,
+          ...(coverage?.status === "unavailable" ? { coverageIssue: coverage.reason } : {}),
         };
       });
       return {
         status: result.status,
         testPaths: [...testPaths],
         tests: result.tests ?? { executed: 0, passed: 0, failed: 0, skipped: 0 },
+        testCases: result.testCases,
         functions: functionsResult,
         failures: result.failures,
         stdout: result.stdout,
@@ -191,6 +196,7 @@ async function runTestsForSubjects(
   stderr: string;
   durationMs: number;
   tests?: TestSummary;
+  testCases?: VerificationTestCase[];
   coverage: TargetCoverageResult[];
   failures: Array<{ message: string; testPath?: string; suspectedFunctions: VerificationFunction[] }>;
 }> {
@@ -240,6 +246,7 @@ async function runTestsForSubjects(
       stderr: processResult.stderr,
       durationMs: Date.now() - startedAt,
       ...(evidence.tests ? { tests: evidence.tests } : {}),
+      testCases: evidence.testCases,
       coverage: evidence.coverage,
       failures,
     };
@@ -270,10 +277,22 @@ print(json.dumps(result))
 
 async function prepareCoverage(context: RunnerContext, testPaths: readonly string[], subjects: readonly VerificationFunction[]): Promise<CoverageRun> {
   const { targetProjectPath: root, testRunner: runner } = context.runtime;
-  const directory = runner === "maven" ? "target/translation-verifier-coverage" : ".translation-verifier-coverage";
+  const directory = runner === "maven" ? ".forexpore/translation-verifier-coverage" : ".translation-verifier-coverage";
   const dataDirectory = resolveSafePath(root, `${directory}/${randomUUID()}`);
   await mkdir(dataDirectory, { recursive: true });
   try {
+    if (runner === "maven") {
+      // New Maven runs write only to the Host-owned .forexpore directory. An
+      // old report must not be mistaken for evidence if a project still has
+      // the default output directories from a prior invocation.
+      await Promise.all([
+        rm(resolveSafePath(root, MAVEN_REPORT_PATH), { force: true }).catch(() => undefined),
+        rm(resolveSafePath(root, MAVEN_TEST_REPORTS), { recursive: true, force: true }).catch(() => undefined),
+        // Keep the legacy parent available for older integrations that inspect
+        // its emptiness; failure here is harmless on a root-owned target.
+        mkdir(resolveSafePath(root, LEGACY_MAVEN_COVERAGE), { recursive: true }).catch(() => undefined),
+      ]);
+    }
     return await configureRunnerCoverage(context, testPaths, subjects, dataDirectory);
   } catch (error) {
     await rm(dataDirectory, { recursive: true, force: true });
@@ -294,13 +313,18 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
   if (runner === "maven") {
     if (!/\.(?:java|kt)$/i.test(testPath)) throw new Error(`Java test selector requires a .java or .kt file: ${testPath}`);
     const classNames = testPaths.map((path) => path.slice(path.lastIndexOf("/") + 1).replace(/\.(?:java|kt)$/i, ""));
-    await rm(resolveSafePath(root, MAVEN_REPORT_PATH), { force: true });
-    await rm(resolveSafePath(root, MAVEN_TEST_REPORTS), { recursive: true, force: true });
     const dataFile = join(dataDirectory, "jacoco.exec");
     return { dataDirectory, args: [
       `-Djacoco.destFile=${dataFile}`, `-Djacoco.dataFile=${dataFile}`,
+      `-Dproject.build.directory=${join(dataDirectory, "maven-build")}`,
+      `-Dproject.reporting.outputDirectory=${join(dataDirectory, "maven-reporting")}`,
+      `-Dsurefire.reportsDirectory=${join(dataDirectory, "surefire-reports")}`,
+      `-Djacoco.outputDirectory=${join(dataDirectory, "jacoco")}`,
       "-Djacoco.append=false", "-DfailIfNoTests=true", `-Dtest=${classNames.join(",")}`,
-    ] };
+    ],
+      surefireReportsDirectory: `${relative(root, dataDirectory).replaceAll("\\", "/")}/surefire-reports`,
+      jacocoReportPath: `${relative(root, dataDirectory).replaceAll("\\", "/")}/jacoco/jacoco.xml`,
+    };
   }
   const tests = join(dataDirectory, "tests.json");
   if (runner === "jest") return { dataDirectory, args: ["--runTestsByPath", ...testPaths, `--roots=${await realpath(root)}`, "--coverage", ...subjects.map((subject) => `--collectCoverageFrom=${subject.path}`), "--coverageReporters=json", `--coverageDirectory=${dataDirectory}`, "--json", `--outputFile=${tests}`] };
@@ -349,10 +373,17 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
       const source = await readProjectFile(root, path);
       const namespaces = [...source.matchAll(/\bnamespace\s+([\w.]+)/g)];
       const classes = [...source.matchAll(/\bclass\s+(\w+)/g)];
-      if (classes.length !== 1 || namespaces.length > 1) throw new Error("C# test selector requires one test class and at most one namespace.");
-      classNames.push([namespaces[0]?.[1], classes[0][1]].filter(Boolean).join("."));
+      if (classes.length === 0 || namespaces.length > 1) throw new Error("C# test selector requires a test class and at most one namespace.");
+      // Test files commonly contain nested mocks or fixture classes. They
+      // belong to the authorized file too and must not block test execution.
+      for (const item of classes) classNames.push([namespaces[0]?.[1], item[1]].filter(Boolean).join("."));
     }
-    return { dataDirectory, args: ["--filter", classNames.map((name) => `FullyQualifiedName~${name}.`).join("|"), "--collect:XPlat Code Coverage", "--results-directory", dataDirectory, "--logger", "trx;LogFileName=tests.trx"] };
+    // VSTest's FullyQualifiedName filter already performs a substring match.
+    // Appending a literal trailing dot rejects valid classes when the Agent
+    // omits a namespace (and made a repair loop report "no test matches" even
+    // though the generated xUnit file compiled). Match the class identity
+    // directly; the Host still binds the exact test paths and owns the runner.
+    return { dataDirectory, args: ["--filter", classNames.map((name) => `FullyQualifiedName~${name}`).join("|"), "--collect:XPlat Code Coverage", "--results-directory", dataDirectory, "--logger", "trx;LogFileName=tests.trx"] };
   }
   throw new Error(`Unsupported coverage runner: ${runner}`);
 }
@@ -362,48 +393,79 @@ async function report(path: string): Promise<string> {
   if (bytes.length > 16_000_000) throw new Error("Report exceeds the size limit.");
   return bytes.toString("utf8");
 }
-async function collectCoverage(context: RunnerContext, run: CoverageRun, subjects: readonly VerificationFunction[]): Promise<{ tests?: TestSummary; coverage: TargetCoverageResult[] }> {
+async function collectCoverage(context: RunnerContext, run: CoverageRun, subjects: readonly VerificationFunction[]): Promise<{ tests?: TestSummary; testCases: VerificationTestCase[]; coverage: TargetCoverageResult[] }> {
   let tests: TestSummary | undefined;
+  const testCases: VerificationTestCase[] = [];
   const { testRunner: runner, targetProjectPath: root } = context.runtime;
   const canonicalRoot = await realpath(root);
   const reportDirectory = relative(canonicalRoot, run.dataDirectory);
   const read = (path: string) => report(resolveSafePath(root, `${reportDirectory}/${path}`));
-  try {
-    const targetFunctions: TargetCoverageResult[] = [];
-    if (runner === "jest" || runner === "vitest") {
-      tests = parseNodeTests(await read("tests.json"));
-      const report = await read("coverage-final.json");
-      for (const subject of subjects) targetFunctions.push({ status: "available", targetFunction: parseIstanbul(report, canonicalRoot, subject, await readProjectFile(root, subject.path)) });
-    } else if (runner === "pytest") {
-      tests = parseJUnit(await read("tests.xml"));
-      const report = await read("coverage.json");
-      for (const subject of subjects) {
-        const functions = run.pythonFunctions?.find((item) => item.path === subject.path)?.functions ?? [];
-        targetFunctions.push({ status: "available", targetFunction: parsePythonCoverage(report, canonicalRoot, subject, functions) });
+  const parseSubjects = async (parse: (subject: VerificationFunction) => TargetFunctionCoverage | Promise<TargetFunctionCoverage>): Promise<TargetCoverageResult[]> => {
+    const results: TargetCoverageResult[] = [];
+    for (const subject of subjects) {
+      try {
+        results.push({ status: "available", targetFunction: await parse(subject) });
+      } catch (error) {
+        results.push({ status: "unavailable", reason: error instanceof Error ? error.message : "Could not locate target coverage." });
       }
+    }
+    return results;
+  };
+  try {
+    let targetFunctions: TargetCoverageResult[] = [];
+    if (runner === "jest" || runner === "vitest") {
+      const testReport = await read("tests.json");
+      tests = parseNodeTests(testReport);
+      testCases.push(...parseNodeTestCases(testReport));
+      const report = await read("coverage-final.json");
+      targetFunctions = await parseSubjects(async subject => parseIstanbul(report, canonicalRoot, subject, await readProjectFile(root, subject.path)));
+    } else if (runner === "pytest") {
+      const testReport = await read("tests.xml");
+      tests = parseJUnit(testReport);
+      testCases.push(...parseJUnitTestCases(testReport));
+      const report = await read("coverage.json");
+      targetFunctions = await parseSubjects(subject => {
+        const functions = run.pythonFunctions?.find((item) => item.path === subject.path)?.functions ?? [];
+        return parsePythonCoverage(report, canonicalRoot, subject, functions);
+      });
     } else if (runner === "maven" || runner === "gradle") {
-      const testDirectory = runner === "maven" ? resolveSafePath(root, MAVEN_TEST_REPORTS) : join(run.dataDirectory, "tests");
-      const names = (await readdir(testDirectory)).filter(name => /^TEST-.*\.xml$/.test(name));
+      const primaryDirectory = runner === "maven" ? resolveSafePath(root, run.surefireReportsDirectory ?? MAVEN_TEST_REPORTS) : join(run.dataDirectory, "tests");
+      const fallbackDirectory = runner === "maven" ? resolveSafePath(root, MAVEN_TEST_REPORTS) : undefined;
+      let testDirectory = primaryDirectory;
+      let names = (await readdir(testDirectory).catch(() => [] as string[])).filter(name => /^TEST-.*\.xml$/.test(name));
+      if (names.length === 0 && fallbackDirectory && fallbackDirectory !== primaryDirectory) {
+        testDirectory = fallbackDirectory;
+        names = (await readdir(testDirectory).catch(() => [] as string[])).filter(name => /^TEST-.*\.xml$/.test(name));
+      }
       if (names.length === 0) throw new Error(`Missing ${runner} test reports.`);
       tests = { executed: 0, passed: 0, failed: 0, skipped: 0 };
       for (const name of names) {
-        const xml = runner === "maven" ? await report(resolveSafePath(root, `${MAVEN_TEST_REPORTS}/${name}`)) : await read(`tests/${name}`);
+        const xml = runner === "maven" ? await report(join(testDirectory, name)) : await read(`tests/${name}`);
         const value = runner === "maven" ? parseSurefireReport(xml) : parseJUnit(xml);
         for (const key of ["executed", "passed", "failed", "skipped"] as const) tests[key] += value[key];
+        testCases.push(...parseJUnitTestCases(xml));
       }
-      const xml = runner === "maven" ? await report(resolveSafePath(root, MAVEN_REPORT_PATH)) : await read("jacoco.xml");
-      for (const subject of subjects) targetFunctions.push({ status: "available", targetFunction: parseJacocoReport(xml, subject, await readProjectFile(root, subject.path)) });
+      const primaryCoverage = runner === "maven" ? resolveSafePath(root, run.jacocoReportPath ?? MAVEN_REPORT_PATH) : join(run.dataDirectory, "jacoco.xml");
+      const fallbackCoverage = runner === "maven" ? resolveSafePath(root, MAVEN_REPORT_PATH) : undefined;
+      let coveragePath = primaryCoverage;
+      try { await access(coveragePath); } catch {
+        if (fallbackCoverage) coveragePath = fallbackCoverage;
+      }
+      const xml = runner === "maven" ? await report(coveragePath) : await read("jacoco.xml");
+      targetFunctions = await parseSubjects(async subject => parseJacocoReport(xml, subject, await readProjectFile(root, subject.path)));
     } else if (runner === "dotnet") {
-      tests = parseTrx(await read("tests.trx"));
+      const testReport = await read("tests.trx");
+      tests = parseTrx(testReport);
+      testCases.push(...parseTrxTestCases(testReport));
       const names = await readdir(run.dataDirectory, { recursive: true });
       const coverage = names.filter(name => /^[0-9a-f-]{36}[\\/]coverage\.cobertura\.xml$/i.test(name));
       if (coverage.length !== 1) throw new Error("Expected one Coverlet Cobertura report in a VSTest run directory.");
       const report = await read(coverage[0]);
-      for (const subject of subjects) targetFunctions.push({ status: "available", targetFunction: parseCobertura(report, subject, canonicalRoot) });
+      targetFunctions = await parseSubjects(subject => parseCobertura(report, subject, canonicalRoot));
     } else throw new Error(`Unsupported coverage runner: ${runner}`);
-    return { tests, coverage: targetFunctions };
+    return { tests, testCases, coverage: targetFunctions };
   } catch (error) {
     const reason = error instanceof Error ? error.message : "Could not collect coverage.";
-    return { ...(tests ? { tests } : {}), coverage: subjects.map(() => ({ status: "unavailable", reason })) };
+    return { ...(tests ? { tests } : {}), testCases, coverage: subjects.map(() => ({ status: "unavailable", reason })) };
   }
 }

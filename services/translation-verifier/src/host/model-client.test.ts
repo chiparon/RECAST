@@ -103,7 +103,7 @@ describe("translation verifier model client", () => {
           content: '{"content":"class Target {}"}',
         },
       ],
-      max_tokens: 8192,
+      max_tokens: 16384,
       thinking: { type: "disabled" },
       tools: [
         {

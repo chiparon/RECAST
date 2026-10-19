@@ -227,6 +227,42 @@ it('prioritizes target-related history files before applying the byte budget', (
   expect(selected).toEqual(['Entry.cs', 'WorkflowDispatcher.cs', 'RetryPolicy.cs']);
 });
 
+it('keeps the byte limit even when the first historical source is oversized', () => {
+  const files = ['HugeEngine.java', 'DispatchCommand.java', 'RetryPolicy.java'];
+  const sizes = new Map([['HugeEngine.java', HISTORY_VIEW_MAX_BYTES + 1], ['DispatchCommand.java', 30], ['RetryPolicy.java', 30]]);
+  expect(boundHistoryViewFiles(files, sizes)).toEqual(['DispatchCommand.java', 'RetryPolicy.java']);
+});
+
+it('retains a substantial implementation together with its public interface', () => {
+  const files = ['OrderProcessor.cs', 'IOrderProcessor.cs', 'OrderResult.cs'];
+  const sizes = new Map([['OrderProcessor.cs', 159_000], ['IOrderProcessor.cs', 15_000], ['OrderResult.cs', 5_000]]);
+  expect(boundHistoryViewFiles(files, sizes)).toEqual(files);
+});
+
+it('materializes a bounded history view from a module containing more than 256 files', async () => {
+  const target = await temporaryRepository('large-view-target');
+  const history = await temporaryRepository('large-view-history');
+  const files = ['src/example.ts', ...Array.from({ length: 300 }, (_, i) => `src/part-${i}.ts`)];
+  await Promise.all(files.slice(1).map(file => writeFile(path.join(history, file), 'export function dispatch() { return true; }\n')));
+  const runtime = createRuntime();
+  const instance = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const state = await instance.synchronize({ repositories: [{ localPath: history, role: 'history' }] });
+  const repository = state.presentation.repositories[0]!;
+  const view = await instance.createHistoryModuleView({ workspaceRoot: target, repositoryId: repository.repositoryId,
+    analysisRevision: repository.activeRevision!, moduleId: 'large-engine', sourceFiles: files, preferredFiles: [files.at(-1)!] });
+  expect(view.files.length).toBe(HISTORY_VIEW_MAX_FILES);
+  expect(view.files).toContain(files.at(-1));
+  const manifest = JSON.parse(await readFile(path.join(view.root, 'manifest.json'), 'utf8'));
+  expect(manifest.omittedFiles.length).toBe(files.length - HISTORY_VIEW_MAX_FILES);
+  expect(manifest.files[0].path).toBe('src/example.ts');
+  const makeWritable = async (directory: string): Promise<void> => {
+    await chmod(directory, 0o700);
+    for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isDirectory()) await makeWritable(path.join(directory, entry.name));
+  };
+  await makeWritable(view.root);
+  await instance.dispose();
+});
+
 it('merges selected modules with colliding file names and skips an unreadable candidate', async () => {
   const target = await temporaryRepository('view-target');
   const histories = await Promise.all(['a', 'b', 'c'].map(name => temporaryRepository(`view-${name}`)));
@@ -783,6 +819,24 @@ describe('CodeIntelligenceHost', () => {
     });
     expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_RERANK_MODEL: '' })).toThrow('both');
     expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_EMBEDDING_MODEL: '' })).toThrow('both');
+  });
+
+  it('configures database capacity independently of repository fan-out and rejects invalid limits', () => {
+    const environment = { CODE_INTELLIGENCE_SEEKDB_DATABASE: 'code_intelligence',
+      CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT: '12', CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY: '6' };
+    expect(codeIntelligenceRuntimeOptionsFromEnvironment(environment)).toMatchObject({
+      seekdb: { connectionLimit: 12, searchQueryConcurrency: 6 },
+    });
+    expect(codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY: '0' }))
+      .toMatchObject({ seekdb: { searchQueryConcurrency: 0 } });
+    for (const value of ['0', '-1', '1.5', '65', 'invalid']) {
+      expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT: value }))
+        .toThrow('CONNECTION_LIMIT');
+    }
+    for (const value of ['-1', '1.5', '33', 'invalid']) {
+      expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY: value }))
+        .toThrow('SQL_CONCURRENCY');
+    }
   });
 });
 

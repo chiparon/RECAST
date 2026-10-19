@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { moduleFileHash } from './module-translation-handoff';
-import { MAX_RETRIEVAL_SCOPES, type WorkspaceEvidenceScope, type WorkspaceHistoryView, type WorkspaceTranslationContext, type WorkspaceTranslationMode, type WorkspaceTranslationRequest, type WorkspaceTranslationRun, type WorkspaceVerificationFeedback } from '@forexplore/contracts';
+import { MAX_RETRIEVAL_SCOPES, type GlobalProtocol, type ModuleProtocol, type WorkspaceEvidenceScope, type WorkspaceHistoryView, type WorkspaceTranslationContext, type WorkspaceTranslationMode, type WorkspaceTranslationRequest, type WorkspaceTranslationRun, type WorkspaceVerificationFeedback, type WorkspaceTranslationTaskKind } from '@forexplore/contracts';
 import type { HostToWebviewMessage, WebviewToHostMessage } from './protocol/messages';
 
 export interface TranslationProfile {
@@ -32,6 +32,9 @@ export interface WorkspaceTranslationModuleScope {
   historyView?: WorkspaceHistoryView;
   /** Host-selected Agent route; direct-translator is used without history. */
   translationMode?: WorkspaceTranslationMode;
+  taskKind?: WorkspaceTranslationTaskKind;
+  moduleProtocol?: ModuleProtocol;
+  globalProtocol?: GlobalProtocol;
   /** Bounded, non-blocking observations about the derived scope. */
   warnings?: string[];
   /** Snapshot captured by the host when the user prepares a module translation. */
@@ -119,7 +122,7 @@ export class WorkspaceTranslationHost {
         if (intent.moduleScopeId !== undefined && intent.moduleScopeId !== this.moduleScope?.id) throw new Error('模块翻译范围已变化，请重新选择候选。');
         const context: WorkspaceTranslationRequest['context'] = scope ? structuredClone(scope.context) : [];
         let evidenceScopes = [...(scope?.evidenceScopes ?? [])];
-        if (context.length === 0) throw new Error('模块翻译缺少可用上下文：请选择历史候选模块。');
+        if (context.length === 0 && scope?.taskKind !== 'project-integration') throw new Error('模块翻译缺少可用上下文：请选择历史候选模块。');
         const mergedScopes = new Map<string, WorkspaceEvidenceScope>();
         for (const next of evidenceScopes) {
           const key = JSON.stringify([next.repositoryId, next.analysisRevision]);
@@ -133,6 +136,9 @@ export class WorkspaceTranslationHost {
           sourceLanguage: profile!.sourceLanguage, targetLanguage: profile!.targetLanguage,
           workspaceFiles: profile!.workspaceFiles, writeFiles: profile!.writeFiles, context,
           ...(scope?.translationMode ? { translationMode: scope.translationMode } : {}),
+          ...(scope?.taskKind ? { taskKind: scope.taskKind } : {}),
+          ...(scope?.moduleProtocol ? { moduleProtocol: structuredClone(scope.moduleProtocol) } : {}),
+          ...(scope?.globalProtocol ? { globalProtocol: structuredClone(scope.globalProtocol) } : {}),
           ...(evidenceScopes.length ? { evidenceScopes } : {}),
           ...(scope?.historyView ? { historyView: structuredClone(scope.historyView) } : {}) };
         // Do not repeat a write request if the UI delivers the same operation twice.
@@ -206,7 +212,7 @@ function parseProfile(raw: string): TranslationProfile {
 
 /** Identity covers the reviewed file scope and the module package inventory. */
 function canonicalScope(scope: WorkspaceTranslationModuleScope): string {
-  return JSON.stringify([scope.label, scope.profile, scope.spec, scope.context, scope.evidenceScopes, scope.historyView, scope.fileHashes]);
+  return JSON.stringify([scope.label, scope.profile, scope.spec, scope.context, scope.evidenceScopes, scope.historyView, scope.fileHashes, scope.translationMode, scope.taskKind, scope.moduleProtocol, scope.globalProtocol]);
 }
 
 /** A module run's specification is host-owned; a task requirement only adds detail. */

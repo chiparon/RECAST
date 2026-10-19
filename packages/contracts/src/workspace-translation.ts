@@ -60,6 +60,10 @@ export const MAX_RETRIEVAL_SCOPES = 64;
 /** How the host asks the workspace Agent to implement a translation. */
 export type WorkspaceTranslationMode = "analyzer-translator" | "direct-translator";
 
+/** The ordinary module workflow and the additive project integration pass use
+ * the same Analyzer/Translator runtime but different task instructions. */
+export type WorkspaceTranslationTaskKind = "module" | "project-integration";
+
 export interface WorkspaceTranslationRequest {
   spec: string;
   sourceLanguage: string;
@@ -79,6 +83,12 @@ export interface WorkspaceTranslationRequest {
   historyView?: WorkspaceHistoryView;
   /** Host-selected fallback when no usable historical implementation exists. */
   translationMode?: WorkspaceTranslationMode;
+  /** Optional host-owned task kind; omitted requests remain module tasks. */
+  taskKind?: WorkspaceTranslationTaskKind;
+  /** Optional bounded protocol view. It is task metadata, never target source. */
+  moduleProtocol?: import('./global-protocol.js').ModuleProtocol;
+  /** Full protocol is supplied only to the project integration task. */
+  globalProtocol?: import('./global-protocol.js').GlobalProtocol;
 }
 
 /** One on-demand evidence query, recorded so the run stays auditable. */
@@ -92,10 +102,21 @@ export interface WorkspaceEvidenceQuery {
 }
 
 export interface WorkspaceTranslationPlan {
+  /** Analyzer prose preserved verbatim; legacy structured plans remain readable. */
+  markdown?: string;
   summary: string;
   mappings: Array<{ source: string; targetPath: string; targetSymbol: string }>;
   dependencies: Array<{ name: string; strategy: "reuse" | "replace" | "adapt" | "translate"; detail: string }>;
   steps: Array<{ id: string; description: string; files: string[]; dependsOn: string[] }>;
+  protocolRulesUsed?: string[];
+  boundaryAssumptions?: string[];
+  semanticRisks?: string[];
+  protocolCandidates?: Array<{
+    scope?: string[];
+    topic: "state" | "identity" | "ordering" | "failure" | "retry" | "scope";
+    rule: string;
+    note?: string;
+  }>;
 }
 
 /** Host-observed verifier feedback handed back to the same Translator run. */
@@ -211,6 +232,13 @@ export interface WorkspaceTranslationRun {
       commands?: Array<{ command: string; exitCode?: number | null }>;
       /** Bounded Analyzer final output retained for invalid-plan diagnosis. */
       analyzerOutput?: string;
+      /** Final coding-agent report; observed commands/compilation remain the facts. */
+      finalMessage?: string;
+      /** Bounded Agent-authored integration artifacts, not a verification verdict. */
+      integrationEvidence?: {
+        files: Array<{ path: string; content: string; truncated: boolean }>;
+        omissions: string[];
+      };
       analyzerOutputTruncated?: boolean;
       analyzerOutputError?: string;
       /** How the host resolved the Analyzer stage. */

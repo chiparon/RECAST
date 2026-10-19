@@ -1,7 +1,7 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { realpathSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
-import type { TargetFunctionCoverage, VerificationFunction } from "../types.js";
+import type { TargetFunctionCoverage, VerificationFunction, VerificationTestCase } from "../types.js";
 import type { TestSummary } from "./tools/common.js";
 
 function fileIdentity(root: string, path: string): string {
@@ -48,6 +48,53 @@ export function parseJUnit(xml: string): TestSummary {
 export function parseNodeTests(json: string): TestSummary {
   const report = jsonReport(json);
   return summary(report.numTotalTests, report.numFailedTests, counter(report.numPendingTests ?? 0) + counter(report.numTodoTests ?? 0));
+}
+
+function reportMessage(value: any): string | undefined {
+  if (value === undefined) return undefined;
+  const items = Array.isArray(value) ? value : [value];
+  return items.map(item => typeof item === "string" ? item : [item.message, item["#text"]].filter(Boolean).join("\n")).filter(Boolean).join("\n").slice(0, 8000) || undefined;
+}
+
+export function parseJUnitTestCases(xml: string): VerificationTestCase[] {
+  const report = xmlReport(xml);
+  const result: VerificationTestCase[] = [];
+  const visit = (suite: any) => {
+    for (const test of suite.testcase ?? []) {
+      if (typeof test.name !== "string") continue;
+      const failed = test.failure !== undefined || test.error !== undefined;
+      const message = reportMessage(test.failure ?? test.error);
+      result.push({ id: `${test.classname ?? suite.name ?? ""}#${test.name}`,
+        status: failed ? "failed" : test.skipped !== undefined ? "skipped" : "passed", ...(message ? { message } : {}) });
+    }
+    for (const child of suite.testsuite ?? []) visit(child);
+  };
+  for (const suite of report.testsuite ?? report.testsuites?.testsuite ?? []) visit(suite);
+  return result;
+}
+
+export function parseNodeTestCases(json: string): VerificationTestCase[] {
+  return (jsonReport(json).testResults ?? []).flatMap((file: any) => (file.assertionResults ?? []).flatMap((test: any) => {
+    const name = test.fullName ?? test.title;
+    if (typeof name !== "string") return [];
+    const status = test.status === "passed" ? "passed" : test.status === "failed" ? "failed" : "skipped";
+    const message = reportMessage(test.failureMessages);
+    return [{ id: `${file.name ?? ""}#${name}`, status, ...(message ? { message } : {}) }];
+  }));
+}
+
+export function parseTrxTestCases(xml: string): VerificationTestCase[] {
+  const report = xmlReport(xml).TestRun;
+  const definitions = report?.TestDefinitions?.UnitTest;
+  const units = Array.isArray(definitions) ? definitions : definitions ? [definitions] : [];
+  const results = report?.Results?.UnitTestResult;
+  return (Array.isArray(results) ? results : results ? [results] : []).flatMap((test: any) => {
+    if (typeof test.testName !== "string") return [];
+    const unit = units.find((item: any) => item.id === test.testId);
+    const message = reportMessage(test.Output?.ErrorInfo?.Message);
+    return [{ id: `${unit?.TestMethod?.className ?? ""}#${test.testName}`,
+      status: test.outcome === "Passed" ? "passed" : test.outcome === "NotExecuted" ? "skipped" : "failed", ...(message ? { message } : {}) }];
+  });
 }
 
 /** Istanbul's line metric groups statement start lines, just like its native reporter. */
@@ -115,8 +162,13 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
   const packages = report?.packages?.package;
   const packageList = Array.isArray(packages) ? packages : packages ? [packages] : [];
   const methods: any[] = [];
-  const declaringType = csharpDeclaringType(subject);
+  const declaringType = functionDeclaringType(subject);
   for (const pkg of packageList) for (const cls of pkg.classes?.class ?? []) {
+    const className = String(cls.name ?? "").replaceAll("&lt;", "<").replaceAll("&gt;", ">");
+    // Coverlet attributes async/iterator bodies to the compiler-generated
+    // state machine's MoveNext, rather than the source method. Use the
+    // original declaring type and method encoded in that class identity.
+    const stateMachine = className.match(/^(.*)\/<([^<>]+)>d__\d+$/);
     const path = String(cls.filename ?? "").replaceAll("\\", "/");
     if (root) {
       const sources: string[] = report.sources?.source ?? [];
@@ -124,12 +176,14 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
       if (!candidates.some(candidate => fileIdentity(root, candidate) === fileIdentity(root, subject.path))) continue;
     } else if (path !== subject.path) continue;
     if (declaringType) {
-      const className = String(cls.name ?? "");
-      const simpleName = className.split(/[.:]/).filter(Boolean).at(-1) ?? className;
-      if (simpleName !== declaringType && className !== declaringType) continue;
+      const owner = stateMachine?.[1] ?? className;
+      const simpleName = owner.split(/[.:/]/).filter(Boolean).at(-1) ?? owner;
+      if (simpleName !== declaringType && owner !== declaringType) continue;
     }
     for (const method of cls.methods?.method ?? []) {
-      if (method.name === subject.name && (!subject.signature || matchesCsharpSignature(method.signature, subject.signature, subject.name))) methods.push(method);
+      if (stateMachine) {
+        if (stateMachine[2] === subject.name && method.name === "MoveNext") methods.push(method);
+      } else if (method.name === subject.name && (!subject.signature || matchesCsharpSignature(method.signature, subject.signature, subject.name))) methods.push(method);
     }
   }
   if (methods.length !== 1) throw new Error(`Cannot uniquely locate target function ${subject.name} in Cobertura report.`);
@@ -148,7 +202,7 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
   return { name: subject.name, executed: hits.some((n: number) => n > 0), lineCoverage: percent(hits), branchCoverage: totalBranches === 0 ? null : Math.round(coveredBranches / totalBranches * 10_000) / 100 };
 }
 
-function csharpDeclaringType(subject: VerificationFunction): string | undefined {
+function functionDeclaringType(subject: VerificationFunction): string | undefined {
   let signature = subject.signature?.trim();
   if (!signature) return undefined;
   const open = signature.indexOf("(");
@@ -172,7 +226,9 @@ function matchesCsharpSignature(actual: string, requested: string, name: string)
   const params = requested.slice(start + name.length + 1).split(")")[0];
   if (/[<>]/.test(params)) return false;
   const wanted = params.trim() ? params.split(",").map(param => {
-    const type = param.trim().replace(/\s+[\w]+$/, "");
+    const type = param.split("=", 1)[0]!.trim()
+      .replace(/^(?:(?:this|params|ref|out|in)\s+)+/, "")
+      .replace(/\s+[\w]+$/, "").trim();
     const base = type.replace(/\[\]$/, "");
     return (aliases[base] ?? base) + (type.endsWith("[]") ? "[]" : "");
   }) : [];
@@ -213,6 +269,8 @@ export function parseJacocoReport(
     if (pkg.name !== packageName) continue;
     for (const cls of pkg.class ?? []) {
       if (cls.sourcefilename !== basename(subject.path)) continue;
+      const owner = functionDeclaringType(subject);
+      if (owner && String(cls.name).split(/[/$]/).at(-1) !== owner) continue;
       for (const method of cls.method ?? []) {
         if (method.name === subject.name) candidates.push(method);
       }
@@ -244,11 +302,12 @@ function jacocoPercentage(counters: XmlNode[], type: string): number | null {
 
 /** Match JVM descriptors or ordinary Java signatures; ambiguous matches stay unavailable. */
 function matchesJavaSignature(descriptor: string, signature: string, name: string): boolean {
+  if (!signature.includes("(")) return true;
   if (signature.startsWith("(")) return descriptor === signature;
   const namePosition = signature.indexOf(`${name}(`);
   if (namePosition < 0) return false;
-  const parameters = signature.slice(namePosition + name.length + 1).split(")")[0];
-  if (parameters.includes("<")) return false;
+  const parameters = eraseJavaTypeArguments(signature.slice(namePosition + name.length + 1).split(")")[0]);
+  if (parameters === undefined) return false;
   const requested = parameters.trim() === "" ? [] : parameters.split(",").map((value) =>
     value.trim().replace(/^final\s+/, "").replace(/\s+[\w$]+$/, "").replaceAll("...", "[]"),
   );
@@ -256,6 +315,20 @@ function matchesJavaSignature(descriptor: string, signature: string, name: strin
   return requested.length === actual.length && requested.every((type, index) =>
     type === actual[index] || (!type.includes(".") && type === actual[index].split(".").pop()),
   );
+}
+
+/** JVM descriptors erase parameterized type arguments, including their commas. */
+function eraseJavaTypeArguments(parameters: string): string | undefined {
+  let depth = 0;
+  let erased = "";
+  for (const character of parameters) {
+    if (character === "<") depth++;
+    else if (character === ">") {
+      if (depth === 0) return undefined;
+      depth--;
+    } else if (depth === 0) erased += character;
+  }
+  return depth === 0 ? erased : undefined;
 }
 
 function descriptorParameters(descriptor: string): string[] {

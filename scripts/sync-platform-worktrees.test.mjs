@@ -89,3 +89,23 @@ test('reports manifest updates that require a destination install', t => {
   write(source, 'package.json', '{"private":true,"version":"1.0.0"}\n');
   assert.equal(syncWorktrees(source, target).dependenciesChanged, true);
 });
+
+
+test('excludes historical experiment outputs and caches, including old baseline entries', t => {
+  const { source, target } = fixture(t);
+  const run = 'experiments/enterprise-asset-upgrade/history-isolated-java-repeat2-20261012';
+  write(source, `${run}/runs/generated.java`, 'generated source');
+  write(source, `${run}/maven-cache-seed/dependency.jar`, 'runtime cache');
+  write(source, `${run}/skeleton/source.java`, 'run snapshot');
+  write(target, `${run}/runs/generated.java`, 'destination output');
+  write(source, 'experiments/enterprise-asset-upgrade/java-target-project/Source.java', 'dataset source');
+  write(source, 'experiments/cross-language-module-retrieval-50/targets/Source.java', 'new dataset');
+  const baseline = { version: 1, roots: [source, target], files: { [`${run}/runs/generated.java`]: null } };
+  for (const root of [source, target]) write(root, '.recast-platform-sync.json', JSON.stringify(baseline));
+  syncWorktrees(source, target);
+  assert.equal(readFileSync(path.join(target, `${run}/runs/generated.java`), 'utf8'), 'destination output');
+  assert.equal(existsSync(path.join(target, `${run}/maven-cache-seed/dependency.jar`)), false);
+  assert.equal(existsSync(path.join(target, `${run}/skeleton/source.java`)), false);
+  assert.equal(readFileSync(path.join(target, 'experiments/enterprise-asset-upgrade/java-target-project/Source.java'), 'utf8'), 'dataset source');
+  assert.equal(readFileSync(path.join(target, 'experiments/cross-language-module-retrieval-50/targets/Source.java'), 'utf8'), 'new dataset');
+});

@@ -31,11 +31,14 @@ export type AgentRunLimits = {
 };
 
 export const DEFAULT_AGENT_RUN_LIMITS: Readonly<AgentRunLimits> = {
-  maxDurationMs: 300_000,
-  maxTurns: 50,
-  maxToolCalls: 200,
+  // Verification commonly needs inspect -> write -> compile/test -> repair.
+  // Keep these limits finite, but do not make a normal repair cycle look like
+  // an Agent failure simply because the first generated test needs a fix.
+  maxDurationMs: 600_000,
+  maxTurns: 48,
+  maxToolCalls: 320,
   maxToolCallsPerTurn: 16,
-  maxContextCharacters: 250_000,
+  maxContextCharacters: 1_500_000,
   maxResponseCharacters: 1_100_000,
 };
 
@@ -54,10 +57,14 @@ export type AgentRunBudget = {
 export function createAgentRunBudget(
   supplied: Partial<AgentRunLimits> = {},
   now = Date.now(),
+  signal?: AbortSignal,
 ): AgentRunBudget {
   const limits = { ...DEFAULT_AGENT_RUN_LIMITS, ...supplied };
   validateAgentRunLimits(limits);
   const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
   const deadlineAt = now + limits.maxDurationMs;
   const timer = setTimeout(() => {
     controller.abort(new Error("Agent run time budget exceeded."));
@@ -119,6 +126,7 @@ export function createAgentRunBudget(
       if (disposed) return;
       disposed = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
     },
   };
 }

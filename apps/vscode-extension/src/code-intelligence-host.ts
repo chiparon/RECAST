@@ -37,11 +37,14 @@ import { createIndexingProgressReporter, indexingProgressMessage, isIndexingCanc
  * A history-view is evidence for one module, not a checkout of the whole
  * historical subsystem. Keep the view small enough that an Analyzer cannot
  * accidentally spend its entire context on a bulk `cat` command. The first
- * source file is always retained because the verifier uses it as the source
- * function path.
+ * source file is retained when it fits the byte budget; oversized entry files
+ * must not defeat that budget.
  */
 export const HISTORY_VIEW_MAX_FILES = 8;
-export const HISTORY_VIEW_MAX_BYTES = 128_000;
+// This limits materialized observations, not automatic prompt injection. Allow
+// a normal implementation file with its contracts; the Analyzer still reads a
+// focused sample instead of loading every available source into its context.
+export const HISTORY_VIEW_MAX_BYTES = 256_000;
 
 export interface HistoryModuleSelection {
   repositoryId: RepositoryId;
@@ -49,6 +52,7 @@ export interface HistoryModuleSelection {
   projectId?: ProjectId;
   moduleId: string;
   sourceFiles: readonly string[];
+  preferredFiles?: readonly string[];
   relevanceTerms?: readonly string[];
   name?: string;
   language?: string;
@@ -93,8 +97,9 @@ export function boundHistoryViewFiles(
 ): string[] {
   const unique = [...new Set(files)];
   if (!unique.length) return [];
-  const selected: string[] = [unique[0]!];
-  let bytes = Math.max(0, sizes.get(unique[0]!) ?? 0);
+  const firstSize = Math.max(0, sizes.get(unique[0]!) ?? 0);
+  const selected: string[] = firstSize <= maxBytes ? [unique[0]!] : [];
+  let bytes = selected.length ? firstSize : 0;
   const ranked = unique.slice(1).map((file, index) => ({ file, index, score: historyFileRelevance(file, relevanceTerms), size: Math.max(0, sizes.get(file) ?? 0) }));
   if (ranked.some((item) => item.score > 0)) {
     ranked.sort((left, right) => right.score - left.score || left.index - right.index);
@@ -198,7 +203,7 @@ export interface CodeIntelligenceRuntime {
       requirement: string;
       topK: number;
       repositoryIds: readonly RepositoryId[];
-    }, signal?: AbortSignal): Promise<SearchCandidate[]>;
+    }, signal?: AbortSignal, reranker?: ModuleReranker): Promise<SearchCandidate[]>;
   };
   close(): Promise<void>;
 }
@@ -208,6 +213,7 @@ interface CodeIntelligenceServiceModule {
     store: HostIndexStore;
     plan?(scope: ProjectAnalysisScope & { objective: string }): Promise<ProjectAnalysisResult>;
     hierarchyPlanner?: ModuleHierarchyPlanner;
+    allowLargeAgentPlan?: boolean;
     onChange?(): void;
   }) => ProjectAnalysisPort;
   createCodeIntelligenceRuntime(
@@ -251,6 +257,8 @@ export type CodeIntelligenceRuntimeFactory = (
 
 export interface CodeIntelligenceHostOptions {
   projectAnalysisPort?: ProjectAnalysisPort;
+  /** The host supplied a bounded complete plan and it may cover a large repository. */
+  allowLargeAgentPlan?: boolean;
   planProject?: (scope: ProjectAnalysisScope & { objective: string }) => Promise<ProjectAnalysisResult>;
   hierarchyPlanner?: ModuleHierarchyPlanner;
   onChange?: () => void;
@@ -527,6 +535,7 @@ export class CodeIntelligenceHost {
   #projectAnalysis?: ProjectAnalysisPort;
   #planProject?: CodeIntelligenceHostOptions['planProject'];
   #hierarchyPlanner?: ModuleHierarchyPlanner;
+  #allowLargeAgentPlan: boolean;
   #onChange?: () => void;
   #modelKeyRefusal?: CodeIntelligenceHostOptions['modelKeyRefusal'];
   #onModelRefusal?: CodeIntelligenceHostOptions['onModelRefusal'];
@@ -566,6 +575,7 @@ export class CodeIntelligenceHost {
     this.#projectAnalysis = options.projectAnalysisPort;
     this.#planProject = options.planProject;
     this.#hierarchyPlanner = options.hierarchyPlanner;
+    this.#allowLargeAgentPlan = options.allowLargeAgentPlan === true;
     this.#onChange = options.onChange;
     this.#modelKeyRefusal = options.modelKeyRefusal;
     this.#onModelRefusal = options.onModelRefusal;
@@ -680,7 +690,7 @@ export class CodeIntelligenceHost {
     target: ModuleTarget;
     requirement: string;
     topK: number;
-  }, signal?: AbortSignal): Promise<SearchCandidate[]> {
+  }, signal?: AbortSignal, reranker?: ModuleReranker): Promise<SearchCandidate[]> {
     const runtime = await this.runtime();
     const targetScope = request.target.module;
     if (targetScope?.repositoryId && targetScope.analysisRevision) {
@@ -695,7 +705,8 @@ export class CodeIntelligenceHost {
     const repositoryIds = (await runtime.registry.list?.() ?? [])
       .filter((repository) => repository.role === 'history' && this.#visibleRepositoryIds.has(repository.repositoryId))
       .map((repository) => repository.repositoryId);
-    return runtime.moduleImplementationSearch.search({ ...request, repositoryIds }, signal);
+    return reranker ? runtime.moduleImplementationSearch.search({ ...request, repositoryIds }, signal, reranker)
+      : runtime.moduleImplementationSearch.search({ ...request, repositoryIds }, signal);
   }
 
   async historyEvidenceScopes(selected: RepositoryRevisionScope & { projectId?: ProjectId }): Promise<WorkspaceEvidenceScope[]> {
@@ -735,6 +746,8 @@ export class CodeIntelligenceHost {
     projectId?: ProjectId;
     moduleId: string;
     sourceFiles: readonly string[];
+    /** Representative implementation paths selected by module retrieval. */
+    preferredFiles?: readonly string[];
     /** Target symbols and paths used only to prioritize files in a bounded view. */
     relevanceTerms?: readonly string[];
   }): Promise<WorkspaceHistoryView> {
@@ -753,12 +766,13 @@ export class CodeIntelligenceHost {
     // The row may have been written by a process on the other platform (a WSL run
     // stores /mnt/e/..., a Windows run stores E:\...), so translate before opening it.
     const sourceRoot = await realpath(platformLocalPath(repository.localPath));
-    const files = [...new Set(selected.sourceFiles.map(normalizeHistoryPath))];
-    if (!files.length || files.length > 256 || files.some((file) => !file)) throw new Error('历史候选模块没有有效的源文件清单（最多 256 个文件）。');
+    const inventory = [...new Set(selected.sourceFiles.map(normalizeHistoryPath))];
+    if (!inventory.length || inventory.some((file) => !file)) throw new Error('历史候选模块没有有效的源文件清单。');
+    const preferred = [...new Set((selected.preferredFiles ?? []).map(normalizeHistoryPath))].filter(file => inventory.includes(file));
+    const files = [...preferred, ...inventory.filter(file => !preferred.includes(file))];
     // Validate and measure every candidate file at the trusted host boundary,
-    // then materialize only a bounded evidence view. The first file remains in
-    // the view for verifier compatibility; the remaining files are retained in
-    // their indexed order until the file/byte budget is reached.
+    // then materialize only a bounded evidence view. Module inventory size is
+    // not the Agent's observation budget: large indexed modules are valid too.
     const fileSizes = new Map<string, number>();
     for (const file of files) {
       const source = await safeHistoryFile(sourceRoot, file);
@@ -767,6 +781,7 @@ export class CodeIntelligenceHost {
       fileSizes.set(file, stat.size);
     }
     const viewFiles = boundHistoryViewFiles(files, fileSizes, HISTORY_VIEW_MAX_FILES, HISTORY_VIEW_MAX_BYTES, selected.relevanceTerms ?? []);
+    if (!viewFiles.length) throw new Error('历史候选没有符合历史视图大小预算的 source files。');
     const runId = randomUUID();
     let targetRoot = selected.workspaceRoot?.trim();
     if (!targetRoot && this.#selectedTarget) {
@@ -1269,6 +1284,7 @@ export class CodeIntelligenceHost {
       store: runtime.store,
       ...(this.#planProject ? { plan: (scope: ProjectAnalysisScope & { objective: string }) => this.#planProject!(scope) } : {}),
       hierarchyPlanner: this.#hierarchyPlanner,
+      allowLargeAgentPlan: this.#allowLargeAgentPlan,
       onChange: this.#onChange,
     });
     return this.#projectAnalysis;
@@ -1696,6 +1712,16 @@ export function codeIntelligenceRuntimeOptionsFromEnvironment(
   if (!Number.isInteger(vectorDimension) || vectorDimension <= 0) {
     throw new Error('CODE_INTELLIGENCE_SEEKDB_VECTOR_DIMENSION must be a positive integer.');
   }
+  const connectionLimitValue = environment.CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT?.trim();
+  const connectionLimit = connectionLimitValue ? Number(connectionLimitValue) : undefined;
+  if (connectionLimit !== undefined && (!Number.isInteger(connectionLimit) || connectionLimit < 1 || connectionLimit > 64)) {
+    throw new Error('CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT must be an integer in 1..64.');
+  }
+  const searchQueryConcurrencyValue = environment.CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY?.trim();
+  const searchQueryConcurrency = searchQueryConcurrencyValue ? Number(searchQueryConcurrencyValue) : undefined;
+  if (searchQueryConcurrency !== undefined && (!Number.isInteger(searchQueryConcurrency) || searchQueryConcurrency < 0 || searchQueryConcurrency > 32)) {
+    throw new Error('CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY must be an integer in 0..32.');
+  }
   const embeddingUrl = environment.CODE_INTELLIGENCE_EMBEDDING_URL?.trim();
   const embeddingModel = environment.CODE_INTELLIGENCE_EMBEDDING_MODEL?.trim();
   if (Boolean(embeddingUrl) !== Boolean(embeddingModel)) throw new Error('Configure both CODE_INTELLIGENCE_EMBEDDING_URL and CODE_INTELLIGENCE_EMBEDDING_MODEL.');
@@ -1712,6 +1738,8 @@ export function codeIntelligenceRuntimeOptionsFromEnvironment(
       password: environment.CODE_INTELLIGENCE_SEEKDB_PASSWORD ?? '',
       database,
       vectorDimension,
+      ...(connectionLimit !== undefined ? { connectionLimit } : {}),
+      ...(searchQueryConcurrency !== undefined ? { searchQueryConcurrency } : {}),
       ...(embeddingUrl && embeddingModel ? { embedding: {
         url: embeddingUrl, model: embeddingModel, apiKey: environment.CODE_INTELLIGENCE_EMBEDDING_API_KEY ?? '',
         supportsDimensions: environment.CODE_INTELLIGENCE_EMBEDDING_SUPPORTS_DIMENSIONS !== 'false',

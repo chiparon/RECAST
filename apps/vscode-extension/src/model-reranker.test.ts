@@ -8,6 +8,19 @@ import { setModelCredentialProvider } from './local-fetch';
 
 afterEach(() => setModelCredentialProvider(undefined));
 const candidates = [0, 1].map(id => ({ id: String(id), name: 'feature', granularity: 'function', relativePath: 'a.py', preview: 'def feature(): pass' }));
+it('preserves real module names and representative evidence in the ranking transport', async () => {
+  let payload: any;
+  const ranker = new ConfiguredModelReranker(() => 'http://127.0.0.1:8788', async () => {}, async (_url, init) => {
+    payload = JSON.parse(String(init?.body));
+    return Response.json({ order: ['c1', 'c0'] });
+  });
+  const documents = ['Order processing\nCore APIs: placeOrder\nImplementation evidence:\nOrderService.java\nplaceOrder()',
+    'Multipart parsing\nCore APIs: parse\nImplementation evidence:\nMultipartParser.java\ncheckFileSize()'];
+  await ranker.rank('upload', documents, new AbortController().signal);
+  expect(payload.candidates.map((candidate: any) => candidate.name)).toEqual(['Order processing', 'Multipart parsing']);
+  expect(payload.candidates.map((candidate: any) => candidate.preview)).toEqual(documents);
+});
+
 it('forwards fresh panel keys and model settings for module reranking', async () => {
   const requests: any[] = [];
   const server = createServer((req, res) => {
@@ -85,4 +98,18 @@ it('rejects fabricated or repeated candidate IDs and honors cancellation', async
   await expect(ranker.rerank('feature', candidates)).rejects.toThrow('无效候选');
   const controller = new AbortController(); controller.abort();
   await expect(ranker.rerank('feature', candidates, controller.signal)).rejects.toThrow();
+});
+
+it('automatic transport preserves the selected prefix and exposes decision evidence',async()=>{
+ const decisions:any[]=[]; let request:any;
+ const selection={responsibilities:['parse'],candidates:[],proposed:[],selected:[{id:'c1',reason:'parse',evidence:'parse()',incrementalValue:'primary'}],rejected:[],missingResponsibilities:['store']};
+ const ranker=new ConfiguredModelReranker(()=> 'http://127.0.0.1:8788',async()=>{},async(_url,init)=>{
+  request=JSON.parse(String(init?.body)); return Response.json({order:['c1','c0'],selection});
+ },undefined,{onSelection:s=>decisions.push(s)});
+ expect((await ranker.rank('parse',['storage','parser'],new AbortController().signal)).map(r=>r.index)).toEqual([1,0]);
+ expect(request.selectReferences).toBe(true);expect(decisions[0]).toEqual(selection);
+});
+it('automatic transport does not silently choose a hybrid/default rank when selection is absent',async()=>{
+ const ranker=new ConfiguredModelReranker(()=> 'http://127.0.0.1:8788',async()=>{},async()=>Response.json({order:['c0','c1']}),undefined,{onSelection:()=>{throw new Error('must not reach caller');}});
+ await expect(ranker.rank('parse',['storage','parser'],new AbortController().signal)).rejects.toThrow('selection');
 });
