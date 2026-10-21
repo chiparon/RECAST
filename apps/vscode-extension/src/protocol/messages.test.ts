@@ -14,6 +14,11 @@ describe('Project pipeline intent boundary', () => {
     expect(isWebviewToHostMessage(action)).toBe(true);
     expect(isWebviewToHostMessage({ ...action, action: 'unknown' })).toBe(false);
     expect(isWebviewToHostMessage({ ...action, action: 'export-report', destination: 'C:/arbitrary' })).toBe(false);
+    expect(isWebviewToHostMessage({ ...action, action: 'resume' })).toBe(true);
+    expect(isWebviewToHostMessage({ ...action, action: 'retry-module', moduleId: 'module-domain' })).toBe(true);
+    expect(isWebviewToHostMessage({ ...action, action: 'retry-module' })).toBe(false);
+    expect(isWebviewToHostMessage({ ...action, action: 'resume', moduleId: 'module-domain' })).toBe(false);
+    expect(isWebviewToHostMessage({ ...action, action: 'retry-module', moduleId: '../output' })).toBe(false);
   });
 });
 

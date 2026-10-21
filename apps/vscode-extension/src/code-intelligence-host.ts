@@ -265,6 +265,8 @@ export interface CodeIntelligenceHostOptions {
   planProject?: (scope: ProjectAnalysisScope & { objective: string }) => Promise<ProjectAnalysisResult>;
   hierarchyPlanner?: ModuleHierarchyPlanner;
   onChange?: () => void;
+  /** Import journals must receive failures that otherwise only reached the output log. */
+  onProjectAnalysisError?: (scope: ProjectAnalysisScope, error: unknown) => void;
   /**
    * Module analysis calls a model, so the trusted host refuses it while this
    * returns a reason (e.g. no API Key in the settings). Indexing, symbols and
@@ -562,6 +564,7 @@ export class CodeIntelligenceHost {
   #visibleRepositoryIds = new Set<RepositoryId>();
   #indexingProgress = new Map<RepositoryId, NonNullable<CodeIntelligenceRepositoryPresentation['indexing']>>();
   #projectTasks = new Set<Promise<void>>();
+  readonly #onProjectAnalysisError?: CodeIntelligenceHostOptions['onProjectAnalysisError'];
   #lastPresentation: CodeIntelligencePresentation | undefined;
   /** Per-panel-host display choice only; never persisted as repository state. */
   #selectedRevisions = new Map<RepositoryId, string>();
@@ -583,6 +586,7 @@ export class CodeIntelligenceHost {
     this.#hierarchyPlanner = options.hierarchyPlanner;
     this.#allowLargeAgentPlan = options.allowLargeAgentPlan === true;
     this.#onChange = options.onChange;
+    this.#onProjectAnalysisError = options.onProjectAnalysisError;
     this.#modelKeyRefusal = options.modelKeyRefusal;
     this.#onModelRefusal = options.onModelRefusal;
     this.#runtimeFactory = options.runtimeFactory ?? defaultRuntimeFactory;
@@ -670,6 +674,18 @@ export class CodeIntelligenceHost {
     this.#semanticQueryEndpoint = `http://127.0.0.1:${address.port}`;
     this.#output?.appendLine(`[forexplore] semantic query port listening at ${this.#semanticQueryEndpoint}.`);
     return this.#semanticQueryEndpoint;
+  }
+
+  /** Host-only identity lookup; does not create an identity or require a finished index. */
+  async registeredRepositoryIdForPath(localPath: string): Promise<RepositoryId | null> {
+    const repositoryId = await this.existingRepositoryIdFor(localPath);
+    return repositoryId && this.#visibleRepositoryIds.has(repositoryId) ? repositoryId : null;
+  }
+
+  async sourceRootForRepository(repositoryId: RepositoryId): Promise<string> {
+    const repository = await (await this.runtime()).registry.get(repositoryId);
+    if (!this.#visibleRepositoryIds.has(repositoryId) || repository?.role !== 'target') throw new Error('目标工程不在当前工作区范围。');
+    return realpath(platformLocalPath(repository.localPath));
   }
 
   /** Resolves a registered local root to the active revision without exposing the root. */
@@ -1365,7 +1381,10 @@ export class CodeIntelligenceHost {
   private scheduleProject(scope: ProjectAnalysisScope, force = false): void {
     if (this.#disposed) return;
     const task = this.ensureProjectAnalysis(scope, force)
-      .catch((error) => this.logFailure('project module analysis', error))
+      .catch((error) => {
+        this.logFailure('project module analysis', error);
+        this.#onProjectAnalysisError?.(scope, error);
+      })
       .finally(() => this.#projectTasks.delete(task));
     this.#projectTasks.add(task);
   }

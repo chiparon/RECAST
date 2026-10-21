@@ -299,6 +299,23 @@ async function temporaryRepository(name: string): Promise<string> {
   return root;
 }
 
+it('binds an import to a registered workspace root before indexing and keeps hidden or historical roots out of retries', async () => {
+  const target = await temporaryRepository('target-import'), history = await temporaryRepository('history-import');
+  const runtime = createRuntime(), instance = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const inputs = [{ localPath: target, role: 'target' as const }, { localPath: history, role: 'history' as const }];
+  const registered = await instance.synchronize({ repositories: inputs, scan: false });
+  const id = await instance.registeredRepositoryIdForPath(target);
+  expect(id).toBe(registered.presentation.repositories.find(repository => repository.role === 'target')!.repositoryId);
+  expect((await instance.sourceRootForRepository(id!)).toLowerCase()).toBe(target.toLowerCase());
+  await expect(instance.activeScopeForPath(target)).rejects.toThrow('no active analysis revision');
+  const historyId = await instance.registeredRepositoryIdForPath(history);
+  await expect(instance.sourceRootForRepository(historyId!)).rejects.toThrow('不在当前工作区');
+  await instance.synchronize({ repositories: [inputs[1]!], scan: false });
+  expect(await instance.registeredRepositoryIdForPath(target)).toBeNull();
+  await expect(instance.sourceRootForRepository(id!)).rejects.toThrow('不在当前工作区');
+  instance.dispose();
+});
+
 it('recovers persisted repository identities when a host starts without its identity cache', async () => {
   const root = await temporaryRepository('reopen');
   const runtime = createRuntime();

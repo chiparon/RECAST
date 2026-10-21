@@ -1732,13 +1732,16 @@ button:disabled {
 }
 
 .module-main {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   background: var(--bg);
 }
 
 .module-main-scroll {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
 }
@@ -1937,12 +1940,7 @@ button:disabled {
   text-align: right;
 }
 
-.code-intelligence-active-revision {
-  color: var(--fg);
-  font-family: var(--mono);
-}
-
-.code-intelligence-revision-picker {
+.code-intelligence-project-picker {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
@@ -1951,7 +1949,7 @@ button:disabled {
   color: var(--muted);
 }
 
-.code-intelligence-revision-picker select {
+.code-intelligence-project-picker select {
   min-width: 0;
   max-width: 180px;
   padding: 2px 4px;
@@ -1963,7 +1961,6 @@ button:disabled {
   font-size: 8px;
 }
 
-.code-intelligence-history-notice,
 .code-intelligence-stale-warning {
   max-width: 100%;
   color: var(--warning);
@@ -2670,15 +2667,56 @@ button:disabled {
 .workspace-picker-repository > summary { cursor: pointer; color: var(--fg); font-size: 12px; }
 .workspace-picker-repository > summary small { display: block; margin: 3px 0 3px 12px; color: var(--muted); font-size: 10px; }
 .workspace-picker-repository > .workspace-picker-option { padding-left: 18px; }
-.history-import-progress { flex: none; margin: 5px 12px; border: 1px solid var(--border); border-radius: 5px; font-size: 11px; background: var(--surface); }
-.history-import-progress > summary { padding: 7px 10px; cursor: pointer; overflow-wrap: anywhere; }
-.history-import-progress > summary svg { margin: 0 7px; vertical-align: middle; }
-.history-import-progress ul { max-height: 175px; overflow-y: auto; margin: 0; padding: 0 10px 7px; list-style: none; }
-.history-import-progress li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px; padding: 5px 0; border-top: 1px solid var(--border); }
-.history-import-progress li > strong { min-width: 120px; }
-.history-import-progress li > span { flex: 1; min-width: 140px; overflow-wrap: anywhere; color: var(--muted); }
-.history-import-progress li.is-error > span { color: var(--warning, #cca700); }
-.history-import-progress li > button { border: 1px solid var(--border); border-radius: 3px; background: var(--input-bg); color: var(--fg); cursor: pointer; font-size: 11px; }
+.import-task-panels { flex: none; min-height: 0; max-height: 46vh; overflow-y: auto; }
+.import-task-header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.import-task-header-actions .icon-button { flex: none; }
+.import-task-reopen { padding: 5px 16px; border-bottom: 1px solid var(--border); }
+.history-import-repositories { max-height: 110px; overflow-y: auto; list-style: none; margin: 5px 0; padding: 0; font-size: 11px; }
+.history-import-repositories li { display: flex; align-items: baseline; gap: 8px; border-top: 1px solid var(--border); padding: 4px 0; flex-wrap: wrap; }
+.history-import-repositories li > span { flex: 1; min-width: 140px; color: var(--muted); overflow-wrap: anywhere; }
+.history-import-repositories li.is-error > span { color: var(--warning); }
+
+.target-import-panel { flex: none; min-width: 0; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); font-size: 12px; }
+.target-import-panel > header, .target-import-details > header, .target-import-summary, .target-import-footer, .target-import-progress-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.target-import-panel > header > strong, .target-import-footer > span, .target-import-footer > div { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.target-import-panel > header { margin-bottom: 5px; }
+.target-import-summary { justify-content: flex-start; flex-wrap: wrap; }
+.target-import-summary > strong { overflow-wrap: anywhere; }
+.target-import-directory { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; margin-top: 2px; }
+.target-import-status { color: var(--muted); font-size: 11px; }
+.target-import-status.is-running { color: var(--focus); }
+.target-import-status.is-completed { color: var(--ok); }
+.target-import-status.is-failed, .target-import-status.is-interrupted { color: var(--warning); }
+.target-import-message { margin: 6px 0; overflow-wrap: anywhere; }
+.target-import-message[role="alert"] { color: var(--warning); }
+.target-import-phases { display: flex; flex-wrap: wrap; list-style: none; padding: 0; margin: 8px 0; gap: 6px 14px; color: var(--muted); font-size: 11px; }
+.target-import-phases li { display: flex; align-items: center; gap: 4px; }
+.target-import-phases li.is-done { color: var(--ok); }
+.target-import-phases li.is-current { color: var(--fg); font-weight: 600; }
+.target-import-phases li > span { display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; width: 15px; height: 15px; font-size: 10px; }
+.target-import-progress-row { margin: 6px 0; }
+.target-import-progress-row > span { color: var(--muted); white-space: nowrap; font-size: 11px; }
+.target-import-progress { flex: 1; height: 4px; overflow: hidden; border-radius: 3px; background: var(--border); }
+.target-import-progress > i { display: block; height: 100%; background: var(--focus); }
+.target-import-progress.is-indeterminate > i { width: 30%; animation: target-import-pulse 1.8s ease-in-out infinite alternate; }
+@keyframes target-import-pulse { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.target-import-footer { flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+.target-import-footer .secondary-action { font-size: 11px; padding: 4px 9px; }
+.target-import-results { display: flex; flex-wrap: wrap; gap: 15px; color: var(--muted); font-size: 11px; margin-top: 3px; }
+.target-import-empty { margin: 3px 0; color: var(--muted); }
+.target-import-expanded { max-height: min(32vh, 260px); overflow-y: auto; }
+.target-import-history, .target-import-details { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 6px; }
+.target-import-history > div { display: flex; align-items: center; gap: 6px; }
+.target-import-history > div > button:first-child { flex: 1; min-width: 0; padding: 5px; border: 0; background: transparent; cursor: pointer; text-align: left; }
+.target-import-history > div > button:first-child:hover, .target-import-history button[aria-pressed="true"] { background: var(--selection); color: var(--selection-fg); }
+.target-import-history strong, .target-import-history span { display: block; overflow-wrap: anywhere; }
+.target-import-history span { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.target-import-details ol { list-style: none; margin: 4px 0; padding: 0; }
+.target-import-details li { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; }
+.target-import-details time { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.target-import-details li > span { overflow-wrap: anywhere; }
+@media (max-width: 560px) { .target-import-panel { padding: 8px 10px; } .target-import-phases { gap: 5px 8px; } }
+@media (prefers-reduced-motion: reduce) { .target-import-progress.is-indeterminate > i { animation: none; } }
 .workspace-picker-menu button { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 30px; padding: 7px; border: 0; border-radius: 3px; background: transparent; color: var(--fg); text-align: left; font-size: 11px; cursor: pointer; }
 .workspace-picker-menu button:hover:not(:disabled), .workspace-picker-menu button:focus-visible { background: var(--selection); color: var(--selection-fg); }
 .workspace-picker-menu button > svg { flex: none; }

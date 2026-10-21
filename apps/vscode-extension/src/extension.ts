@@ -2,7 +2,8 @@ import { createModelCredentialProvider, modelCredentialId, modelKeyRefusalReason
 import { setModelCredentialProvider } from './local-fetch';
 import { BackendProcess, type BackendLaunchConfiguration } from './backend-process';
 import { applyDevelopmentLaunchEnvironment } from './development-launch';
-import { completeTargetImport } from './target-import-recovery';
+import { TargetImportTasks, finishTargetImportModel } from './target-import-tasks';
+import { HistoryImportTasks } from './history-import-tasks';
 import { ConfiguredModelReranker } from './model-reranker';
 import { WorkspaceTranslationHost } from './workspace-translation-host';
 import { ProjectPipelineHost } from './project-pipeline-host';
@@ -133,6 +134,11 @@ let preloadedProjectBindings = new Map<string, string>();
 /** One-shot startup chain, created by the first explicit use of the workbench. */
 let codeIntelligenceStartup: Promise<void> | undefined;
 let startupCancellation: AbortController | undefined;
+let targetImportTasks: TargetImportTasks | undefined;
+let historyImportTasks: HistoryImportTasks | undefined;
+let targetImportJournalKey: string;
+let targetImportExecution: { taskId: string; controller: AbortController } | undefined;
+let extensionStopping = false;
 const startupProgressListeners = new Set<(progress: RepositoryIndexingProgress) => void>();
 
 /**
@@ -167,6 +173,7 @@ function preloadedModelApiKey(): string | undefined {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  extensionStopping = false;
   applyDevelopmentLaunchEnvironment(context.extensionPath, context.extensionMode === vscode.ExtensionMode.Development);
   const preloadedBindings = loadPreloadedBindings();
   preloadedRepositoryBindings = preloadedBindings.repositoryIds;
@@ -182,6 +189,25 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const output = vscode.window.createOutputChannel('RECAST');
   activeOutput = output;
+  const pendingImport = readPendingTargetImport(context.globalState.get(pendingTargetImportKey(vscode.env.sessionId)));
+  const workspaceIdentity = vscode.workspace.workspaceFile?.toString()
+    ?? vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? vscode.env.sessionId;
+  targetImportJournalKey = `forexplore.targetImportTasks.${createHash('sha256').update(workspaceIdentity).digest('hex')}`;
+  targetImportTasks = new TargetImportTasks({ store: context.globalState, key: targetImportJournalKey,
+    previousKey: pendingImport?.taskJournalKey,
+    publish: tasks => publish({ type: 'TARGET_IMPORT_TASKS', tasks }),
+    onPersistenceError: error => {
+      output.appendLine(`[RECAST] 导入任务历史保存失败：${String(error)}`);
+      publishError('导入任务历史保存失败，请查看 RECAST 输出；当前进度仍可查看。');
+    } });
+  historyImportTasks = new HistoryImportTasks({ store: context.globalState,
+    key: targetImportJournalKey.replace('.targetImportTasks.', '.historyImportTasks.'),
+    previousKey: pendingImport?.taskJournalKey?.replace('.targetImportTasks.', '.historyImportTasks.'),
+    publish: tasks => publish({ type: 'HISTORY_IMPORT_TASKS', tasks }),
+    onPersistenceError: error => {
+      output.appendLine(`[RECAST] 保存参考工程导入记录失败：${String(error)}`);
+      publishError('参考工程导入记录保存失败，请检查 VS Code 存储空间；关闭窗口后可能无法恢复记录。');
+    } });
   let codeIntelligence: CodeIntelligenceHost;
   const backend = new BackendProcess(async () => {
     const configuration = vscode.workspace.getConfiguration('forexplore');
@@ -245,6 +271,7 @@ export function activate(context: vscode.ExtensionContext): void {
           return localFetch(endpoint, init);
         }),
       onChange: () => { void publishProjectView(codeIntelligence).catch((error) => output.appendLine(String(error))); },
+      onProjectAnalysisError: (scope, error) => historyImportTasks?.fail(scope.repositoryId, error, scope.analysisRevision),
       modelKeyRefusal: () => modelKeyRefusalReason(context.secrets, loadSettings().adaptationApiUrl, loadSettings().llm, preloadedModelApiKey),
       onModelRefusal: (reason) => reportModelRefusal(context, reason),
       identityStore: context.globalState,
@@ -484,8 +511,14 @@ async function configureModelKey(context: vscode.ExtensionContext, clear: boolea
   }
 }
 
-export function deactivate(): void {
+export function deactivate(): Promise<void> {
+  extensionStopping = true;
+  historyImportTasks?.stop();
+  if (targetImportExecution && targetImportTasks?.active) {
+    targetImportTasks.finish(targetImportExecution.taskId, 'interrupted', '工作区已关闭，导入已中断；可重试并复用已完成的结果。');
+  }
   startupCancellation?.abort(new DOMException('扩展已关闭', 'AbortError'));
+  targetImportExecution?.controller.abort(new DOMException('扩展已关闭', 'AbortError'));
   activeServices = undefined;
   activeRun = null;
   invalidateModuleTranslation();
@@ -493,6 +526,7 @@ export function deactivate(): void {
   moduleExplorerChildren = new Map();
   activeCodeIntelligenceHost?.dispose();
   activeCodeIntelligenceHost = null;
+  return Promise.all([targetImportTasks?.flush(), historyImportTasks?.flush()]).then(() => {}, () => {});
 }
 
 /**
@@ -716,6 +750,39 @@ async function handlePanelMessage(
   host: ExtensionHost,
   message: WebviewToHostMessage,
 ): Promise<void> {
+  if (targetImportTasks?.active && ['START_PROJECT_PIPELINE', 'ADD_TARGET_WORKSPACE', 'REFRESH_REPOSITORY',
+    'SELECT_WORKSPACE_TARGET', 'SELECT_CODE_INTELLIGENCE_PROJECT', 'SELECT_CODE_INTELLIGENCE_REVISION'].includes(message.type)) {
+    throw new Error('目标工程正在导入，请等待导入完成或停止当前任务。');
+  }
+  if (targetImportTasks?.active && message.type === 'PROJECT_PIPELINE_ACTION' && ['resume', 'retry-module'].includes(message.action)) {
+    throw new Error('目标工程正在导入，请完成或停止导入后再继续项目任务。');
+  }
+  if (message.type === 'TARGET_IMPORT_ACTION' && message.action === 'cancel') {
+    if (targetImportExecution?.taskId !== message.taskId) throw new Error('该导入任务当前没有运行。');
+    targetImportTasks?.update(message.taskId, { message: targetImportTasks.get(message.taskId)?.stage === 'selecting'
+      ? '请关闭目录选择对话框以完成取消。' : '正在停止导入等待…' });
+    targetImportExecution.controller.abort(new DOMException('用户停止导入', 'AbortError'));
+    return;
+  }
+  if (message.type === 'TARGET_IMPORT_ACTION') {
+    if (projectPipelineHost?.busy) throw new Error('项目流水线运行中，请完成或取消后再重试导入。');
+    if (targetImportTasks?.active) throw new Error('已有目标工程正在导入。');
+    const previous = targetImportTasks?.get(message.taskId);
+    if (!previous || previous.status === 'completed') throw new Error('该导入任务不能重试。');
+    if (!previous.directory || ['selecting', 'resolving', 'attaching'].includes(previous.stage)) {
+      await addTargetWorkspaceFromWebview(host, previous.mode); return;
+    }
+    const id = targetImportTasks!.begin(previous.mode), controller = new AbortController();
+    targetImportTasks!.directory(id, previous.directory);
+    targetImportExecution = { taskId: id, controller };
+    try { await importRegisteredTarget(host, id, controller); }
+    catch (error) { finishTargetImportFailure(id, error, previous.mode); }
+    finally {
+      if (targetImportExecution?.taskId === id) targetImportExecution = undefined;
+      await targetImportTasks!.flush();
+    }
+    return;
+  }
   if (projectPipelineHost?.busy && ['START_SEARCH', 'SELECT_CANDIDATE', 'START_ADAPT', 'APPLY_CURRENT_RUN', 'WORKSPACE_TRANSLATION',
     'ADD_TARGET_WORKSPACE', 'SAVE_SETTINGS', 'SELECT_WORKSPACE_TARGET', 'SELECT_CODE_INTELLIGENCE_PROJECT', 'SELECT_CODE_INTELLIGENCE_REVISION', 'REFRESH_REPOSITORY', 'RETRY_PROJECT_ANALYSIS'].includes(message.type)) {
     throw new Error('项目流水线运行中，工程、模型设置和模块写入范围已锁定；请完成或取消后再切换。');
@@ -765,6 +832,8 @@ async function handlePanelMessage(
       }
       return;
     case 'READY':
+      if (targetImportTasks) publish({ type: 'TARGET_IMPORT_TASKS', tasks: targetImportTasks.snapshot() });
+      if (historyImportTasks) publish({ type: 'HISTORY_IMPORT_TASKS', tasks: historyImportTasks.snapshot() });
       await publishModelKeyStatus(host.context);
       await projectPipelineHost?.restore();
       return;
@@ -796,20 +865,28 @@ async function handlePanelMessage(
     case 'REFRESH_REPOSITORY': {
       const repository = (await host.codeIntelligence.presentation()).repositories.find(item => item.repositoryId === message.repositoryId);
       const targetImport = repository?.role === 'target';
-      try {
-        const presentation = await withIndexingProgress('RECAST: 正在重试工程索引', controls =>
-          synchronizeCodeIntelligence(host.codeIntelligence, { scanRepositoryIds: [message.repositoryId], ...controls }), targetImport);
-        if (targetImport) {
-          const refreshed = presentation.repositories.find(item => item.repositoryId === message.repositoryId);
-          const completed = refreshed?.activeRevision && ['ready', 'degraded'].includes(refreshed.analysisStatus);
-          publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: completed ? 'completed' : 'failed', mode: 'workspace',
-            message: completed ? '目标工程已完成索引。' : presentation.message ?? '目标工程索引失败，请查看 RECAST 输出日志后重试。' });
+      if (targetImport) {
+        const id = targetImportTasks!.begin('workspace'), controller = new AbortController();
+        targetImportExecution = { taskId: id, controller };
+        try {
+          const directory = await host.codeIntelligence.sourceRootForRepository(message.repositoryId);
+          targetImportTasks!.directory(id, directory);
+          await importRegisteredTarget(host, id, controller);
+        } catch (error) { finishTargetImportFailure(id, error, 'workspace'); }
+        finally {
+          if (targetImportExecution?.taskId === id) targetImportExecution = undefined;
+          await targetImportTasks!.flush();
+          await publishProjectView(host.codeIntelligence);
         }
+        return;
+      }
+      if (repository?.role === 'history') historyImportTasks?.retry(message.repositoryId, 'index');
+      try {
+        await withIndexingProgress('RECAST: 正在重试工程索引', controls =>
+          synchronizeCodeIntelligence(host.codeIntelligence, { scanRepositoryIds: [message.repositoryId], ...controls }));
       } catch (error) {
-        if (targetImport) publish({ type: 'TARGET_WORKSPACE_RESULT',
-          outcome: isIndexingCancellation(error) ? 'cancelled' : 'failed', mode: 'workspace',
-          message: errorMessage(error, '目标工程索引失败') });
-        else if (!isIndexingCancellation(error)) throw error;
+        historyImportTasks?.fail(message.repositoryId, error);
+        if (!isIndexingCancellation(error)) throw error;
       } finally { await publishProjectView(host.codeIntelligence); }
       return;
     }
@@ -820,7 +897,13 @@ async function handlePanelMessage(
       await selectCodeIntelligenceRevision(host.codeIntelligence, message);
       return;
     case 'RETRY_PROJECT_ANALYSIS':
-      await host.codeIntelligence.retryProject(message, message.force);
+      try {
+        const repository = (await host.codeIntelligence.presentation()).repositories.find(item => item.repositoryId === message.repositoryId);
+        if (repository?.role === 'history' && !historyImportTasks?.snapshot().some(task => task.repositoryId === message.repositoryId && task.status === 'running')) {
+          historyImportTasks?.retry(message.repositoryId, message.force ? 'rebuild-model' : 'model');
+        }
+        await host.codeIntelligence.retryProject(message, message.force);
+      } catch (error) { historyImportTasks?.fail(message.repositoryId, error, message.analysisRevision); throw error; }
       return;
     case 'SELECT_CODE_INTELLIGENCE_PROJECT':
       await selectCodeIntelligenceProject(host.codeIntelligence, message);
@@ -980,109 +1063,122 @@ function withIndexingProgress<T>(
  * index. Every phase reaches the notification *and* the Webview, because a
  * silent multi-minute wait is indistinguishable from a dead button.
  */
-async function addTargetWorkspaceFromWebview(
-  host: ExtensionHost,
-  mode: TargetWorkspaceAddMode,
-): Promise<void> {
-  publish({ type: 'TARGET_WORKSPACE_PROGRESS', phase: 'selecting',
-    message: mode === 'workspace' ? '请在弹出的列表中选择目标工程目录…' : '请在弹出的对话框中选择目标工程目录…' });
-  // Adding the first workspace folder restarts this extension host, so the
-  // intent is persisted before that mutation and cleared once this host
-  // finishes the job. Otherwise a restart leaves the panel stuck on
-  // "正在建立索引" with nobody left to complete or clear it.
-  await host.context.globalState.update(pendingTargetImportKey(vscode.env.sessionId),
-    { requestedAt: new Date().toISOString(), mode } satisfies PendingTargetImport);
-  const clearIntent = () => host.context.globalState.update(pendingTargetImportKey(vscode.env.sessionId), undefined);
-  const controller = new AbortController();
-  let selection: Awaited<ReturnType<typeof addTargetWorkspace>>;
+async function addTargetWorkspaceFromWebview(host: ExtensionHost, mode: TargetWorkspaceAddMode): Promise<void> {
+  const tasks = targetImportTasks!, id = tasks.begin(mode), controller = new AbortController();
+  targetImportExecution = { taskId: id, controller };
+  const clearIntent = async () => {
+    const key = pendingTargetImportKey(vscode.env.sessionId);
+    const current = host.context.globalState.get<PendingTargetImport>(key);
+    if (current?.taskId === id) await host.context.globalState.update(key, undefined);
+  };
   try {
-    selection = await vscode.window.withProgress(
+    await tasks.flush();
+    controller.signal.throwIfAborted();
+    publish({ type: 'TARGET_WORKSPACE_PROGRESS', phase: 'selecting', message: '请在弹出的对话框中选择目标工程目录…' });
+    await host.context.globalState.update(pendingTargetImportKey(vscode.env.sessionId),
+      { requestedAt: new Date().toISOString(), mode, taskId: id, taskJournalKey: targetImportJournalKey } satisfies PendingTargetImport);
+    const selection = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'RECAST: 正在添加目标工程', cancellable: true },
       async (progress, token) => {
-        const subscription = token.onCancellationRequested(() => controller.abort(new DOMException('添加目标工程已取消', 'AbortError')));
+        const cancel = () => controller.abort(new DOMException('添加目标工程已取消', 'AbortError'));
+        const subscription = token.onCancellationRequested(cancel);
         try {
-          if (token.isCancellationRequested) controller.abort(new DOMException('添加目标工程已取消', 'AbortError'));
-          controller.signal.throwIfAborted();
-          const selected = await addTargetWorkspace(mode, { signal: controller.signal, onProgress: update => {
+          if (token.isCancellationRequested) cancel();
+          return await addTargetWorkspace(mode, { signal: controller.signal, onProgress: async update => {
             controller.signal.throwIfAborted();
+            if (update.directory) tasks.directory(id, update.directory);
+            tasks.update(id, { stage: update.phase, message: update.message });
+            // A first workspace folder can terminate this process immediately.
+            await tasks.flush();
             progress.report({ message: update.message });
             publish({ type: 'TARGET_WORKSPACE_PROGRESS', phase: update.phase, message: update.message });
           } });
-          controller.signal.throwIfAborted();
-          return selected;
         } finally { subscription.dispose(); }
-      },
-    );
-  } catch (error) {
-    await clearIntent();
-    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: isIndexingCancellation(error) ? 'cancelled' : 'failed', mode,
-      message: errorMessage(error, '添加目标工程失败') });
-    return;
+      });
+    if (selection.status === 'cancelled') throw new DOMException('已取消目标工程选择。', 'AbortError');
+    controller.signal.throwIfAborted();
+    tasks.directory(id, selection.directory);
+    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'added', mode, message: '目标目录已登记，正在建立索引与模块模型…' });
+    await importRegisteredTarget(host, id, controller);
+  } catch (error) { finishTargetImportFailure(id, error, mode); }
+  finally {
+    if (targetImportExecution?.taskId === id) targetImportExecution = undefined;
+    if (!extensionStopping) await clearIntent();
+    await tasks.flush();
   }
-  if (selection.status === 'cancelled') {
-    await clearIntent();
-    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'cancelled', mode });
-    return;
-  }
-  publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'added', mode,
-    message: selection.status === 'attached'
-      ? '目标目录已加入工作区，正在建立索引…'
-      : '目标目录已登记，正在建立索引…' });
-  try {
-    // `throwErrors` keeps the failure message with the retry affordance in the
-    // selector instead of duplicating it into the global error banner.
-    await withIndexingProgress('RECAST: 正在建立目标工程索引', controls =>
-      refreshModuleExplorer(host.codeIntelligence, { scanNewOnly: true, throwErrors: true, ...controls }), true, controller);
-  } catch (error) {
-    if (isIndexingCancellation(error)) await clearIntent();
-    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: isIndexingCancellation(error) ? 'cancelled' : 'failed', mode,
-      message: errorMessage(error, '目标目录已登记，但索引失败') });
-    return;
-  }
-  await clearIntent();
-  // VS Code may restart this extension host to apply the workspace change. The
-  // Webview then rebuilds from INIT instead of receiving this message.
-  publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'completed', mode });
 }
 
-/**
- * Finishes a target import that a workspace change cut in half. Reaching this
- * means the previous host died between adding the folder and indexing it, so
- * the work only has to run again — and say so, instead of leaving the panel on
- * a progress state that will never advance.
- */
-async function resumeInterruptedTargetImport(
-  host: ExtensionHost,
-  output: vscode.OutputChannel,
-): Promise<void> {
-  const pending = readPendingTargetImport(host.context.globalState.get(pendingTargetImportKey(vscode.env.sessionId)));
-  if (!pending) return;
-  output.appendLine('[forexplore] resuming the target import interrupted by the workspace change.');
-  try {
-    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'added', mode: pending.mode,
-      message: '正在恢复目标工程导入…' });
-    publish({ type: 'TARGET_WORKSPACE_PROGRESS', phase: 'indexing', message: '正在恢复目标工程导入…' });
-    await completeTargetImport(host.context.globalState, pendingTargetImportKey(vscode.env.sessionId), pending, async () => {
-      await ensureCodeIntelligenceStarted(host, output, { onProgress: update =>
-        publish({ type: 'TARGET_WORKSPACE_PROGRESS', phase: 'indexing', message: indexingProgressMessage(update) }) });
-      // Startup loads saved results only. An explicit interrupted import must
-      // resume its target scan here; another read leaves it registered forever.
-      await withIndexingProgress('RECAST: 正在恢复目标工程索引', controls =>
-        refreshModuleExplorer(host.codeIntelligence, { scanNewOnly: true, scanRoles: ['target'], throwErrors: true, ...controls }), true);
+/** One selected directory, one index, then its selected project's real model. */
+async function importRegisteredTarget(host: ExtensionHost, id: string, controller: AbortController): Promise<void> {
+  const tasks = targetImportTasks!, directory = tasks.get(id)?.directory;
+  if (!directory) throw new Error('目标目录未保存，请重新选择目标工程。');
+  tasks.update(id, { stage: 'indexing', message: '正在准备服务与目标工程索引…', progress: undefined });
+  await tasks.flush();
+  await ensureCodeIntelligenceStarted(host, host.output, { signal: controller.signal });
+  // Register configured roots without scanning unrelated targets or history.
+  await synchronizeCodeIntelligence(host.codeIntelligence, { scan: false, signal: controller.signal });
+  const repositoryId = await host.codeIntelligence.registeredRepositoryIdForPath(directory);
+  if (!repositoryId) throw new Error('目标目录未进入当前工作区，请重新选择目标工程。');
+  tasks.update(id, { repositoryId });
+  await withIndexingProgress('RECAST: 正在导入目标工程', async controls => {
+    const result = await synchronizeCodeIntelligenceResult(host.codeIntelligence, {
+      scanRepositoryIds: [repositoryId], ...controls,
+      onProgress: progress => { tasks.indexing(id, progress); controls.onProgress?.(progress); },
     });
-  } catch (error) {
-    if (isIndexingCancellation(error)) {
-      publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'cancelled', mode: pending.mode,
-        message: errorMessage(error, '索引已取消') });
-      return;
-    }
-    const failure = errorMessage(error, '恢复目标工程导入失败');
-    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'failed', mode: pending.mode, message: failure });
-    void vscode.window.showWarningMessage(`RECAST: ${failure}`);
+    const verdict = targetImportVerdict({ ...result.presentation,
+      repositories: result.presentation.repositories.filter(repository => repository.repositoryId === repositoryId) }, result.failedRepositoryIds);
+    if (verdict.status === 'failed') throw new Error(verdict.message);
+    await finishTargetImportModel(tasks, id, {
+      scope: directory => host.codeIntelligence.activeScopeForPath(directory),
+      selectedProject: directory => host.codeIntelligence.selectedProjectForPath(directory),
+      ensureModel: (scope, signal) => host.codeIntelligence.ensureProjectModel(scope, signal),
+    }, controller.signal);
+  }, true, controller);
+  publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'completed', mode: tasks.get(id)!.mode,
+    message: '目标工程导入完成：索引与模块建模均已完成。' });
+  await publishProjectView(host.codeIntelligence);
+}
+
+function finishTargetImportFailure(id: string, error: unknown, mode: TargetWorkspaceAddMode): void {
+  if (extensionStopping) return;
+  const tasks = targetImportTasks!, cancelled = isIndexingCancellation(error);
+  if (tasks.get(id)?.status === 'completed') {
+    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'completed', mode, message: tasks.get(id)!.message });
     return;
   }
-  publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'completed', mode: pending.mode });
-  void vscode.window.showInformationMessage('RECAST: 目标工程已导入并完成索引。');
+  const message = cancelled && tasks.get(id)?.stage === 'modeling'
+    ? '已停止等待模块建模；共享建模任务可能继续运行，可稍后重试查看结果。'
+    : errorMessage(error, '目标工程导入失败');
+  tasks.finish(id, cancelled ? 'cancelled' : 'failed', message);
+  publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: cancelled ? 'cancelled' : 'failed', mode, message: message.slice(0, 400) });
+}
+
+/** Resume the same durable task when adding a workspace folder killed its host. */
+async function resumeInterruptedTargetImport(host: ExtensionHost, output: vscode.OutputChannel): Promise<void> {
+  const key = pendingTargetImportKey(vscode.env.sessionId);
+  const pending = readPendingTargetImport(host.context.globalState.get(key));
+  if (!pending) return;
+  const tasks = targetImportTasks!, id = tasks.begin(pending.mode, pending.taskId), controller = new AbortController();
+  targetImportExecution = { taskId: id, controller };
+  output.appendLine('[RECAST] 正在恢复工作区变更中断的目标工程导入。');
+  try {
+    if (!tasks.get(id)?.directory) {
+      const folders = selectedTargetWorkspaceFolders();
+      if (folders.length !== 1) throw new Error('无法确定中断的目标目录，请重新选择目标工程。');
+      tasks.directory(id, folders[0]!.uri.fsPath);
+    }
+    publish({ type: 'TARGET_WORKSPACE_RESULT', outcome: 'added', mode: pending.mode, message: '正在恢复目标工程导入…' });
+    await importRegisteredTarget(host, id, controller);
+    const current = host.context.globalState.get<PendingTargetImport>(key);
+    if (current?.requestedAt === pending.requestedAt && current.mode === pending.mode) await host.context.globalState.update(key, undefined);
+  } catch (error) {
+    finishTargetImportFailure(id, error, pending.mode);
+    const current = host.context.globalState.get<PendingTargetImport>(key);
+    if (!extensionStopping && current?.requestedAt === pending.requestedAt && current.mode === pending.mode) await host.context.globalState.update(key, undefined);
+  } finally {
+    await tasks.flush();
+    if (targetImportExecution?.taskId === id) targetImportExecution = undefined;
+  }
 }
 
 async function selectWorkspaceTarget(targetId: string): Promise<void> {
@@ -1553,13 +1649,16 @@ async function synchronizeCodeIntelligenceResult(
   options: SynchronizationOptions = {},
 ): Promise<Awaited<ReturnType<CodeIntelligenceHost['synchronize']>>> {
   const updateStatus = (presentation: CodeIntelligencePresentation) => {
+    if (!extensionStopping) historyImportTasks?.observe(presentation);
     activeServices?.setIndexStatus(presentation);
     if (activeServices) publish({ type: 'SERVICE_STATUS', status: activeServices.serviceStatus });
   };
   try {
+    if (options.resumeProjectAnalysis) historyImportTasks?.resumeModels(options.scanRepositoryIds);
     const result = await host.synchronize({ repositories: codeIntelligenceRepositoryInputs(), ...options,
       onProgress: progress => {
         publish({ type: 'REPOSITORY_INDEXING_PROGRESS', progress });
+        if (!extensionStopping) historyImportTasks?.indexing(progress);
         options.onProgress?.(progress);
       } });
     updateStatus(result.presentation);
@@ -1571,6 +1670,10 @@ async function synchronizeCodeIntelligenceResult(
 }
 
 function publish(message: HostToWebviewMessage): void {
+  if (message.type === 'CODE_INTELLIGENCE_STATUS' && !extensionStopping) {
+    targetImportTasks?.observeModel(message.presentation);
+    historyImportTasks?.observe(message.presentation);
+  }
   publishPanelMessage(TranslationPanel.current, message, activeOutput);
 }
 
@@ -1622,9 +1725,10 @@ function publishProjectView(host: CodeIntelligenceHost): Promise<void> {
   if (projectViewPublishing) return projectViewQueue;
   projectViewPublishing = true;
   projectViewQueue = projectViewQueue.catch(() => {}).then(async () => {
-    while (projectViewRequested && TranslationPanel.current) {
+    while (projectViewRequested) {
       projectViewRequested = false;
       publish({ type: 'CODE_INTELLIGENCE_STATUS', presentation: await host.presentation() });
+      if (!TranslationPanel.current) continue;
       const explorer = await buildProjectExplorer(host, activeRun?.target);
       moduleExplorerTargets = explorer.targets;
       moduleExplorerChildren = explorer.childrenByNodeId;

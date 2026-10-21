@@ -38,6 +38,23 @@ export class ProjectPipelineHost {
     this.pipeline = new ProjectPipeline({
       proactiveIntegration: true,
       initialize: (run, signal, log) => backend.prepare(run, signal, log),
+      checkpoint: run => this.files.checkpoint(run),
+      restore: async (run, signal, log) => {
+        log('正在核对断点文件、骨架基线和写入范围…');
+        await this.files.assertResumable(run); signal.throwIfAborted();
+        const settings = vscode.workspace.getConfiguration('forexplore');
+        this.config = structuredClone(run.configuration ?? {
+          compileCommand: settings.inspect<WorkspaceCompileCommand>('backend.compileCommand')?.globalValue
+            ?? run.modules.flatMap(module => module.translation?.compilations ?? [])[0]?.command
+            ?? { executable: process.execPath, args: [path.join(options.context.extensionPath, 'dist/extension/workspace-compile.cjs')], timeoutMs: 120_000 },
+          verification: settings.inspect<NonNullable<typeof this.config>['verification']>('backend.verification')?.globalValue,
+        });
+        run.configuration = structuredClone(this.config);
+        options.selectRoot(this.files.output(run));
+        await options.services.ensureStarted(); signal.throwIfAborted();
+        if (!run.checkpoint) log('旧任务未保存文件断点；已检查写入范围，交付前将重新验收完整项目。');
+        await backend.prepare(run, signal, log, true);
+      },
       finish: () => backend.close(),
       prepare: async (input, signal, log) => {
         if (!vscode.workspace.isTrusted) throw new Error('请先信任工作区。');
@@ -72,7 +89,7 @@ export class ProjectPipelineHost {
         }
         log(verification ? '已绑定宿主配置的固定验收测试；保护文件不进入代码写入范围。' : '将使用模块 Verifier 验证需求行为；未配置额外固定验收命令。');
         return { projectName: `${entry.repository.displayName} / ${project.displayName}`, analysisRevision: entry.index.analysisRevision,
-          analysisHash: entry.index.analysisHash, modules, ...output };
+          analysisHash: entry.index.analysisHash, modules, configuration: structuredClone(this.config), ...output };
       },
       search: (module, input, signal) => backend.search(module, input, signal),
       generate: (module, run, hooks) => backend.generate(module, run, hooks),
@@ -109,6 +126,9 @@ export class ProjectPipelineHost {
     if (!this.knownRuns.has(message.runId)) throw new Error('本窗口不存在该项目运行。');
     if (message.action === 'cancel') { this.pipeline.cancel(message.runId); return; }
     const run = this.pipeline.current?.id === message.runId ? this.pipeline.current! : await this.files.read(message.runId);
+    if (message.action === 'resume' || message.action === 'retry-module') {
+      this.pipeline.resume(run, message.action === 'retry-module' ? message.moduleId : undefined); return;
+    }
     if (message.action === 'read') { this.options.publish({ type: 'PROJECT_PIPELINE_STATE', run }); return; }
     if (message.action === 'open-diff') {
       await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({ content: await this.files.diff(run), language: 'diff' })); return;

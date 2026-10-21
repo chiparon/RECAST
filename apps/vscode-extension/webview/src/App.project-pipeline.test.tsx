@@ -36,6 +36,26 @@ function documentFile(name: string, text: string) {
   return file;
 }
 
+it.each(['interrupted', 'failed', 'cancelled'] as const)('continues a %s task using the original run id and locks duplicate requests', async status => {
+  const { post, sent, button } = await setup();
+  const module: ProjectPipelineRun['modules'][number] = { id: 'domain', name: 'Domain', status: 'failed', dependsOn: [], candidates: [],
+    target: { id: 'domain', name: 'Domain', path: 'Domain.cs', language: 'C#', kind: 'module', signature: '' } };
+  await act(async () => post({ type: 'PROJECT_PIPELINE_STATE', run: { ...run, status, outputRoot: '/managed/output', baselineCommit: 'baseline', modules: [module] } }));
+  await act(async () => button('继续任务').click());
+  expect(sent).toContainEqual({ type: 'PROJECT_PIPELINE_ACTION', action: 'resume', runId: run.id });
+  expect(button('继续任务').disabled).toBe(true);
+  expect(sent.some(message => message.type === 'START_PROJECT_PIPELINE')).toBe(false);
+});
+
+it('retries a failed module with a validated opaque module id', async () => {
+  const { post, sent, button } = await setup();
+  const module: ProjectPipelineRun['modules'][number] = { id: 'domain', name: 'Domain', status: 'failed', dependsOn: [], candidates: [],
+    target: { id: 'domain', name: 'Domain', path: 'Domain.cs', language: 'C#', kind: 'module', signature: '' } };
+  await act(async () => post({ type: 'PROJECT_PIPELINE_STATE', run: { ...run, status: 'failed', outputRoot: '/managed/output', baselineCommit: 'baseline', modules: [module] } }));
+  await act(async () => button('重试此模块').click());
+  expect(sent).toContainEqual({ type: 'PROJECT_PIPELINE_ACTION', action: 'retry-module', runId: run.id, moduleId: 'domain' });
+});
+
 it('keeps the cached repository visible with an explicit read warning and clears the warning after recovery', async () => {
   const { container, post } = await setup();
   const repository: CodeIntelligenceRepositoryPresentation = { repositoryId: 'history', displayName: 'Camel', role: 'history',
@@ -68,8 +88,8 @@ it('keeps history progress visible after settings save and distinguishes indexin
     repository, { ...repository, repositoryId: 'flowable', displayName: 'Flowable', analysisStatus: 'indexing',
       indexing: { stage: 'parse', completed: 15, total: 20, position: 2, count: 7 } },
   ] } }));
-  expect(container.querySelector('.history-import-progress > summary')?.textContent).toContain('Flowable');
-  expect(container.querySelector('.history-import-progress > summary')?.textContent).toContain('15/20');
+  expect(container.querySelector('.history-import-progress .target-import-summary')?.textContent).toContain('Flowable');
+  expect(container.querySelector('.history-import-progress .target-import-message')?.textContent).toContain('15/20');
   await act(async () => status(repository));
   await act(async () => post({ type: 'REPOSITORY_INDEXING_PROGRESS', progress: { repositoryId: 'history', displayName: 'Camel', stage: 'parse', completed: 15, total: 20, position: 1, count: 7 } }));
   expect(container.querySelector('.history-import-progress')?.textContent).toContain('15/20');
@@ -99,7 +119,7 @@ it('shows an empty build boundary as completed without counting it as a modeled 
   expect(progress.textContent).toContain('1/1 个完成');
   expect(progress.textContent).toContain('0 个子项目已建模');
   expect(progress.textContent).toContain('1 个工程无独立文件，无需建模');
-  expect(progress.querySelector('button')).toBeNull();
+  expect([...progress.querySelectorAll('button')].some(button => /重试|开始解析/.test(button.textContent ?? ''))).toBe(false);
   expect(progress.querySelector('.is-spinning')).toBeNull();
 });
 

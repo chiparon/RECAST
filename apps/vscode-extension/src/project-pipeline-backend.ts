@@ -1,4 +1,5 @@
 import { chmod, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -19,7 +20,7 @@ const plannerService = () => require('../../../services/adaptation-service/src/i
   runIntegrationPlanAgent(input: { targetRoot: string; requirement: string; modules: ProjectModule[]; taskIdentity: string;
     model: { apiKey: string; modelConfig: { apiBase: string; model: string } }; signal: AbortSignal }): Promise<{ protocol: GlobalProtocol; warning?: string }>;
 };
-import { mergeGlobalProtocol, persistGlobalProtocol, projectModuleProtocol, recordProtocolChecks } from '../../../services/adaptation-service/src/protocol-sidecar';
+import { loadGlobalProtocol, mergeGlobalProtocol, persistGlobalProtocol, projectModuleProtocol, recordProtocolChecks } from '../../../services/adaptation-service/src/protocol-sidecar';
 import { prepareProjectIntegrationContext } from '../../../services/adaptation-service/src/project-integration-context';
 import type { ImplementationReferenceSelection } from '../../../services/adaptation-service/src/reference-selection-policy';
 import type { CodeIntelligenceHost } from './code-intelligence-host';
@@ -39,6 +40,7 @@ export class ProjectPipelineBackend {
   private protocolPath = '';
   private runtime?: CodexRuntime;
   private readonly verificationRoots = new Map<string, string>();
+  private verificationOutput?: string;
   private readonly history = new Map<string, WorkspaceHistoryView>();
   constructor(private readonly options: {
     codeIntelligence: Pick<CodeIntelligenceHost, 'searchHistoricalImplementations' | 'createHistoryModulesView'>;
@@ -52,12 +54,20 @@ export class ProjectPipelineBackend {
     verify: verifyPipelineModule,
   }) {}
 
-  async prepare(run: ProjectPipelineRun, signal: AbortSignal, log: (message: string) => void): Promise<void> {
+  async prepare(run: ProjectPipelineRun, signal: AbortSignal, log: (message: string) => void, resume = false): Promise<void> {
     await this.close(); signal.throwIfAborted();
+    this.verificationOutput = run.outputRoot;
     this.model = await this.options.model();
     if (!this.model.apiKey.trim()) throw new Error('请先在设置中配置模型 API Key。');
     this.home = await prepareDeepSeekCodexHome({ apiKey: this.model.apiKey, model: this.model.model, baseUrl: this.model.apiBase, explicitHome: this.options.codexHome });
     this.protocolPath = path.join(path.dirname(run.outputRoot!), 'global-protocol.json');
+    if (resume) {
+      const loaded = await loadGlobalProtocol(this.protocolPath, run.id);
+      this.protocol = loaded.protocol;
+      if (loaded.error) log('原任务协议文件不可用，将依据原需求和目标契约继续，并重新执行最终验收。');
+      log('已恢复原任务协议与输出工程；继续使用当前配置的模型。');
+      return;
+    }
     this.protocol = emptyGlobalProtocol();
     const modules: ProjectModule[] = run.modules.map(module => ({ id: module.id, name: module.name, kind: 'feature',
       description: module.target.documentation ?? module.name, sourceFiles: module.target.module!.sourceFiles,
@@ -128,6 +138,7 @@ export class ProjectPipelineBackend {
       scope = selected.length ? await prepareModuleTranslationScope({ ...common, candidates: selected, historyView }) : await prepareDirectModuleTranslationScope(common);
     }
     module.authorizedFiles = scope.profile.writeFiles;
+    await hooks.onCheckpoint?.(); hooks.signal.throwIfAborted();
     this.runtime = this.drivers.runtime({ workspaceRoot: root, compileCommand: this.options.compileCommand(),
       codexHome: this.home!.path, codexModel: this.model!.model, codexCommand: this.options.codexCommand, timeoutMs: 7_200_000, maxVerificationRepairs: 4,
       environment: { ...this.home!.environment, ELECTRON_RUN_AS_NODE: '1' } });
@@ -155,6 +166,7 @@ export class ProjectPipelineBackend {
           module.moduleVerification = await this.drivers.verify({ root: await this.verificationRoot(root, module.id, hooks.signal), module, requirement: run.requirement, model: this.model!, candidates: selected,
             historyView: this.history.get(module.id), protocol, signal: hooks.signal, previous: module.moduleVerification,
             log: message => hooks.onProgress?.('verifying', message) });
+          await this.preserveVerificationEvidence(module.id);
           hooks.onProgress?.('verifying', `${module.name}：${module.moduleVerification.disposition}`);
           const verification = module.moduleVerification.result;
           this.protocol = recordProtocolChecks(this.protocol, verification?.protocolChecks, module.id);
@@ -184,9 +196,23 @@ export class ProjectPipelineBackend {
     for (const module of modules) {
       signal.throwIfAborted(); log(`验证最终项目中的模块：${module.name}`);
       const candidates = module.candidates.filter(candidate => module.selectedCandidateIds?.includes(candidate.id));
+      if (candidates.length && !this.history.has(module.id)) {
+        // History views are temporary. Recreate them from the pinned selection
+        // when a restarted run skips this module's generation stage.
+        try {
+          const history = await this.options.codeIntelligence.createHistoryModulesView({ workspaceRoot: run.outputRoot!, candidates: candidates.map(candidate => {
+            const source = candidate.sourceModule!;
+            return { repositoryId: source.repositoryId, analysisRevision: source.analysisRevision, projectId: source.projectId,
+              moduleId: source.moduleId, name: source.name, language: candidate.language, sourceFiles: source.sourceFiles ?? [candidate.path],
+              preferredFiles: candidate.moduleMatch?.previewFiles, relevanceTerms: [module.name, module.target.signature] };
+          }) });
+          this.history.set(module.id, history);
+        } catch { log(`${module.name} 的固定历史视图不可用，最终验证改用公共需求与目标契约。`); }
+      }
       module.moduleVerification = await this.drivers.verify({ root: await this.verificationRoot(run.outputRoot!, module.id, signal), module, requirement: run.requirement, model: this.model!, candidates,
         historyView: this.history.get(module.id), signal, previous: module.moduleVerification,
         protocol: projectModuleProtocol(this.protocol, { moduleId: module.id, relatedModules: module.dependsOn, ownedFiles: module.target.module?.sourceFiles }), log });
+      await this.preserveVerificationEvidence(module.id);
       module.moduleVerification.sourceHash = sourceHash;
     }
     return modules;
@@ -215,6 +241,7 @@ export class ProjectPipelineBackend {
       this.verificationRoots.set(moduleId, root);
       const excluded = new Set(['.git', '.forexplore', '.forexpore', '.agent-tmp', '.translation-verifier-tests', '.translation-verifier-coverage', 'bin', 'obj', 'target', 'dist', 'coverage']);
       await cp(output, root, { recursive: true, filter: from => { signal.throwIfAborted(); return !path.relative(output, from).split(path.sep).some(part => excluded.has(part)); } });
+      await this.copyVerificationEvidence(this.verificationArchive(moduleId), path.join(root, '.forexplore', 'translation-verifier-evidence'));
     }
     const sources = await prepareProjectIntegrationContext(output);
     for (const file of sources.writeFiles) {
@@ -224,17 +251,30 @@ export class ProjectPipelineBackend {
     return root;
   }
 
+  private verificationArchive(moduleId: string): string {
+    return path.join(this.verificationOutput!, '.forexplore', 'project-pipeline-verifier', createHash('sha256').update(moduleId).digest('hex'));
+  }
+  private async copyVerificationEvidence(from: string, to: string): Promise<void> {
+    try { await readdir(from); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    await mkdir(to, { recursive: true }); await cp(from, to, { recursive: true, errorOnExist: false, force: false });
+  }
+  private async preserveVerificationEvidence(moduleId: string): Promise<void> {
+    const root = this.verificationRoots.get(moduleId);
+    if (root && this.verificationOutput) await this.copyVerificationEvidence(path.join(root, '.forexplore', 'translation-verifier-evidence'), this.verificationArchive(moduleId));
+  }
+
   async close(): Promise<void> {
     const errors: unknown[] = [];
     try { await this.runtime?.shutdown(); } catch (error) { errors.push(error); }
     this.runtime = undefined;
+    for (const moduleId of this.verificationRoots.keys()) try { await this.preserveVerificationEvidence(moduleId); } catch (error) { errors.push(error); }
     const results = await Promise.allSettled([
       ...[...this.history.values()].map(view => removeHistory(view.root)),
       ...[...this.verificationRoots.values()].map(root => rm(root, { recursive: true, force: true })),
       this.home?.cleanup(),
     ]);
     errors.push(...results.filter(result => result.status === 'rejected').map(result => result.reason));
-    this.history.clear(); this.verificationRoots.clear(); this.home = undefined; this.model = undefined;
+    this.history.clear(); this.verificationRoots.clear(); this.verificationOutput = undefined; this.home = undefined; this.model = undefined;
     if (errors.length) throw new Error('部分运行资源未能清理，请检查运行目录权限。');
   }
 }

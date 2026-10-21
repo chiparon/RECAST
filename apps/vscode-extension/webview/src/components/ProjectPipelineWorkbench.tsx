@@ -47,6 +47,12 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
     return () => clearTimeout(timer);
   }, [starting]);
   const action = (action: 'read' | 'cancel' | 'open-output' | 'open-report' | 'export-report') => { if (run) bus.post({ type: 'PROJECT_PIPELINE_ACTION', runId: run.id, action }); };
+  function resume(moduleId?: string) {
+    if (!run || active || importing) return;
+    setStarting(true); setFollowing(true); setDocumentError('');
+    bus.post(moduleId ? { type: 'PROJECT_PIPELINE_ACTION', runId: run.id, action: 'retry-module', moduleId }
+      : { type: 'PROJECT_PIPELINE_ACTION', runId: run.id, action: 'resume' });
+  }
   async function importFile(file?: File) {
     if (!file || active || documentReading.current) return;
     setDocumentError('');
@@ -70,6 +76,9 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
   }
   const completed = run?.status === 'completed';
   const stopped = run && ['failed', 'cancelled', 'interrupted'].includes(run.status);
+  const resumable = stopped && Boolean(run.outputRoot && run.baselineCommit && run.modules.length);
+  const canRetry = (id: string) => resumable && (run?.modules.some(module => module.id === id && ['failed', 'running'].includes(module.status))
+    || run?.validation?.modules?.some(module => module.id === id && module.verification.disposition === 'production-defect'));
   const doneModules = run?.modules.filter(module => module.status === 'completed').length ?? 0;
   const currentModule = run?.modules.find(module => module.id === run.currentModuleId);
   const status = starting ? '正在启动' : !run ? error ? '启动失败' : '等待宿主确认' : run.status === 'completed' ? '执行完成'
@@ -145,7 +154,9 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
         <span>{stageDone(index) ? <Check size={12} /> : index + 1}</span><strong>{label}</strong></li>)}</ol>
       <div className="project-execution-content">
         {stopped ? <section className={`project-attention${run.status === 'failed' ? ' is-error' : ''}`} aria-label="运行中断提示">
-          <strong>{status}</strong><p>{run.error || '本次任务已停止。可以查看日志和报告，或调整需求后重新执行。'}</p>
+          <strong>{status}</strong><p>{run.error || '本次任务已停止。可从断点继续，或查看日志和报告。'}</p>
+          {resumable ? <><p>按原需求继续，保留已完成模块；未完成模块重新执行，最后重新验收整个项目。</p>
+            <button type="button" className="primary-action" disabled={active || importing} onClick={() => resume()}><Play size={14} />继续任务</button></> : null}
           <button type="button" className="secondary-action" onClick={() => setSetupOpen(true)}>调整需求并重新执行<ArrowRight size={14} /></button>
         </section> : null}
         {hasOutput && run ? <section className={`project-pipeline-output${completed ? ' is-complete' : ''}`} aria-label="项目输出与验收报告">
@@ -168,7 +179,9 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
               : <div className="pipeline-log-empty"><Terminal size={22} /><span>{starting ? '正在启动任务，等待进度反馈…' : '尚无工作日志，可刷新运行状态'}</span></div>}
           </div></section>
         {run?.modules.length ? <details className="project-module-results"><summary><span>模块执行明细</span><span>{doneModules} / {run.modules.length} 已完成</span></summary><div className="project-modules-table"><table><thead><tr><th>模块</th><th>状态</th><th>修改文件</th><th>验证</th></tr></thead><tbody>
-          {run.modules.map(module => <tr key={module.id}><td>{module.name}</td><td><span className={`project-module-status is-${module.status}`}>{{ pending: '待执行', running: '执行中', completed: '已完成', failed: '失败' }[module.status]}</span></td><td>{module.changedFiles?.length ?? 0}</td><td>{moduleVerificationLabel(run, module.id)}</td></tr>)}</tbody></table></div></details> : null}
+          {run.modules.map(module => <tr key={module.id}><td>{module.name}</td><td><span className={`project-module-status is-${module.status}`}>{{ pending: '待执行', running: '执行中', completed: '已完成', failed: '失败' }[module.status]}</span>
+            {canRetry(module.id) ? <button type="button" className="text-button" aria-label={`重试模块：${module.name}`} disabled={active || importing} onClick={() => resume(module.id)}>重试此模块</button> : null}
+          </td><td>{module.changedFiles?.length ?? 0}</td><td>{moduleVerificationLabel(run, module.id)}</td></tr>)}</tbody></table></div></details> : null}
       </div>
       {run ? <details className="project-run-id"><summary>运行编号</summary><code>{run.id}</code></details> : null}
     </section> : null}

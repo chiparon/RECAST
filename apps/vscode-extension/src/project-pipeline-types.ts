@@ -1,6 +1,6 @@
 import type { PipelineModuleVerification } from './project-module-verifier';
 import type { ImplementationReferenceSelection } from '../../../services/adaptation-service/src/reference-selection-policy';
-import type { ModuleTarget, SearchCandidate, WorkspaceCompilation, WorkspaceTranslationPlan, WorkspaceTranslationRun } from '@forexplore/contracts';
+import type { ModuleTarget, SearchCandidate, WorkspaceCompilation, WorkspaceCompileCommand, WorkspaceTranslationPlan, WorkspaceTranslationRun } from '@forexplore/contracts';
 
 export type ProjectPipelineStage = 'modeling' | 'retrieving' | 'analyzing' | 'generating' | 'verifying' | 'publishing' | 'complete';
 export interface ProjectPipelineModule {
@@ -19,6 +19,13 @@ export interface ProjectPipelineModule {
   plan?: WorkspaceTranslationPlan;
   translation?: Pick<WorkspaceTranslationRun, 'id' | 'status' | 'compilations' | 'verification' | 'acceptance' | 'modelTurns' | 'error' | 'events' | 'evidenceQueries' | 'agent' | 'verificationRepairs'>;
   changedFiles?: string[];
+  repairDiagnostics?: string;
+  attemptHistory?: Array<Pick<ProjectPipelineModule, 'plan' | 'translation' | 'moduleVerification' | 'changedFiles'> & { at: string; status: ProjectPipelineModule['status'] }>;
+}
+export interface ProjectPipelineCheckpoint {
+  sourceHash: string;
+  files: Record<string, string>;
+  activeModuleId?: string;
 }
 export interface ProjectPipelineValidation {
   compilation: WorkspaceCompilation; verification?: WorkspaceCompilation; protectedFilesUnchanged: boolean; sourceHash: string; coverage: null;
@@ -32,6 +39,10 @@ export interface ProjectPipelineRun {
   analysisHash?: string;
   projectName: string;
   requirement: string;
+  topK?: number;
+  resumeCount?: number;
+  checkpoint?: ProjectPipelineCheckpoint;
+  configuration?: { compileCommand: WorkspaceCompileCommand; verification?: { command: WorkspaceCompileCommand; protectedFiles: string[] } };
   stage: ProjectPipelineStage;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   createdAt: string;

@@ -1,4 +1,5 @@
 import { validateModelKey } from '../model-credential';
+import { isTargetImportTask, type TargetImportTask } from '../target-import-task-types';
 import type { ProjectPipelineRun, ProjectPipelineStart } from '../project-pipeline-types';
 import { parseLlmSettings, type LlmSettings } from '@forexplore/contracts';
 import type {
@@ -51,6 +52,8 @@ export type TargetWorkspaceOutcome = 'cancelled' | 'added' | 'completed' | 'fail
 
 /** Messages the extension host posts into the Webview. */
 export type HostToWebviewMessage =
+  | { type: 'TARGET_IMPORT_TASKS'; tasks: TargetImportTask[] }
+  | { type: 'HISTORY_IMPORT_TASKS'; tasks: TargetImportTask[] }
   | { type: 'PROJECT_PIPELINE_STATE'; run: ProjectPipelineRun }
   | { type: 'REQUEST_SETTINGS_SAVE' }
   | { type: 'REFERENCE_FOLDERS_SELECTED'; requestId: string; paths: string[]; error?: string }
@@ -81,8 +84,10 @@ export type HostToWebviewMessage =
  * candidate objects, validation evidence, or patches to be written.
  */
 export type WebviewToHostMessage =
+  | { type: 'TARGET_IMPORT_ACTION'; taskId: string; action: 'cancel' | 'retry' }
   | { type: 'START_PROJECT_PIPELINE'; input: ProjectPipelineStart }
-  | { type: 'PROJECT_PIPELINE_ACTION'; runId: string; action: 'read' | 'cancel' | 'open-output' | 'open-report' | 'export-report' | 'open-diff' }
+  | { type: 'PROJECT_PIPELINE_ACTION'; runId: string; action: 'read' | 'cancel' | 'resume' | 'open-output' | 'open-report' | 'export-report' | 'open-diff' }
+  | { type: 'PROJECT_PIPELINE_ACTION'; runId: string; action: 'retry-module'; moduleId: string }
   | { type: 'SETTINGS_VISIBILITY_CHANGED'; open: boolean }
   | { type: 'BROWSE_REFERENCE_FOLDERS'; requestId: string }
   | { type: 'CONFIGURE_MODEL_KEY' }
@@ -117,6 +122,8 @@ export type WebviewToHostMessage =
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
+  'TARGET_IMPORT_TASKS',
+  'HISTORY_IMPORT_TASKS',
   'PROJECT_PIPELINE_STATE',
   'REQUEST_SETTINGS_SAVE',
   'REFERENCE_FOLDERS_SELECTED',
@@ -182,6 +189,9 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as Record<string, unknown>;
   switch (message.type) {
+    case 'TARGET_IMPORT_ACTION':
+      return hasOnlyKeys(message, ['type', 'taskId', 'action']) && typeof message.taskId === 'string'
+        && /^[a-f0-9-]{36}$/.test(message.taskId) && ['cancel', 'retry'].includes(String(message.action));
     case 'START_PROJECT_PIPELINE': {
       if (!hasOnlyKeys(message, ['type', 'input']) || !message.input || typeof message.input !== 'object') return false;
       const input = message.input as Record<string, unknown>;
@@ -191,7 +201,8 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
     }
     case 'PROJECT_PIPELINE_ACTION': {
       if (typeof message.runId !== 'string' || !/^[a-f0-9-]{36}$/.test(message.runId)) return false;
-      return hasOnlyKeys(message, ['type', 'runId', 'action']) && ['read', 'cancel', 'open-output', 'open-report', 'export-report', 'open-diff'].includes(String(message.action));
+      if (message.action === 'retry-module') return hasOnlyKeys(message, ['type', 'runId', 'action', 'moduleId']) && isOpaqueIdentifier(message.moduleId);
+      return hasOnlyKeys(message, ['type', 'runId', 'action']) && ['read', 'cancel', 'resume', 'open-output', 'open-report', 'export-report', 'open-diff'].includes(String(message.action));
     }
     case 'SETTINGS_VISIBILITY_CHANGED':
       return hasOnlyKeys(message, ['type', 'open']) && typeof message.open === 'boolean';
@@ -348,6 +359,10 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as { type?: unknown; phase?: unknown; outcome?: unknown; mode?: unknown; message?: unknown };
   if (typeof message.type !== 'string' || !hostMessageTypes.has(message.type)) return false;
+  if (message.type === 'TARGET_IMPORT_TASKS' || message.type === 'HISTORY_IMPORT_TASKS') {
+    const tasks = (value as { tasks?: unknown }).tasks;
+    return Array.isArray(tasks) && tasks.length <= 30 && tasks.every(isTargetImportTask);
+  }
   if (message.type === 'MODULE_TRANSLATION_READY') {
     const ready = value as Record<string, unknown>;
     return isCorrelationIdentifier(ready.targetId) && isCorrelationIdentifier(ready.candidateId) &&

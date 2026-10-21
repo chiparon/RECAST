@@ -57,6 +57,7 @@ interface ModuleWorkspaceProps {
   settingsOpen: boolean;
   children: React.ReactNode;
   afterUnderstanding?: React.ReactNode;
+  taskPanel?: React.ReactNode;
 }
 
 export function ModuleWorkspace({
@@ -68,6 +69,7 @@ export function ModuleWorkspace({
   onRefreshRepository,
   onAddTarget,
   targetAdd,
+  taskPanel,
   onRetry,
   onLoadChildren,
   explorer,
@@ -287,6 +289,7 @@ export function ModuleWorkspace({
       </aside>
 
       <section className="module-main">
+        {taskPanel}
         <div className="module-main-scroll">
           {!settingsOpen && !primaryContent && noTarget ? <section className="target-empty-state" aria-label="选择目标工程">
             {addPending || indexingTarget

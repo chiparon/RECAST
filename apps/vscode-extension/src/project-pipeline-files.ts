@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import type { ProjectPipelineRun } from './project-pipeline-types';
+import type { ProjectPipelineCheckpoint, ProjectPipelineRun } from './project-pipeline-types';
 import { projectPipelineMarkdown } from './project-pipeline';
 import { isNewProjectIntegrationSource } from '../../../services/adaptation-service/src/project-integration-context';
 
@@ -52,15 +52,48 @@ export class ProjectPipelineFiles {
     return git(root, ['-c', 'user.name=RECAST', '-c', 'user.email=recast@localhost', '-c', 'core.hooksPath=', 'commit', '--no-gpg-sign', ...(empty ? ['--allow-empty'] : []), '-m', message]);
   }
   async sourceHash(run: ProjectPipelineRun): Promise<string> {
+    return (await this.checkpoint(run)).sourceHash;
+  }
+  async checkpoint(run: ProjectPipelineRun): Promise<ProjectPipelineCheckpoint> {
     const root = this.output(run), hash = createHash('sha256');
+    const files: Record<string, string> = {};
     const tracked = (await git(root, ['ls-files', '-z'])).split('\0').filter(Boolean);
     const untracked = (await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
     for (const file of [...new Set([...tracked, ...untracked])].sort()) {
       const absolute = path.join(root, file); const info = await lstat(absolute);
       if (!info.isFile() || info.isSymbolicLink()) throw new Error(`输出项目存在非普通文件：${file}`);
-      hash.update(JSON.stringify([file, createHash('sha256').update(await readFile(absolute)).digest('hex')]));
+      files[file] = createHash('sha256').update(await readFile(absolute)).digest('hex');
+      hash.update(JSON.stringify([file, files[file]]));
     }
-    return hash.digest('hex');
+    const activeModuleId = run.status === 'running' && run.modules.find(module => module.id === run.currentModuleId)?.status === 'running' ? run.currentModuleId : undefined;
+    return { sourceHash: hash.digest('hex'), files, ...(activeModuleId ? { activeModuleId } : {}) };
+  }
+  async assertResumable(run: ProjectPipelineRun): Promise<void> {
+    const root = this.output(run);
+    if (path.relative(await realpath(root), path.resolve(root)) !== '') throw new Error('输出项目路径已改变，无法继续原任务。');
+    if (!run.baselineCommit || (await git(root, ['rev-parse', `${run.baselineCommit}^{commit}`])).trim() !== run.baselineCommit) throw new Error('原任务的骨架基线不存在，无法继续。');
+    if (!run.checkpoint) { await this.assertWriteScope(run); return; } // Older runs still require fresh final validation.
+    const current = await this.checkpoint(run);
+    // A process crash may happen after a permitted production write and before
+    // its completion record. Only that in-flight module may explain new bytes.
+    // Keep this authorization after a failed recovery preflight (e.g. missing
+    // credentials); that failure must not destroy a legitimate crash checkpoint.
+    const interrupted = ['interrupted', 'failed', 'cancelled'].includes(run.status) && run.checkpoint.activeModuleId
+      ? run.modules.find(module => module.id === run.checkpoint!.activeModuleId) : undefined;
+    if (interrupted?.taskKind === 'project-integration') {
+      // Integration can add bounded production sources. The process can die
+      // between applying a new file and publishing its progress notification.
+      const existing = run.modules.flatMap(module => module.authorizedFiles ?? module.target.module?.sourceFiles ?? []);
+      const added = Object.keys(current.files).filter(file => !Object.hasOwn(run.checkpoint!.files, file) && isNewProjectIntegrationSource(file, existing));
+      interrupted.authorizedFiles = [...new Set([...(interrupted.authorizedFiles ?? interrupted.target.module?.sourceFiles ?? []), ...added])];
+      interrupted.changedFiles = [...new Set([...(interrupted.changedFiles ?? []), ...added])];
+    }
+    await this.assertWriteScope(run);
+    if (current.sourceHash === run.checkpoint.sourceHash) return;
+    const permitted = new Set(interrupted?.authorizedFiles ?? []);
+    const paths = new Set([...Object.keys(run.checkpoint.files), ...Object.keys(current.files)]);
+    const unexpected = [...paths].filter(file => current.files[file] !== run.checkpoint!.files[file] && !permitted.has(file));
+    if (!interrupted || unexpected.length) throw new Error(`输出工程在断点后发生了未记录的修改，无法直接继续：${unexpected.slice(0, 8).join('、') || '快照不一致'}`);
   }
   async assertWriteScope(run: ProjectPipelineRun): Promise<void> {
     const root = this.output(run), allowed = new Set(run.modules.flatMap(module => module.authorizedFiles ?? module.target.module?.sourceFiles ?? []));
@@ -89,7 +122,7 @@ export class ProjectPipelineFiles {
   async diff(run: ProjectPipelineRun): Promise<string> { return git(this.output(run), ['diff', run.baselineCommit!, '--']); }
   output(run: ProjectPipelineRun): string {
     const expected = path.join(this.directory(run.id), 'project');
-    if (run.outputRoot !== expected) throw new Error('输出项目不是当前运行的受管副本。');
+    if (!run.outputRoot || !path.isAbsolute(run.outputRoot) || path.relative(expected, run.outputRoot) !== '') throw new Error('输出项目不是当前运行的受管副本。');
     return expected;
   }
   async save(run: ProjectPipelineRun): Promise<void> {
@@ -105,7 +138,7 @@ export class ProjectPipelineFiles {
     if (value.outputRoot) this.output(value);
     if (value.status === 'running') {
       value.status = 'interrupted';
-      value.error = '扩展宿主已重启，本次执行已中断；保留输出和报告，请重新开始以重新验证。';
+      value.error = '扩展宿主已重启，本次执行已中断；可继续任务，从未完成模块重试并重新验收。';
       value.reportAvailable = true;
       await this.save(value);
     }

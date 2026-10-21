@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { emptyGlobalProtocol, type SearchCandidate, type WorkspaceTranslationRun } from '@forexplore/contracts';
+import { emptyGlobalProtocol, type SearchCandidate, type WorkspaceHistoryView, type WorkspaceTranslationRun } from '@forexplore/contracts';
 import { ProjectPipelineBackend, type CodexRuntime } from './project-pipeline-backend';
 import type { ProjectPipelineModule, ProjectPipelineRun } from './project-pipeline-types';
 import type { PipelineModuleVerification } from './project-module-verifier';
@@ -39,13 +39,13 @@ async function fixture({ isolatedHome = false } = {}) {
   };
   const drivers = { runtime: vi.fn((_options: { codexHome: string; environment: NodeJS.ProcessEnv }) => runtime), plan: vi.fn(async (_input: unknown) => ({ protocol: emptyGlobalProtocol() })), verify: vi.fn(async (_input: Parameters<typeof import('./project-module-verifier').verifyPipelineModule>[0]) => verified()) };
   const search = vi.fn(async (_request, _signal, _reranker) => [] as SearchCandidate[]);
-  const history = vi.fn(async () => { throw new Error('unexpected history'); });
+  const history = vi.fn(async (_input: unknown): Promise<WorkspaceHistoryView> => { throw new Error('unexpected history'); });
   const backend = new ProjectPipelineBackend({ codeIntelligence: { searchHistoricalImplementations: search, createHistoryModulesView: history },
     endpoint: () => 'http://localhost:8788', ensureStarted: async () => {}, model: async () => ({ apiKey: 'test-key', model: 'enterprise-model', apiBase: 'https://example.test/v1' }),
     compileCommand: () => ({ executable: process.execPath, args: ['--check'] }), protectedFiles: () => [], ...(isolatedHome ? {} : { codexHome: root }),
   }, drivers);
   const controller = new AbortController(), hooks = { signal: controller.signal, onPlan: vi.fn(async () => undefined), onRun: vi.fn(), onProgress: vi.fn() };
-  return { root, run, module, runtime, drivers, search, backend, controller, hooks };
+  return { root, run, module, runtime, drivers, search, history, backend, controller, hooks };
 }
 
 it('forwards the IDE model credential to Codex without persisting it in the generated configuration', async () => {
@@ -111,6 +111,65 @@ it('keeps request-scoped automatic multi-reference selections and refuses a sile
   expect(f.module.referenceSelection?.selected).toHaveLength(2);
   f.search.mockResolvedValueOnce(candidates);
   await expect(f.backend.search(f.module, input, f.controller.signal)).rejects.toThrow('自动参考选择');
+});
+
+it('restores protocol metadata without rerunning the Integration Plan agent and persists scope before starting Codex', async () => {
+  const f = await fixture();
+  await writeFile(path.join(f.root, 'global-protocol.json'), JSON.stringify({ ...emptyGlobalProtocol(), invariants: [
+    { id: 'existing-rule', rule: 'value must be 42', source: 'requirement', status: 'fixed', scope: ['main'] },
+  ] }));
+  try {
+    await f.backend.prepare(f.run, f.controller.signal, () => {}, true);
+    expect(f.drivers.plan).not.toHaveBeenCalled();
+    let scopeRecorded = false;
+    const start = f.runtime.start;
+    f.runtime.start = request => { expect(scopeRecorded).toBe(true); return start(request); };
+    await f.backend.generate(f.module, f.run, { ...f.hooks, onCheckpoint: async () => {
+      expect(f.module.authorizedFiles).toEqual(['src/Main.java']); scopeRecorded = true;
+    } });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ moduleProtocol: expect.objectContaining({ invariants: [expect.objectContaining({ rule: 'value must be 42' })] }) }));
+  } finally { await f.backend.close(); }
+});
+
+it('rebuilds a completed module history view at its pinned revision when final verification resumes after restart', async () => {
+  const f = await fixture();
+  const historyRoot = path.join(f.root, 'restored-history'); await mkdir(historyRoot);
+  const view: WorkspaceHistoryView = { root: historyRoot, files: ['Legacy.java'], repositoryId: 'history', analysisRevision: 'pinned-r1', projectId: 'legacy', moduleId: 'legacy', manifestHash: 'hash' };
+  f.history.mockResolvedValue(view);
+  f.module.status = 'completed'; f.module.selectedCandidateIds = ['candidate'];
+  f.module.candidates = [{ id: 'candidate', language: 'Java', path: 'Legacy.java', sourceModule: {
+    repositoryId: view.repositoryId, analysisRevision: view.analysisRevision, projectId: view.projectId, moduleId: view.moduleId, name: 'Legacy', sourceFiles: view.files,
+  } }] as SearchCandidate[];
+  try {
+    await f.backend.prepare(f.run, f.controller.signal, () => {}, true);
+    await f.backend.verifyFinal(f.run, 'final-hash', f.controller.signal, () => {});
+    expect(f.runtime.start).not.toHaveBeenCalled();
+    expect(f.history).toHaveBeenCalledWith(expect.objectContaining({ candidates: [expect.objectContaining({ analysisRevision: 'pinned-r1', moduleId: 'legacy' })] }));
+    expect(f.drivers.verify).toHaveBeenCalledWith(expect.objectContaining({ historyView: view }));
+  } finally { await f.backend.close(); }
+});
+
+it('retains immutable failing-test artifacts across cleanup and restores them into a new verifier clone', async () => {
+  const f = await fixture(); let oldRoot = '';
+  f.drivers.verify.mockImplementationOnce(async input => {
+    oldRoot = input.root;
+    const evidence = path.join(input.root, '.forexplore', 'translation-verifier-evidence');
+    await mkdir(evidence, { recursive: true }); await writeFile(path.join(evidence, 'original.txt'), 'immutable original assertion');
+    return verified();
+  });
+  try {
+    await f.backend.prepare(f.run, f.controller.signal, () => {});
+    await f.backend.generate(f.module, f.run, f.hooks);
+    await f.backend.close();
+    await expect(readFile(path.join(oldRoot, '.forexplore/translation-verifier-evidence/original.txt'))).rejects.toThrow();
+    await f.backend.prepare(f.run, f.controller.signal, () => {}, true);
+    f.drivers.verify.mockImplementationOnce(async input => {
+      expect(input.root).not.toBe(oldRoot);
+      expect(await readFile(path.join(input.root, '.forexplore/translation-verifier-evidence/original.txt'), 'utf8')).toBe('immutable original assertion');
+      return verified();
+    });
+    await f.backend.verifyFinal(f.run, 'new-source-hash', f.controller.signal, () => {});
+  } finally { await f.backend.close(); }
 });
 
 it('does not send environment failures to the Translator and propagates cancellation through the verifier', async () => {

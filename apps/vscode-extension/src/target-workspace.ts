@@ -13,6 +13,7 @@ export type TargetWorkspaceProgressPhase = Extract<TargetWorkspacePhase, 'resolv
 export interface TargetWorkspaceProgress {
   phase: TargetWorkspaceProgressPhase;
   message: string;
+  directory?: string;
 }
 
 /**
@@ -31,6 +32,8 @@ export type TargetWorkspaceAddResult =
 export interface PendingTargetImport {
   requestedAt: string;
   mode: TargetWorkspaceAddMode;
+  taskId?: string;
+  taskJournalKey?: string;
 }
 
 // sessionId survives an extension-host restart and is distinct for each window.
@@ -55,7 +58,10 @@ export function readPendingTargetImport(
   if (!['browse', 'input', 'workspace'].includes(record.mode)) return undefined;
   const requestedAt = Date.parse(record.requestedAt);
   if (!Number.isFinite(requestedAt) || requestedAt > now || now - requestedAt > maxAgeMs) return undefined;
-  return { requestedAt: record.requestedAt, mode: record.mode as TargetWorkspaceAddMode };
+  return { requestedAt: record.requestedAt, mode: record.mode as TargetWorkspaceAddMode,
+    ...(typeof record.taskId === 'string' && /^[a-f0-9-]{36}$/.test(record.taskId) ? { taskId: record.taskId } : {}),
+    ...(typeof record.taskJournalKey === 'string' && /^forexplore\.targetImportTasks\.[a-f0-9]{64}$/.test(record.taskJournalKey)
+      ? { taskJournalKey: record.taskJournalKey } : {}) };
 }
 
 /**
@@ -192,7 +198,7 @@ function attachWorkspaceFolder(directory: string, signal?: AbortSignal): Promise
 
 export async function addTargetWorkspace(
   mode: TargetWorkspaceAddMode,
-  options: { signal?: AbortSignal; onProgress?(progress: TargetWorkspaceProgress): void } = {},
+  options: { signal?: AbortSignal; onProgress?(progress: TargetWorkspaceProgress): void | Promise<void> } = {},
 ): Promise<TargetWorkspaceAddResult> {
   options.signal?.throwIfAborted();
   let picked: string | undefined;
@@ -223,7 +229,7 @@ export async function addTargetWorkspace(
   if (picked === undefined) return { status: 'cancelled' };
   const directory = normaliseConfiguredPath(picked);
   if (directory === undefined || !path.isAbsolute(directory)) throw new Error('请输入目标工程的绝对目录路径。');
-  options.onProgress?.({ phase: 'resolving', message: '正在校验目标目录…' });
+  await options.onProgress?.({ phase: 'resolving', message: '正在校验目标目录…', directory });
   let resolved: string;
   try {
     resolved = await realpath(directory);
@@ -256,7 +262,7 @@ export async function addTargetWorkspace(
       return { status: 'remembered', directory: resolved };
     }
   }
-  options.onProgress?.({ phase: 'attaching', message: '正在将目标目录加入工作区…' });
+  await options.onProgress?.({ phase: 'attaching', message: '正在将目标目录加入工作区…', directory: resolved });
   // Selecting the first folder can restart the extension host. Persist the
   // explicit choice before asking VS Code to change the workspace.
   await remember();

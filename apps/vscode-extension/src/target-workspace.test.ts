@@ -54,6 +54,20 @@ it('adds the directory selected in the native picker', async () => {
     .toBeLessThan(api.updateWorkspaceFolders.mock.invocationCallOrder[0]!);
 });
 
+it('waits for durable task feedback before a workspace mutation can restart the host', async () => {
+  api.showOpenDialog.mockResolvedValue([{ fsPath: root }]);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const onProgress = vi.fn(async (update: { phase: string; directory?: string }) => {
+    if (update.phase === 'attaching') { expect(update.directory).toBe(root); await gate; }
+  });
+  const importing = addTargetWorkspace('browse', { onProgress });
+  await vi.waitFor(() => expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'attaching' })));
+  expect(api.updateWorkspaceFolders).not.toHaveBeenCalled();
+  release();
+  expect((await importing).status).toBe('attached');
+});
+
 it('updates an empty workspace override so a remembered target is actually selected for indexing', async () => {
   const unrelated = path.join(root, 'other-project');
   api.selectedPaths = [unrelated];
@@ -200,7 +214,7 @@ it('reports a cancelled picker as an outcome instead of a silent no-op', async (
 it('reports the phases a slow selection passes through', async () => {
   const phases: string[] = [];
   api.showOpenDialog.mockResolvedValue([{ fsPath: root }]);
-  await addTargetWorkspace('browse', { onProgress: (update) => phases.push(update.phase) });
+  await addTargetWorkspace('browse', { onProgress: (update) => { phases.push(update.phase); } });
   expect(phases).toEqual(['resolving', 'attaching']);
 });
 
