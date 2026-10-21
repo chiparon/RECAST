@@ -1,11 +1,11 @@
 namespace AssetUpgradeGateway.Application;
 
 using System.Collections.Concurrent;
-using System.Globalization;
 using AssetUpgradeGateway;
 using AssetUpgradeGateway.Domain;
 using AssetUpgradeGateway.Policies;
 using AssetUpgradeGateway.Ports;
+using AssetUpgradeGateway.Telemetry;
 
 public sealed record AssetSubmissionCommand(string TenantId, string ActorId, AssetDescriptor Descriptor, AttachmentInput? Attachment, string EventType, string CorrelationId);
 public sealed record AssetSubmissionResult(bool Accepted, DeliveryResult Delivery, AttachmentState? AttachmentState, IReadOnlyList<ValidationIssue> Issues);
@@ -17,88 +17,115 @@ public sealed class AssetLifecycleCoordinator
     private readonly IAssetRepository assets;
     private readonly IAuditSink audit;
     private readonly IClock clock;
+    private readonly TraceFactory? traces;
 
-    public AssetLifecycleCoordinator(AttachmentIntakeService attachments, WorkflowDeliveryCoordinator workflow, IAssetRepository assets, IAuditSink audit, IClock? clock = null)
+    public AssetLifecycleCoordinator(AttachmentIntakeService attachments, WorkflowDeliveryCoordinator workflow, IAssetRepository assets, IAuditSink audit, IClock? clock = null, TraceFactory? traces = null)
     {
-        this.attachments = attachments; this.workflow = workflow; this.assets = assets; this.audit = audit; this.clock = clock ?? new Adapters.SystemClock();
+        this.attachments = attachments; this.workflow = workflow; this.assets = assets; this.audit = audit; this.clock = clock ?? new Adapters.SystemClock(); this.traces = traces;
     }
 
     public async Task<AssetSubmissionResult> SubmitAsync(AssetSubmissionCommand command, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(command);
-        cancellationToken.ThrowIfCancellationRequested();
+        var now = clock.UtcNow;
+        using var scope = traces?.Start(command.CorrelationId, "asset.submit", command.TenantId, command.ActorId);
+        var correlation = new CorrelationContext(command.TenantId, command.ActorId, command.CorrelationId);
 
-        var descriptor = command.Descriptor is null
-            ? throw new ArgumentException("Asset descriptor is required.", nameof(command))
-            : command.Descriptor with
-            {
-                AssetId = (command.Descriptor.AssetId ?? string.Empty).Trim(),
-                TenantId = (command.Descriptor.TenantId ?? string.Empty).Trim(),
-                ExternalKey = (command.Descriptor.ExternalKey ?? string.Empty).Trim(),
-            };
-        var factory = new AssetEventFactory(clock);
-        var attachment = command.Attachment is null ? null : new RequestNormalizer().Normalize(command.Attachment);
-
-        AttachmentIntakeResult? intake = null;
-        if (attachment is not null)
+        if (command.Descriptor is null)
         {
-            intake = await attachments
-                .IntakeAsync(new AttachmentIntakeCommand(command.TenantId, command.ActorId, attachment, command.CorrelationId), cancellationToken)
-                .ConfigureAwait(false);
+            var missing = new ValidationIssue("asset.descriptor.required", "An asset descriptor is required.", ValidationSeverity.Error);
+            scope?.AddTag("state", DeliveryStatus.Rejected.ToString());
+            return new AssetSubmissionResult(false, new DeliveryResult(false, DeliveryStatus.Rejected, missing.Message), null, new[] { missing });
+        }
 
-            if (!intake.Accepted)
+        if (!string.Equals(command.Descriptor.TenantId, command.TenantId, StringComparison.Ordinal))
+        {
+            var mismatch = new ValidationIssue(
+                "asset.tenant.mismatch",
+                $"Asset '{command.Descriptor.AssetId}' belongs to tenant '{command.Descriptor.TenantId}' and not to '{command.TenantId}'.",
+                ValidationSeverity.Error);
+            audit.Record(new AuditRecord(command.TenantId, command.Descriptor.AssetId, "asset.submit", "Rejected", now));
+            scope?.AddTag("state", DeliveryStatus.Rejected.ToString());
+            return new AssetSubmissionResult(false, new DeliveryResult(false, DeliveryStatus.Rejected, mismatch.Message), null, new[] { mismatch });
+        }
+
+        AttachmentState? attachmentState = null;
+        if (command.Attachment is not null)
+        {
+            var intakeCorrelation = correlation.Child("attachment.intake").CorrelationId;
+            var intake = await attachments.IntakeAsync(
+                new AttachmentIntakeCommand(command.TenantId, command.ActorId, command.Attachment, intakeCorrelation),
+                cancellationToken).ConfigureAwait(false);
+
+            attachmentState = intake.State;
+            scope?.AddTag("attachmentState", intake.State.ToString());
+            if (!intake.Accepted || intake.State != AttachmentState.Scanned)
             {
-                var rejected = new DeliveryResult(false, DeliveryStatus.Quarantined, intake.Issues.FirstOrDefault()?.Message);
-                return new AssetSubmissionResult(false, rejected, intake.State, intake.Issues);
+                audit.Record(new AuditRecord(command.TenantId, command.Descriptor.AssetId, "asset.submit", intake.State.ToString(), clock.UtcNow));
+                scope?.AddTag("state", intake.State.ToString());
+                return new AssetSubmissionResult(
+                    false,
+                    new DeliveryResult(false, DeliveryStatus.Quarantined, "The attachment is not clean; delivery is refused."),
+                    intake.State,
+                    intake.Issues);
             }
         }
 
-        var assetEvent = factory.Create(descriptor, command.EventType, attachment?.AttachmentId);
-        var envelopeEvent = factory.Envelop(assetEvent, command.CorrelationId, command.ActorId).Event;
-        var delivery = await workflow
-            .DeliverAsync(new WorkflowDeliveryCommand(command.TenantId, command.ActorId, envelopeEvent, command.CorrelationId), cancellationToken)
-            .ConfigureAwait(false);
+        var factory = new AssetEventFactory(clock);
+        var assetEvent = factory.Create(command.Descriptor, command.EventType, command.Attachment?.AttachmentId);
 
-        if (!delivery.Accepted)
+        var aggregate = await assets.FindAsync(command.TenantId, command.Descriptor.AssetId, cancellationToken).ConfigureAwait(false)
+            ?? new AssetAggregate(command.Descriptor);
+
+        if (command.Attachment is not null && attachmentState == AttachmentState.Scanned)
         {
-            var rejected = new DeliveryResult(false, delivery.Status, delivery.Issues.FirstOrDefault()?.Message);
-            return new AssetSubmissionResult(false, rejected, null, delivery.Issues);
+            aggregate.AddAttachment(ToMetadata(command.Attachment, now));
         }
 
-        var aggregate = await assets.FindAsync(command.TenantId, descriptor.AssetId, cancellationToken).ConfigureAwait(false)
-            ?? new AssetAggregate(descriptor);
-
-        if (attachment is not null && intake is not null)
-        {
-            var now = clock.UtcNow;
-            var metadata = new AttachmentMetadata(
-                attachment.AttachmentId,
-                attachment.TenantId,
-                attachment.FileName,
-                attachment.DeclaredContentType,
-                attachment.Content.Length,
-                intake.Fingerprint,
-                AttachmentInspectionState.Clean,
-                now,
-                now,
-                null);
-            aggregate.AddAttachment(metadata);
-        }
-
-        aggregate.RecordEvent(assetEvent.WithState(delivery.State));
-        aggregate.RenameExternalKey(descriptor.ExternalKey);
+        aggregate.RecordEvent(assetEvent);
         await assets.SaveAsync(aggregate, cancellationToken).ConfigureAwait(false);
-        audit.Record(new AuditRecord(command.TenantId, descriptor.AssetId, "asset.submit", delivery.State.ToString().ToLowerInvariant(), clock.UtcNow));
 
-        return new AssetSubmissionResult(true, new DeliveryResult(true, delivery.Status), attachment is null ? null : AttachmentState.Scanned, Array.Empty<ValidationIssue>());
+        var deliveryCorrelation = correlation.Child("workflow.delivery").CorrelationId;
+        var delivery = await workflow.DeliverAsync(
+            new WorkflowDeliveryCommand(command.TenantId, command.ActorId, assetEvent, deliveryCorrelation),
+            cancellationToken).ConfigureAwait(false);
+
+        if (delivery.Status != DeliveryStatus.Duplicate)
+        {
+            // A duplicate replay must not clobber the state already recorded by the
+            // successful delivery.
+            aggregate.RecordEvent(assetEvent.WithState(delivery.State));
+            await assets.SaveAsync(aggregate, cancellationToken).ConfigureAwait(false);
+        }
+
+        audit.Record(new AuditRecord(command.TenantId, assetEvent.EventId, "asset.submit", delivery.State.ToString(), clock.UtcNow));
+
+        var deliveryResult = new DeliveryResult(
+            delivery.Accepted,
+            delivery.Status,
+            delivery.Issues.Count > 0 ? delivery.Issues[0].Message : null);
+
+        scope?.AddTag("deliveryStatus", delivery.Status.ToString());
+        scope?.AddTag("state", delivery.State.ToString());
+        return new AssetSubmissionResult(delivery.Accepted, deliveryResult, attachmentState, delivery.Issues);
     }
+
+    private static AttachmentMetadata ToMetadata(AttachmentInput attachment, DateTimeOffset now)
+        => new(
+            attachment.AttachmentId,
+            attachment.TenantId,
+            attachment.FileName,
+            attachment.DeclaredContentType,
+            attachment.Content.Length,
+            null,
+            AttachmentInspectionState.Clean,
+            now,
+            now,
+            null);
 }
 
 public sealed class AssetSearchService
 {
-    private const int DefaultPageSize = 50;
-    private const int MaximumPageSize = 200;
-
     private readonly IAssetRepository assets;
     private readonly ITenantAuthorizer authorizer;
     public AssetSearchService(IAssetRepository assets, ITenantAuthorizer authorizer) { this.assets = assets; this.authorizer = authorizer; }
@@ -110,23 +137,19 @@ public sealed class AssetSearchService
             return AssetPage<AssetAggregate>.Empty;
         }
 
-        var size = pageSize <= 0 ? DefaultPageSize : Math.Min(pageSize, MaximumPageSize);
-        return await assets.SearchAsync(tenantId, token, size, cancellationToken).ConfigureAwait(false);
+        return await assets.SearchAsync(tenantId, token, pageSize, cancellationToken).ConfigureAwait(false);
     }
 }
 
 public sealed class InMemoryAssetRepository : IAssetRepository
 {
-    private const int DefaultPageSize = 50;
-    private const int MaximumPageSize = 200;
-
     private readonly ConcurrentDictionary<string, AssetAggregate> values = new(StringComparer.Ordinal);
 
     public Task<AssetAggregate?> FindAsync(string tenantId, string assetId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         values.TryGetValue(Key(tenantId, assetId), out var asset);
-        return Task.FromResult<AssetAggregate?>(asset);
+        return Task.FromResult(asset);
     }
 
     public Task SaveAsync(AssetAggregate asset, CancellationToken cancellationToken)
@@ -140,33 +163,28 @@ public sealed class InMemoryAssetRepository : IAssetRepository
     public Task<AssetPage<AssetAggregate>> SearchAsync(string tenantId, string? continuationToken, int pageSize, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var all = values.Values
+
+        var scoped = values.Values
             .Where(asset => string.Equals(asset.Descriptor.TenantId, tenantId, StringComparison.Ordinal))
             .OrderBy(asset => asset.Descriptor.AssetId, StringComparer.Ordinal)
-            .ToList();
+            .ToArray();
 
         var start = 0;
-        if (!string.IsNullOrEmpty(continuationToken)
-            && int.TryParse(continuationToken, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
-            && parsed > 0)
+        if (!string.IsNullOrEmpty(continuationToken) && int.TryParse(continuationToken, out var parsed) && parsed > 0)
         {
             start = parsed;
         }
 
-        var size = pageSize <= 0 ? DefaultPageSize : Math.Min(pageSize, MaximumPageSize);
-        var page = new List<AssetAggregate>();
-        for (var index = start; index < all.Count && page.Count < size; index++)
-        {
-            page.Add(all[index]);
-        }
+        var size = pageSize > 0 ? pageSize : scoped.Length;
+        var items = scoped.Skip(start).Take(size).ToArray();
+        var consumed = start + items.Length;
+        var hasMore = consumed < scoped.Length;
+        var token = hasMore ? consumed.ToString() : null;
 
-        var next = start + page.Count;
-        var hasMore = next < all.Count;
-        var nextToken = hasMore ? next.ToString(CultureInfo.InvariantCulture) : null;
-        return Task.FromResult(new AssetPage<AssetAggregate>(page, nextToken, all.Count, hasMore));
+        return Task.FromResult(new AssetPage<AssetAggregate>(items, token, scoped.Length, hasMore));
     }
 
-    private static string Key(string tenantId, string assetId) => tenantId + ":" + assetId;
+    private static string Key(string tenantId, string assetId) => $"{tenantId}\u001f{assetId}";
 }
 
 public sealed class AssetEventFactory
@@ -177,18 +195,29 @@ public sealed class AssetEventFactory
     public AssetEvent Create(AssetDescriptor descriptor, string eventType, string? attachmentId = null)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
+
+        var eventId = $"{descriptor.TenantId}/{descriptor.AssetId}/{eventType}";
         return new AssetEvent(
-            Guid.NewGuid().ToString("N"),
+            eventId,
             descriptor.TenantId,
             descriptor.AssetId,
             eventType,
             clock.UtcNow,
-            attachmentId);
+            string.IsNullOrWhiteSpace(attachmentId) ? null : attachmentId)
+        {
+            State = WorkflowState.Approved,
+        };
     }
 
     public EventEnvelope Envelop(AssetEvent assetEvent, string correlationId, string actorId)
     {
         ArgumentNullException.ThrowIfNull(assetEvent);
-        return new EventEnvelope(assetEvent, correlationId).WithHeader("actorId", actorId);
+
+        var envelope = new EventEnvelope(assetEvent, correlationId)
+        {
+            Stage = EventProcessingStage.Enqueued,
+        };
+
+        return string.IsNullOrWhiteSpace(actorId) ? envelope : envelope.WithHeader("actorId", actorId);
     }
 }

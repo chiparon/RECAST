@@ -86,7 +86,7 @@ export function resolveWorkspaceConfiguredPath(value: string): string | undefine
   const configured = normaliseConfiguredPath(value);
   if (configured === undefined) return undefined;
   const match = /^\$\{workspaceFolder(?::([^}]+))?\}(.*)$/.exec(configured);
-  if (!match) return configured;
+  if (!match) return resolvePlatformConfiguredPath(configured);
   const folders = vscode.workspace.workspaceFolders ?? [];
   const folder = match[1]
     ? folders.find((candidate) => candidate.name === match[1])
@@ -94,6 +94,19 @@ export function resolveWorkspaceConfiguredPath(value: string): string | undefine
   if (!folder || folder.uri.scheme !== 'file') return undefined;
   const suffix = match[2] ?? '';
   return path.resolve(folder.uri.fsPath, suffix.replace(/^[/\\]+/, ''));
+}
+
+/** VS Code user settings are shared with Remote WSL; drive paths need mounting. */
+export function resolvePlatformConfiguredPath(value: string, platform: NodeJS.Platform = process.platform,
+  wsl = Boolean(process.env.WSL_DISTRO_NAME)): string {
+  if (platform === 'win32') {
+    const mounted = /^\/mnt\/([A-Za-z])\/(.*)$/.exec(value);
+    if (mounted) return `${mounted[1]!.toUpperCase()}:/${mounted[2]}`;
+  }
+  if (platform !== 'win32' && wsl && /^[A-Za-z]:[/\\]/.test(value)) {
+    return `/mnt/${value[0]!.toLowerCase()}/${value.slice(3).replaceAll('\\', '/')}`;
+  }
+  return value;
 }
 
 export function resolveWorkspaceConfiguredPaths(values: readonly unknown[]): string[] {

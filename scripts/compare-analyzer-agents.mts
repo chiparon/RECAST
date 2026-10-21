@@ -220,8 +220,8 @@ async function main(): Promise<void> {
       const module = artifact.proposal.modules.find((item: ProjectModule) => item.name === name) as ProjectModule | undefined;
       if (!module) throw new Error(`Module not found: ${name}`);
       const language = module.language ?? "C#";
-      const requirement = [module.purpose ?? module.description, `目标语言：${language}`, "目标工程：AssetUpgradeGateway"].filter(Boolean).join("\n");
-      const target: ModuleTarget = { id: module.id, name: module.name, kind: "module", path: module.sourceFiles[0]!, language: language as any, signature: module.coreApis?.[0] ?? module.name, module: { repositoryId: targetScope.repositoryId, analysisRevision: targetScope.analysisRevision, ...(projectId ? { projectId } : {}), sourceFiles: module.sourceFiles, coreApis: module.coreApis ?? [], dependsOn: module.dependsOn ?? [] } };
+      const requirement = [module.description, module.purpose, `目标语言：${language}`, "目标工程：AssetUpgradeGateway"].filter(Boolean).join("\n");
+      const target: ModuleTarget = { id: module.id, name: module.name, kind: "module", path: module.sourceFiles[0]!, language: language as any, signature: module.coreApis?.[0] ?? module.name, module: { repositoryId: targetScope.repositoryId, analysisRevision: targetScope.analysisRevision, ...(projectId ? { projectId } : {}), moduleId: module.id, purpose: module.purpose, description: module.description, sourceFiles: module.sourceFiles, coreApis: module.coreApis ?? [], dependsOn: module.dependsOn ?? [] } };
       const candidates = await host.searchHistoricalImplementations({ target, requirement, topK: 1 }, AbortSignal.timeout(180_000));
       const candidate = candidates.find((item) => item.kind === "module" && (item.sourceModule?.sourceFiles?.some((file) => typeof file === "string" && file.trim()) || typeof item.path === "string"));
       if (!candidate?.sourceModule) {
@@ -264,7 +264,7 @@ async function main(): Promise<void> {
       console.log(`legacy: status=${oldRun.status} plan=${Boolean(oldPlan)} turns=${oldRun.modelTurns} wall=${oldMeasured.wallMs}ms tokens=${oldUsage.inputTokens}/${oldUsage.outputTokens}`);
 
       const codexHome = await prepareDeepSeekCodexHome({ apiKey, model, baseUrl: process.env.DEEPSEEK_API_BASE });
-      const codexRuntime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: moduleRoot, compileCommand: { executable: "dotnet", args: ["build", "AssetUpgradeGateway.sln", "--nologo", "--verbosity", "quiet"], timeoutMs: 900_000 }, codexCommand: process.env.ADAPTATION_CODEX_COMMAND?.trim() || "codex", codexModel: model, codexHome: codexHome.path, maxModelTurns: 2, timeoutMs: 900_000 });
+      const codexRuntime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: moduleRoot, compileCommand: { executable: "dotnet", args: ["build", "AssetUpgradeGateway.sln", "--nologo", "--verbosity", "quiet"], timeoutMs: 900_000 }, codexCommand: process.env.ADAPTATION_CODEX_COMMAND?.trim() || "codex", codexModel: model, codexHome: codexHome.path, environment: codexHome.environment, maxModelTurns: 2, timeoutMs: 900_000 });
       const codexStarted = codexRuntime.start(request); const codexMeasured = await waitForPlan(codexRuntime, codexStarted.id); const codexRun = codexMeasured.run;
       await codexRuntime.shutdown(); await codexHome.cleanup();
       const analyzerStage = codexRun.agent?.stages?.find((stage) => stage.stage === "analyzer");

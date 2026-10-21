@@ -64,6 +64,7 @@ export type HostToWebviewMessage =
   | { type: 'APPLY_RESULT'; result: ApplyResult }
   | { type: 'REPOSITORY_STATUS'; statuses: RepositoryStatus[] }
   | { type: 'CODE_INTELLIGENCE_STATUS'; presentation: CodeIntelligencePresentation }
+  | { type: 'REPOSITORY_INDEXING_PROGRESS'; progress: import('../indexing-progress').RepositoryIndexingProgress }
   | { type: 'SERVICE_STATUS'; status: ServiceStatus }
   | { type: 'MODULE_EXPLORER'; explorer: ModuleExplorerPresentation }
   | { type: 'MODULE_CHILDREN'; requestId: string; page: ModuleChildrenPage }
@@ -129,6 +130,7 @@ const hostMessageTypes = new Set<string>([
   'APPLY_RESULT',
   'REPOSITORY_STATUS',
   'CODE_INTELLIGENCE_STATUS',
+  'REPOSITORY_INDEXING_PROGRESS',
   'SERVICE_STATUS',
   'MODULE_EXPLORER',
   'MODULE_CHILDREN',
@@ -357,5 +359,11 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   // verified instead of being trusted by the message name alone.
   if (message.type === 'TARGET_WORKSPACE_PROGRESS') return isTargetWorkspaceProgress(message);
   if (message.type === 'TARGET_WORKSPACE_RESULT') return isTargetWorkspaceResult(message);
+  if (message.type === 'REPOSITORY_INDEXING_PROGRESS') {
+    const progress = (value as { progress?: Record<string, unknown> }).progress;
+    return Boolean(progress && isOpaqueIdentifier(progress.repositoryId) && typeof progress.displayName === 'string' &&
+      ['snapshot', 'snapshot-verify', 'parse', 'assemble', 'recover', 'structural-write', 'search-projection', 'activation'].includes(String(progress.stage)) &&
+      ['completed', 'total', 'filesCompleted', 'filesTotal', 'position', 'count'].every(key => progress[key] === undefined || Number.isSafeInteger(progress[key]) && Number(progress[key]) >= 0));
+  }
   return true;
 }

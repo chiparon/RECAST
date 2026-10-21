@@ -186,7 +186,7 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
       } else if (method.name === subject.name && (!subject.signature || matchesCsharpSignature(method.signature, subject.signature, subject.name))) methods.push(method);
     }
   }
-  if (methods.length !== 1) throw new Error(`Cannot uniquely locate target function ${subject.name} in Cobertura report.`);
+  if (methods.length !== 1) throw new Error(`Cannot uniquely locate target function ${subject.signature ?? subject.name} in Cobertura report (${methods.length} matches).`);
   const lines = methods[0].lines?.line ?? [];
   if (lines.length === 0) throw new Error("Missing method sequence points in Cobertura report.");
   const hits = lines.map((line: any) => counter(line.hits));
@@ -220,30 +220,77 @@ function functionDeclaringType(subject: VerificationFunction): string | undefine
 function matchesCsharpSignature(actual: string, requested: string, name: string): boolean {
   if (actual === requested) return true;
   if (!requested.includes("(")) return true;
-  const aliases: Record<string, string> = { int: "System.Int32", long: "System.Int64", short: "System.Int16", byte: "System.Byte", bool: "System.Boolean", string: "System.String", char: "System.Char", double: "System.Double", float: "System.Single", decimal: "System.Decimal", object: "System.Object" };
   const start = requested.indexOf(`${name}(`);
-  if (start < 0 || !actual.startsWith("(")) return false;
-  const params = requested.slice(start + name.length + 1).split(")")[0];
-  if (/[<>]/.test(params)) return false;
-  const wanted = params.trim() ? params.split(",").map(param => {
-    const type = param.split("=", 1)[0]!.trim()
-      .replace(/^(?:(?:this|params|ref|out|in)\s+)+/, "")
+  if (start < 0 || !actual.startsWith("(") || !actual.endsWith(")")) return false;
+  const end = requested.lastIndexOf(")");
+  if (end < start) return false;
+  const params = splitCsharpTypes(requested.slice(start + name.length + 1, end));
+  // XML entity expansion stays disabled for reports; decode only type syntax.
+  const actualTypes = splitCsharpTypes(actual.slice(1, -1).replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"));
+  if (!params || !actualTypes || params.length !== actualTypes.length) return false;
+  return params.every((param, index) => {
+    const declaration = param.split("=", 1)[0]!.trim();
+    const byRef = /^(?:(?:this|scoped)\s+)*(?:ref|out|in)\s/.test(declaration);
+    const type = declaration
+      .replace(/^(?:(?:this|params|ref|out|in|scoped|readonly)\s+)+/, "")
       .replace(/\s+[\w]+$/, "").trim();
-    const base = type.replace(/\[\]$/, "");
-    return (aliases[base] ?? base) + (type.endsWith("[]") ? "[]" : "");
-  }) : [];
-  const actualTypes = actual.startsWith("(") && actual.endsWith(")")
-    ? actual.slice(1, -1).split(",").filter(Boolean)
-    : [];
-  if (actualTypes.length !== wanted.length) return false;
-  return wanted.every((requestedType, index) => {
-    const actualType = actualTypes[index]!;
-    if (actualType === requestedType) return true;
-    // Coverlet writes fully-qualified parameter types while the indexer often
-    // records the source-level short name. Accept that namespace decoration
-    // only when the requested type itself is unqualified.
-    return !requestedType.includes(".") && actualType.endsWith(`.${requestedType}`);
+    return matchesCsharpType(actualTypes[index]!, type + (byRef ? "&" : ""));
   });
+}
+
+// Commas inside generic arguments, array ranks and default strings do not
+// separate method parameters. Malformed/unsupported identities stay unverified.
+function splitCsharpTypes(input: string): string[] | undefined {
+  if (!input.trim()) return [];
+  const parts: string[] = [], stack: string[] = [];
+  let start = 0, quote = "";
+  for (let index = 0; index < input.length; index++) {
+    const char = input[index]!;
+    if (quote) {
+      if (char === "\\") index++;
+      else if (char === quote) quote = "";
+    } else if (char === '"' || char === "'") quote = char;
+    else if (char === "<" || char === "[" || char === "(") stack.push(char);
+    else if (char === ">" || char === "]" || char === ")") {
+      if (stack.pop() !== ({ ">": "<", "]": "[", ")": "(" }[char])) return undefined;
+    } else if (char === "," && !stack.length) { parts.push(input.slice(start, index).trim()); start = index + 1; }
+  }
+  parts.push(input.slice(start).trim());
+  return stack.length || quote || parts.some(part => !part) ? undefined : parts;
+}
+
+const csharpAliases: Record<string, string> = {
+  int: "System.Int32", uint: "System.UInt32", long: "System.Int64", ulong: "System.UInt64", short: "System.Int16", ushort: "System.UInt16",
+  byte: "System.Byte", sbyte: "System.SByte", bool: "System.Boolean", string: "System.String", char: "System.Char", double: "System.Double",
+  float: "System.Single", decimal: "System.Decimal", object: "System.Object", nint: "System.IntPtr", nuint: "System.UIntPtr",
+};
+function matchesCsharpType(actual: string, requested: string): boolean {
+  actual = actual.replace(/\s+|global::/g, "");
+  requested = requested.replace(/\s+|global::/g, "");
+  if (requested.endsWith("?")) {
+    const underlying = requested.slice(0, -1);
+    const nullable = actual.match(/^System\.Nullable`?1?<(.+)>$/);
+    if (nullable) return matchesCsharpType(nullable[1]!, underlying);
+    // Nullable reference annotations are erased. Nullable value types retain
+    // System.Nullable<T>, and must not be confused with the non-nullable overload.
+    const normalized = csharpAliases[underlying] ?? underlying;
+    if (Object.values(csharpAliases).includes(normalized) && !["System.String", "System.Object"].includes(normalized)) return false;
+    return matchesCsharpType(actual, underlying);
+  }
+  if (actual.endsWith("&") || requested.endsWith("&")) return actual.endsWith("&") && requested.endsWith("&") && matchesCsharpType(actual.slice(0, -1), requested.slice(0, -1));
+  const actualArray = actual.match(/\[,*\]$/), requestedArray = requested.match(/\[,*\]$/);
+  if (actualArray || requestedArray) return Boolean(actualArray && requestedArray && actualArray[0] === requestedArray[0]
+    && matchesCsharpType(actual.slice(0, -actualArray[0].length), requested.slice(0, -requestedArray[0].length)));
+  const actualOpen = actual.indexOf("<"), requestedOpen = requested.indexOf("<");
+  if (actualOpen >= 0 || requestedOpen >= 0) {
+    if (actualOpen < 0 || requestedOpen < 0 || !actual.endsWith(">") || !requested.endsWith(">")) return false;
+    const actualArgs = splitCsharpTypes(actual.slice(actualOpen + 1, -1)), requestedArgs = splitCsharpTypes(requested.slice(requestedOpen + 1, -1));
+    return Boolean(actualArgs?.length && requestedArgs && actualArgs.length === requestedArgs.length
+      && matchesCsharpType(actual.slice(0, actualOpen).replace(/`\d+$/, ""), requested.slice(0, requestedOpen).replace(/`\d+$/, ""))
+      && requestedArgs.every((type, index) => matchesCsharpType(actualArgs[index]!, type)));
+  }
+  requested = csharpAliases[requested] ?? requested;
+  return actual === requested || (!requested.includes(".") && actual.endsWith(`.${requested}`));
 }
 
 type XmlNode = Record<string, any>;

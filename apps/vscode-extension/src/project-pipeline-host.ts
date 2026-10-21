@@ -41,10 +41,13 @@ export class ProjectPipelineHost {
       finish: () => backend.close(),
       prepare: async (input, signal, log) => {
         if (!vscode.workspace.isTrusted) throw new Error('请先信任工作区。');
-        log('等待结构索引与项目建模完成…'); await options.codeIntelligence.waitForProjects(); signal.throwIfAborted();
+        log('正在读取目标项目索引…'); signal.throwIfAborted();
         const entry = (await options.codeIntelligence.explorerData()).find(item => item.repository.repositoryId === input.repositoryId && item.projectId === input.projectId && item.repository.role === 'target');
         if (!entry || entry.index.analysisRevision !== entry.repository.activeRevision) throw new Error('只能执行当前已导入目标项目的活动版本，请重新选择目标项目。');
-        if (entry.analysis?.state !== 'ready' || !entry.analysis.proposal) throw new Error('目标项目建模尚未完成或已失败，请先在工程理解结果中完成建模。');
+        log('正在准备目标项目的功能模块；未完成的建模会自动继续…');
+        const analysis = await options.codeIntelligence.ensureProjectModel({ repositoryId: input.repositoryId,
+          analysisRevision: entry.index.analysisRevision, projectId: input.projectId }, signal);
+        signal.throwIfAborted();
         const root = await realpath(entry.repository.localPath);
         for (const document of vscode.workspace.textDocuments) if (document.isDirty && document.uri.scheme === 'file') {
           const relative = path.relative(root, document.uri.fsPath); if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) throw new Error('目标工程存在未保存文件，请先保存后开始。');
@@ -57,7 +60,7 @@ export class ProjectPipelineHost {
         };
         const verification = settings.inspect<NonNullable<typeof this.config>['verification']>('backend.verification')?.globalValue;
         this.config = { compileCommand, ...(verification ? { verification } : {}) };
-        const modules = buildProjectPipelineModules(entry.index, entry.projectId, entry.analysis.proposal.modules, verification?.protectedFiles);
+        const modules = buildProjectPipelineModules(entry.index, entry.projectId, analysis.proposal!.modules, verification?.protectedFiles);
         const current = this.pipeline.current!;
         log('正在创建独立输出副本并固定源文件快照…');
         const output = await this.files.snapshot(root, current.id, signal);

@@ -19,7 +19,7 @@ vi.mock('./local-fetch', () => ({ localFetch: vi.fn(async (_url, init) => {
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 const verified = (): PipelineModuleVerification => ({ disposition: 'verified', mode: 'requirement', attempts: [], result: { status: 'success', functions: [] } });
-async function fixture() {
+async function fixture({ isolatedHome = false } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'recast-backend-')); roots.push(root);
   const outputRoot = path.join(root, 'project'); await mkdir(outputRoot); await mkdir(path.join(outputRoot, 'src'));
   await writeFile(path.join(outputRoot, 'src/Main.java'), 'public class Main { public int value() { return 0; } }');
@@ -37,16 +37,37 @@ async function fixture() {
       compilations: [{ command: { executable: 'test', args: [] }, startedAt: '', durationMs: 1, exitCode: 0, success: true, output: '', diagnostics: [] }] })),
     get: vi.fn(() => current), repairAfterVerification: vi.fn(() => current), cancel: vi.fn(async () => current), shutdown: vi.fn(async () => {}),
   };
-  const drivers = { runtime: vi.fn(() => runtime), plan: vi.fn(async (_input: unknown) => ({ protocol: emptyGlobalProtocol() })), verify: vi.fn(async (_input: Parameters<typeof import('./project-module-verifier').verifyPipelineModule>[0]) => verified()) };
+  const drivers = { runtime: vi.fn((_options: { codexHome: string; environment: NodeJS.ProcessEnv }) => runtime), plan: vi.fn(async (_input: unknown) => ({ protocol: emptyGlobalProtocol() })), verify: vi.fn(async (_input: Parameters<typeof import('./project-module-verifier').verifyPipelineModule>[0]) => verified()) };
   const search = vi.fn(async (_request, _signal, _reranker) => [] as SearchCandidate[]);
   const history = vi.fn(async () => { throw new Error('unexpected history'); });
   const backend = new ProjectPipelineBackend({ codeIntelligence: { searchHistoricalImplementations: search, createHistoryModulesView: history },
     endpoint: () => 'http://localhost:8788', ensureStarted: async () => {}, model: async () => ({ apiKey: 'test-key', model: 'enterprise-model', apiBase: 'https://example.test/v1' }),
-    compileCommand: () => ({ executable: process.execPath, args: ['--check'] }), protectedFiles: () => [], codexHome: root,
+    compileCommand: () => ({ executable: process.execPath, args: ['--check'] }), protectedFiles: () => [], ...(isolatedHome ? {} : { codexHome: root }),
   }, drivers);
   const controller = new AbortController(), hooks = { signal: controller.signal, onPlan: vi.fn(async () => undefined), onRun: vi.fn(), onProgress: vi.fn() };
   return { root, run, module, runtime, drivers, search, backend, controller, hooks };
 }
+
+it('forwards the IDE model credential to Codex without persisting it in the generated configuration', async () => {
+  vi.stubEnv('DEEPSEEK_API_KEY', '');
+  const f = await fixture({ isolatedHome: true });
+  let codexHome: string | undefined;
+  try {
+    await f.backend.prepare(f.run, f.controller.signal, () => {});
+    await f.backend.generate(f.module, f.run, f.hooks);
+    const options = f.drivers.runtime.mock.calls[0]![0];
+    codexHome = options.codexHome;
+    expect(options.environment).toMatchObject({ DEEPSEEK_API_KEY: 'test-key', ELECTRON_RUN_AS_NODE: '1' });
+    const config = await readFile(path.join(codexHome, 'config.toml'), 'utf8');
+    expect(config).toContain('env_key = "DEEPSEEK_API_KEY"');
+    expect(config).toContain('model = "enterprise-model"');
+    expect(config).not.toContain('test-key');
+  } finally {
+    await f.backend.close();
+    vi.unstubAllEnvs();
+  }
+  await expect(readFile(path.join(codexHome!, 'config.toml'))).rejects.toThrow();
+});
 
 it('passes public requirements and protocol to Codex, repairs production defects with the same Translator, then proactively integrates', async () => {
   const f = await fixture();

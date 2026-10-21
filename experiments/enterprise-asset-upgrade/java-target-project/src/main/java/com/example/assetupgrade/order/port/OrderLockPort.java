@@ -1,15 +1,30 @@
 package com.example.assetupgrade.order.port;
 
+import com.example.assetupgrade.common.TenantId;
+
+import java.util.concurrent.locks.Lock;
+
 /**
- * Skeleton seam for OrderLockPort.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Tenant-scoped locking boundary guarding mutation of a single order.
+ *
+ * <p>A lock acquired for {@code (tenantId, orderId)} must never conflict with another tenant's
+ * lock. The returned {@link Lock} must already be held by the time {@link #lock(TenantId, String)}
+ * returns (or the caller acquires it).</p>
  */
 public interface OrderLockPort {
-    java.util.concurrent.locks.Lock lock(com.example.assetupgrade.common.TenantId tenantId,
-                                         String orderId);
-    /** Generic compatibility seam; typed methods define the contract. */
+
+    /** @return an acquired lock guarding {@code orderId} for {@code tenantId}. */
+    Lock lock(TenantId tenantId, String orderId);
+
+    /** Compatibility seam; the typed contract is {@link #lock}. */
     default Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
+        if (input instanceof LockRequest request) {
+            return lock(request.tenantId(), request.orderId());
+        }
+        throw new IllegalArgumentException("Expected a LockRequest");
+    }
+
+    /** Request holder accepted by the compatibility seam. */
+    record LockRequest(TenantId tenantId, String orderId) {
     }
 }

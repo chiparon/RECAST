@@ -12,7 +12,7 @@ import { InMemoryIndexStore } from './index-store.js';
 import { RepositoryRegistry } from './repository-registry.js';
 import { SeekDbIndexStore, seekDbIndexStoreInternals } from './seekdb-index-store.js';
 import { seekDbQueryTimeoutMs } from './seekdb-timeouts.js';
-import { SeekDbProjection } from './seekdb-projection.js';
+import { SeekDbProjection, seekDbProjectionInternals } from './seekdb-projection.js';
 
 const hash = (character: string): string => character.repeat(64);
 const range = { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 };
@@ -327,6 +327,54 @@ describe('revision store hardening', () => {
 });
 
 describe('SeekDbIndexStore pre-write validation', () => {
+  it('bounds transient retries and preserves permanent failures and cancellation', async () => {
+    const timeout = Object.assign(new Error('maximum query timeout'), { errno: 4012 });
+    const wait = vi.fn(async () => undefined);
+    const operation = vi.fn().mockRejectedValueOnce(timeout).mockResolvedValue('saved');
+    await expect(seekDbIndexStoreInternals.retryTransientSql(operation, undefined, wait)).resolves.toBe('saved');
+    expect(operation).toHaveBeenCalledTimes(2);
+    const permanent = new Error('invalid immutable content');
+    operation.mockReset().mockRejectedValue(permanent);
+    await expect(seekDbIndexStoreInternals.retryTransientSql(operation, undefined, wait)).rejects.toBe(permanent);
+    expect(operation).toHaveBeenCalledOnce();
+    operation.mockReset().mockRejectedValue(timeout);
+    await expect(seekDbIndexStoreInternals.retryTransientSql(operation, undefined, wait)).rejects.toBe(timeout);
+    expect(operation).toHaveBeenCalledTimes(3);
+    const controller = new AbortController();
+    operation.mockReset().mockImplementation(async () => { controller.abort(new Error('cancelled import')); throw timeout; });
+    await expect(seekDbIndexStoreInternals.retryTransientSql(operation, controller.signal, wait)).rejects.toThrow('cancelled import');
+    expect(operation).toHaveBeenCalledOnce();
+  });
+
+  it('recognizes a committed projection batch after its acknowledgement is lost', async () => {
+    const index = structural();
+    const document = seekDbProjectionInternals.symbolDocument(index, index.symbols[0]!);
+    let committed = false;
+    const query = vi.fn(async (sql: string) => {
+      if (sql.startsWith('SELECT @@')) return [[{ query_timeout: 60_000_000 }]];
+      if (sql.includes('FOR UPDATE')) return [[{ status: 'building', analysis_hash: index.analysisHash }]];
+      if (sql.startsWith('SELECT search_document_id')) return [committed ? [{ search_document_id: document.searchDocumentId,
+        content_hash: document.contentHash, kind: document.kind }] : []];
+      return [{}];
+    });
+    const connection = { query, beginTransaction: vi.fn(), rollback: vi.fn(), release: vi.fn(), destroy: vi.fn(),
+      commit: vi.fn(async () => { if (!committed) { committed = true; throw Object.assign(new Error('connection lost after commit'), { code: 'ECONNRESET' }); } }) };
+    const embedding = { dimension: 384, identity: 'retry-test', embed: vi.fn(async () => [[1, ...Array<number>(383).fill(0)]]) };
+    const store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'retry_test', embeddingProvider: embedding },
+      { getConnection: async () => connection } as unknown as Pool);
+    await store.appendSearchDocuments(index, [document]);
+    expect(query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO'))).toHaveLength(1);
+    expect(connection.commit).toHaveBeenCalledTimes(2);
+    expect(embedding.embed).toHaveBeenCalledOnce();
+    query.mockImplementation(async (sql: string) => {
+      if (sql.startsWith('SELECT @@')) return [[{ query_timeout: 60_000_000 }]];
+      if (sql.includes('FOR UPDATE')) return [[{ status: 'building', analysis_hash: index.analysisHash }]];
+      return [[{ search_document_id: document.searchDocumentId, content_hash: hash('f'), kind: document.kind }]];
+    });
+    await expect(store.appendSearchDocuments(index, [document])).rejects.toThrow('conflicts with the immutable projection batch');
+    expect(connection.commit).toHaveBeenCalledTimes(2);
+  });
+
   it('applies an indexing timeout through commit and restores the pooled session afterwards', async () => {
     let timeout = 10_000_000;
     const connection = {

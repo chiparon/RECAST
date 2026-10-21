@@ -54,8 +54,9 @@ const moduleTargetOf = (name: string): ModuleTarget => {
       if (module.name !== name) continue;
       return {
         id: `module://${module.id}`, name: module.name, kind: 'module', path: module.sourceFiles[0], language: 'Java',
-        signature: (module.coreApis ?? []).join('\n'), documentation: module.purpose ?? module.description,
+        signature: (module.coreApis ?? []).join('\n'), documentation: [module.purpose, module.description].filter(Boolean).join('\n'),
         module: { repositoryId: target.repositoryId, analysisRevision: target.analysisRevision, projectId: target.projectId,
+          moduleId: module.id, purpose: module.purpose, description: module.description,
           sourceFiles: module.sourceFiles ?? [], coreApis: module.coreApis ?? [], dependsOn: module.dependsOn ?? [] },
       };
     }

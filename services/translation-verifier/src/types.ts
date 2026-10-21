@@ -184,6 +184,7 @@ export type VerificationTestEvidence = {
       reason: string;
       requirementEvidence?: string;
       reviewNote?: string;
+      replacementTestIds?: string[];
     };
   }>;
   revisions: Array<{
@@ -193,6 +194,8 @@ export type VerificationTestEvidence = {
     corrections?: Array<VerificationTestCorrection & {
       status: "proposed" | "confirmed" | "unconfirmed";
       reviewNote?: string;
+      /** Host-reviewed identities from the actual passing test report. */
+      replacementTestIds?: string[];
     }>;
   }>;
 };

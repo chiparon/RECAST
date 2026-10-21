@@ -10,10 +10,16 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkPlatformWorkspace } from './check-platform-workspace.mjs';
+import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { waitForExtensionStartup } from './extension-startup.mjs';
+import { ensureDockerRuntime } from './docker-runtime.mjs';
+import { inferEmbeddingVariant } from './embedding-identity.mjs';
+import { createConnection as connectDatabase } from 'mysql2/promise';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extensionRoot = path.join(repoRoot, 'apps', 'vscode-extension');
@@ -31,7 +37,7 @@ Options:
   --preloaded          Open the ignored preloaded-workbench profile without scanning.
   --workspace <path>   .code-workspace file for --preloaded.
   --database <name>    SeekDB database for --preloaded.
-  --user-data-dir <p>  Isolated VS Code user-data directory for --preloaded.
+  --user-data-dir <p>  Isolated VS Code user-data directory.
   --help               Show this help.
 
 The Extension Development Host opens after dependency services are ready.
@@ -164,6 +170,28 @@ function existingContainerState(name) {
 }
 
 function ensureVsCodeExtension(extensionId) {
+  if (process.platform === 'linux' && process.env.WSL_DISTRO_NAME && extensionId === 'ms-vscode-remote.remote-wsl') {
+    // Remote WSL belongs to the Windows client. After it is installed, `code`
+    // inside WSL lists/manages Linux extensions, so check the client directly.
+    const shim = path.isAbsolute(vscodeCommand) ? vscodeCommand : (process.env.PATH ?? '').split(path.delimiter)
+      .map(directory => path.join(directory, vscodeCommand)).find(candidate => existsSync(`${candidate}.cmd`));
+    if (!shim || !existsSync(`${shim}.cmd`)) return; // Already using a native/remote Linux CLI.
+    const wrapper = `${shim}.cmd`;
+    const paths = [...readFileSync(wrapper, 'utf8').matchAll(/"%~dp0([^"\r\n]+)"/g)]
+      .map(match => path.resolve(path.dirname(wrapper), match[1].replaceAll('\\', '/')));
+    if (!paths[0]?.endsWith('.exe') || !paths[1]?.endsWith('cli.js')) throw new Error('Unable to resolve the Windows VS Code client for WSL.');
+    const converted = spawnSync('wslpath', ['-m', paths[1]], { encoding: 'utf8' });
+    if (converted.status !== 0) throw new Error('Unable to resolve the Windows VS Code CLI path.');
+    const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', WSLENV: `ELECTRON_RUN_AS_NODE/w:${process.env.WSLENV ?? ''}` };
+    const invoke = args => spawnSync(paths[0], [converted.stdout.trim(), ...args], { env, encoding: 'utf8', timeout: 180_000 });
+    const listed = invoke(['--list-extensions']);
+    if (listed.error || listed.status !== 0) throw new Error('Unable to inspect the Windows VS Code extensions.');
+    if (listed.stdout.split(/\r?\n/).some(line => line.trim().toLowerCase() === extensionId)) return;
+    console.log(`Installing required Windows VS Code extension: ${extensionId}`);
+    const installed = invoke(['--install-extension', extensionId]);
+    if (installed.error || installed.status !== 0) throw new Error(`Unable to install ${extensionId}: ${installed.error?.message ?? installed.stderr}`);
+    return;
+  }
   ensureCommand(vscodeCommand, ['--version']);
   const listed = spawnSync(vscodeCommand, shellArgs(['--list-extensions']), {
     cwd: repoRoot,
@@ -198,9 +226,10 @@ function configureEnvironment(options) {
     // Do not let a stale shell variable turn the ordinary entry into the
     // preloaded profile after a previous local demo run.
     delete process.env.FOREXPLORE_PRELOADED;
-    delete process.env.FOREXPLORE_AUTO_OPEN_PANEL;
     delete process.env.FOREXPLORE_PRELOADED_MANIFEST;
   }
+  process.env.FOREXPLORE_AUTO_OPEN_PANEL = '1';
+  setDefault('FOREXPLORE_SOURCE_SNAPSHOT_DIR', path.join(homedir(), '.cache', 'recast', 'source-snapshots'));
   setDefault('CODE_INTELLIGENCE_SEEKDB_DATABASE', options.preloaded
     ? 'forexplore_asset_upgrade_20261004'
     : 'forexplore_javafileupload_flow_20260913');
@@ -214,7 +243,6 @@ function configureEnvironment(options) {
   // Device and precision change the produced vectors, so the workbench must declare
   // the same embedding variant as the offline ingestion: the store scopes embedding
   // reuse by model identity, and a mismatch would mix providers inside one index.
-  setDefault('CODE_INTELLIGENCE_EMBEDDING_VARIANT', 'dml-fp16');
 }
 
 /**
@@ -301,12 +329,27 @@ async function startSeekDb(options) {
   if (options.skipSeekDb) return true;
   const host = process.env.CODE_INTELLIGENCE_SEEKDB_HOST?.trim() || '127.0.0.1';
   if (!['127.0.0.1', 'localhost', '::1'].includes(host)) return true;
+  // An already available database is the readiness signal, including a database
+  // shared from WSL. A slow Docker control plane must not block that service.
+  let connection;
+  try {
+    connection = await connectDatabase({ host,
+      port: Number(process.env.CODE_INTELLIGENCE_SEEKDB_PORT ?? process.env.SEEKDB_PORT ?? 2881),
+      user: process.env.CODE_INTELLIGENCE_SEEKDB_USER ?? 'root',
+      password: process.env.CODE_INTELLIGENCE_SEEKDB_PASSWORD ?? process.env.SEEKDB_PASSWORD ?? '',
+      connectTimeout: 5000 });
+    await connection.query({ sql: 'SELECT 1', timeout: 5000 });
+    console.log('SeekDB SQL is ready; reusing the running database.');
+    return true;
+  } catch { /* Start the configured local engine below when SQL is unavailable. */ }
+  finally { connection?.destroy(); }
   if (!existsSync(composeFile)) {
     console.warn(`SeekDB compose file does not exist: ${composeFile}. Code intelligence will report fetch failures.`);
     return false;
   }
   try {
     ensureCommand('docker', ['--version']);
+    await ensureDockerRuntime();
   } catch (error) {
     console.warn(`${error.message} SeekDB stays down; code intelligence will report fetch failures.`);
     return false;
@@ -341,21 +384,49 @@ async function startSeekDb(options) {
 
 /** Open the Extension Development Host and settle when its launcher process exits. */
 async function launchHost(options) {
-  const args = [`--extensionDevelopmentPath=${extensionRoot}`];
-  if (options.preloaded) {
-    args.push('--new-window');
+  const args = [`--extensionDevelopmentPath=${extensionRoot}`, '--new-window'];
+  // VS Code reloads an existing development host but keeps its old process
+  // environment. Pass the public runtime contract explicitly on every launch.
+  // Credentials stay in the inherited environment / VS Code secret storage.
+  const publicEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    /^(?:FOREXPLORE_|CODE_INTELLIGENCE_|RECAST_|ADAPTATION_PORT$)/.test(name) &&
+    !/(?:KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL)/i.test(name)));
+  publicEnvironment.FOREXPLORE_PRELOADED = options.preloaded ? '1' : '0';
+  const launchFile = path.join(repoRoot, 'output/recast-startup/current-launch.json');
+  const temporaryLaunchFile = `${launchFile}.${process.pid}.tmp`;
+  await writeFile(temporaryLaunchFile, JSON.stringify({ version: 1, environment: publicEnvironment }));
+  await rename(temporaryLaunchFile, launchFile);
+  args.push('--extensionEnvironment', JSON.stringify(publicEnvironment));
+  if (options.preloaded || options.userDataDir) {
     const userDataDir = path.resolve(repoRoot, options.userDataDir || '.recast-preloaded/vscode-user-data');
     await mkdir(userDataDir, { recursive: true });
     args.push('--user-data-dir', userDataDir);
   }
   if (options.folder) args.push(options.folder);
-  const vscode = spawn(vscodeCommand, shellArgs(args), {
+  // Invoke the Node CLI directly on Windows: shell quoting cannot safely carry
+  // JSON environment values or paths containing shell metacharacters.
+  let command = vscodeCommand;
+  let commandArgs = args;
+  let cliEnvironment = process.env;
+  if (process.platform === 'win32') {
+    const candidates = path.isAbsolute(command) ? [command] : (process.env.PATH ?? '').split(path.delimiter)
+      .map(directory => path.join(directory, command.endsWith('.cmd') ? command : `${command}.cmd`));
+    const wrapper = candidates.find(candidate => existsSync(candidate));
+    const paths = wrapper ? [...readFileSync(wrapper, 'utf8').matchAll(/"%~dp0([^"\r\n]+)"/g)].map(match => path.resolve(path.dirname(wrapper), match[1])) : [];
+    if (paths[0]?.endsWith('.exe') && paths[1]?.endsWith('cli.js')) {
+      command = paths[0]; commandArgs = [paths[1], ...args];
+      cliEnvironment = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+    } else if (!command.toLowerCase().endsWith('.exe')) {
+      throw new Error('Unable to resolve the VS Code Node launcher; set FOREXPLORE_VSCODE_COMMAND to the VS Code executable.');
+    }
+  }
+  const vscode = spawn(command, commandArgs, {
     cwd: repoRoot,
-    env: process.env,
+    env: cliEnvironment,
     stdio: 'inherit',
-    shell: process.platform === 'win32',
+    shell: false,
   });
-  return new Promise((resolve, reject) => {
+  const exited = new Promise((resolve, reject) => {
     vscode.once('error', reject);
     vscode.once('exit', (code, signal) => {
       if (signal) reject(new Error(`VS Code exited due to signal ${signal}.`));
@@ -363,6 +434,7 @@ async function launchHost(options) {
       else resolve();
     });
   });
+  return { child: vscode, exited };
 }
 
 async function main() {
@@ -379,6 +451,11 @@ async function main() {
   }
 
 
+  // Without Remote WSL, the Windows `code` shim opens a local window with a
+  // Linux extension path, and the extension never activates.
+  if (process.platform === 'linux' && process.env.WSL_DISTRO_NAME) {
+    ensureVsCodeExtension('ms-vscode-remote.remote-wsl');
+  }
   ensureVsCodeExtension('redhat.java');
   if (!await startSeekDb(options)) throw new Error('SeekDB startup failed; resolve the Docker error above before opening the development host.');
 
@@ -399,10 +476,24 @@ async function main() {
   if (options.folder) options.folder = resolveFolder(options.folder);
 
   await startServices(options);
+  if (!process.env.CODE_INTELLIGENCE_EMBEDDING_VARIANT) {
+    process.env.CODE_INTELLIGENCE_EMBEDDING_VARIANT = await inferEmbeddingVariant(process.env.CODE_INTELLIGENCE_EMBEDDING_URL);
+  }
+  const reportDirectory = path.join(repoRoot, 'output', 'recast-startup');
+  await mkdir(reportDirectory, { recursive: true });
+  process.env.FOREXPLORE_STARTUP_REPORT = path.join(reportDirectory, `${randomUUID()}.json`);
   configureWslEnvironmentPassthrough();
   console.log('Dependencies are ready; opening the development host.');
-  console.log('VS Code keeps one development host per extension path: close the existing window to get a new one.');
-  await launchHost(options);
+  console.log('VS Code will reload an existing development host with the current runtime configuration.');
+  const host = await launchHost(options);
+  // Remote WSL's CLI can remain attached to a live window. Its exit is not the
+  // readiness signal; only failures should race the extension's acknowledgement.
+  const ready = await Promise.race([
+    waitForExtensionStartup(process.env.FOREXPLORE_STARTUP_REPORT, Number(process.env.RECAST_EXTENSION_WAIT_MS || 120_000)),
+    host.exited.then(() => new Promise(() => {})),
+  ]);
+  host.child.unref?.();
+  console.log(`RECAST services ready: index ${ready.semanticQueryUrl}; model backend ${ready.adaptationUrl}.`);
 }
 
 main().catch((error) => {

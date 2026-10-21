@@ -1,0 +1,51 @@
+case,repository,historical_module,source_language,target_language,target_module,historical_production_files,ambiguous
+case-001,apache-camel,rest reifier,java,C#,HttpPayloadBinding,1,False
+case-002,apache-camel,simple 类型与操作符定义,java,C#,ExpressionLexicalTypes,12,False
+case-003,apache-camel,simple AST 节点,java,C#,ExpressionNodeGraph,25,False
+case-004,apache-camel,language reifier,java,C#,RuntimeExpressionFactory,13,False
+case-005,apache-camel,camel-xml-jaxb,java,C#,RouteXmlMarshalling,3,False
+case-006,apache-camel,camel-xml-jaxp,java,TypeScript,XmlRepresentationConversion,23,False
+case-007,apache-camel,dataformat reifier,java,TypeScript,SerializationFormatFactory,53,False
+case-008,apache-camel,camel-management-api,java,TypeScript,IntegrationManagementContracts,127,False
+case-009,apache-camel,camel-file,java,TypeScript,FilesystemMessageEndpoint,67,False
+case-010,apache-camel,simple 函数工厂,java,TypeScript,ExpressionFunctionRegistry,22,False
+case-011,apache-camel,camel-core-model,java,TypeScript,RoutingDslDefinitions,402,False
+case-012,apache-camel,camel-cluster,java,TypeScript,LeaderControlledRoutes,6,False
+case-013,apscheduler,作业执行器,Python,C#,JobExecutionBackends,4,False
+case-014,apscheduler,触发器,Python,C#,ScheduleTimeRules,7,False
+case-015,apscheduler,核心契约与共享模型,Python,C#,SchedulingSharedContracts,12,False
+case-016,apscheduler,事件代理,Python,C#,DistributedSchedulingEvents,6,False
+case-017,apscheduler,数据存储,Python,C#,LeasedSchedulePersistence,4,False
+case-018,bullmq,node-redis 客户端适配器,typescript,Go,RedisDriverCommandAdapter,1,False
+case-019,bullmq,事件通知,typescript,Go,QueueEventSubscription,1,False
+case-020,bullmq,Valkey Glide 客户端适配器,typescript,Go,GlideCommandCompatibility,1,False
+case-021,bullmq,Redis 连接与集群管理,typescript,Go,QueueConnectionLifecycle,1,False
+case-022,bullmq,工厂与导出入口,typescript,Go,SqlQueueBackendFactory,2,False
+case-023,bullmq,子进程池与生命周期,typescript,Go,IsolatedWorkerProcessPool,2,False
+case-024,bullmq,Worker 消费执行,typescript,Go,QueueJobConsumer,1,False
+case-025,commons-fileupload,javax.servlet 适配模块,Java,TypeScript,LegacyServletUploadBridge,5,True
+case-026,commons-fileupload,jakarta.servlet 5 适配模块,Java,TypeScript,ModernServletUploadBridge,5,True
+case-027,commons-fileupload,文件项模型与磁盘存储,Java,TypeScript,ThresholdUploadItemStorage,8,False
+case-028,flowable-engine,flowable-bpmn-model,java,Go,WorkflowDefinitionModel,121,False
+case-029,flowable-engine,flowable-bpmn-converter,java,Go,WorkflowXmlConversion,120,False
+case-030,keycloak,create-keycloak-theme,javascript,Go,ConsoleThemeScaffolding,1,False
+case-031,keycloak,导入路径重写脚本,javascript,Python,VendorBundleImportRewriting,1,False
+case-032,keycloak,未归属工程文件,javascript,Python,ScriptedAuthenticationStep,1,False
+case-033,keycloak,单文件导入导出,java,Python,RealmSingleDocumentTransfer,4,False
+case-034,keycloak,storage,java,Python,FederatedIdentityStorage,39,False
+case-035,keycloak,jpa,java,Python,RelationalIdentityPersistence,319,False
+case-036,nopcommerce,结账属性模型,csharp,Java,CheckoutAttributeViews,6,False
+case-037,nopcommerce,模板配置控制器,csharp,Java,DisplayTemplateAdministration,1,False
+case-038,nopcommerce,插件契约与描述符模型,csharp,Java,ExtensionPluginContracts,8,False
+case-039,nopcommerce,官方市场数据,csharp,Java,ExtensionMarketplaceFeed,4,False
+case-040,nopcommerce,Security,csharp,Java,CommerceSecurityServices,14,False
+case-041,nopcommerce,博客评论模型,csharp,Java,BlogDiscussionAdminViews,7,False
+case-042,nopcommerce,短信提供商入口控制器,csharp,Java,MessagingProviderAdministration,1,False
+case-043,nopcommerce,运费计算请求与响应模型,csharp,Java,ShippingQuotationModels,2,False
+case-044,nopcommerce,订单项与添加商品模型,csharp,Java,OrderLineEditingViews,4,False
+case-045,nopcommerce,到货订阅,csharp,Java,InventoryRestockSubscriptions,2,False
+case-046,nopcommerce,下载记录服务,csharp,Python,DownloadRecordPersistence,2,False
+case-047,nopcommerce,Tax,csharp,Python,CommerceTaxCalculation,17,False
+case-048,nopcommerce,PriceListCaching,csharp,Python,PriceListCacheInvalidation,3,False
+case-049,nopcommerce,示例数据装载,csharp,Python,InstallationDemoDataLoading,2,False
+case-050,nopcommerce,仓库服务,csharp,Python,FulfillmentWarehouseDirectory,2,False

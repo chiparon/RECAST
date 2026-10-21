@@ -19,12 +19,13 @@
  *   --target <path>      target project root (required)
  *   --database <name>    SeekDB database (default forexplore_asset_upgrade_20261004)
  *   --top-k <n>          retrieval width (default 4)
+ *   --auto-select-references  let the reranker choose 1–3 distinct implementation references
  *   --candidate-ranks <1,2,3>  select 1–3 ranks from Top4 (default 1)
  *   --candidate-ranks-map <json>  per-module rank selections, keyed by module id
  *   --keep-project-until-end  defer module rollback for a project-level evaluation
- *   --integration-repair  run one bounded project-level Analyzer/Translator pass after all modules
- *   --integration-feedback <json>  host/evaluator failure summary for that integration pass
+ *   --integration-repair  add a proactive project-level integration pass after all modules
  *   --reuse-plan         reuse the current module plan for repeatable comparisons
+ *   --plan-from <json>   use a reviewed module proposal for a repeatable full-project run
  *   --retrieval-from <report> reuse reviewed Top4 so ranking changes cannot change the selection
  *   --max-modules <n>    stop after n modules (default 0 = every module)
  *   --module <text>      translate only modules whose name or id contains text
@@ -48,7 +49,7 @@
  * or integration repair pass.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { chmod, cp, mkdir, readdir, rm, writeFile, mkdtemp } from 'node:fs/promises';
@@ -66,10 +67,13 @@ import {
 } from '../apps/vscode-extension/src/code-intelligence-host.js';
 import { requestSemanticModuleMigrationProposal } from '../apps/vscode-extension/src/module-plan-client.js';
 import { HttpModuleHierarchyPlanner } from '../apps/vscode-extension/src/module-hierarchy-client.js';
+import { projectPlanHash } from '../services/code-intelligence-service/src/project-analysis.js';
 import { prepareDirectModuleTranslationScope, prepareIntegrationTranslationScope, prepareModuleTranslationScope } from '../apps/vscode-extension/src/module-translation-handoff.js';
 import { WorkspaceTranslationHost } from '../apps/vscode-extension/src/workspace-translation-host.js';
+import type { ImplementationReferenceSelection } from '../services/adaptation-service/src/reference-selection-policy.js';
 import { ConfiguredModelReranker } from '../apps/vscode-extension/src/model-reranker.js';
 import { CodexWorkspaceTranslationRuntime } from '../services/adaptation-service/src/codex-workspace-translation-runtime.js';
+import { prepareProjectIntegrationContext } from '../services/adaptation-service/src/project-integration-context.js';
 import { prepareDeepSeekCodexHome } from '../services/adaptation-service/src/codex-experiment-home.js';
 import { createHttpServer } from '../services/adaptation-service/src/http-server.js';
 import { createAgentHost } from '../services/translation-verifier/src/host/runtime.js';
@@ -77,7 +81,10 @@ import { createTranslationVerifierModelClient } from '../services/translation-ve
 import { createFunctionGroupVerifier } from '../services/translation-verifier/src/function-group-verify.js';
 import type { SingleAgentFunctionGroupTerminalResult } from '../services/translation-verifier/src/strategies/single-agent-function-group/strategy.js';
 import type { FunctionGroupVerificationInput, FunctionGroupVerificationResult } from '../services/translation-verifier/src/types.js';
-import { buildModuleFunctionMapping, expandClassLevelFunctions, type ModuleFunctionMapping } from './module-function-mapping.js';
+import { buildModuleFunctionMapping, discoverExecutableFunctions, expandClassLevelFunctions, type ModuleFunctionMapping } from './module-function-mapping.js';
+import { runIntegrationPlanAgent } from '../services/adaptation-service/src/integration-plan-agent.js';
+import { ensureGlobalProtocol, mergeGlobalProtocol, persistGlobalProtocol, projectModuleProtocol, protocolTaskIdentity, recordProtocolChecks } from '../services/adaptation-service/src/protocol-sidecar.js';
+import { emptyGlobalProtocol } from '@forexplore/contracts';
 
 const argument = (name: string, fallback?: string): string | undefined => {
   const index = process.argv.indexOf(`--${name}`);
@@ -87,8 +94,8 @@ const flag = (name: string): boolean => process.argv.includes(`--${name}`);
 
 if (flag('help')) {
   console.log('usage: npx tsx scripts/run-target-module-pipeline.mts --target <path> [--database <name>] ' +
-    '[--top-k <n>] [--candidate-ranks <1,2,3>] [--candidate-ranks-map <json>] ' +
-    '[--keep-project-until-end] [--integration-repair] [--integration-feedback <json>] ' +
+    '[--top-k <n>] [--auto-select-references] [--candidate-ranks <1,2,3>] [--candidate-ranks-map <json>] ' +
+    '[--keep-project-until-end] [--integration-repair] ' +
     '[--max-modules <n>] [--module <text>] [--repos <a,b,c>] [--dry-run] [--out <json>]');
   process.exit(0);
 }
@@ -103,6 +110,8 @@ const candidateRanks = (argument('candidate-ranks', '1') ?? '1').split(',').map(
 if (candidateRanks.length < 1 || candidateRanks.length > 3 || new Set(candidateRanks).size !== candidateRanks.length ||
     candidateRanks.some(rank => !Number.isInteger(rank) || rank < 1 || rank > 4 || rank > topK)) throw new Error('--candidate-ranks must select 1–3 distinct ranks from the retrieved Top4.');
 if (!Number.isInteger(topK) || topK < 1 || topK > 10) throw new Error('--top-k must be between 1 and 10 (Top-1 means 1).');
+const autoSelectReferences = flag('auto-select-references');
+if (autoSelectReferences && (flag('candidate-ranks') || flag('candidate-ranks-map'))) throw new Error('Automatic references cannot be combined with manual ranks');
 const candidateRanksMapPath = argument('candidate-ranks-map');
 const candidateRanksByModule = new Map<string, number[]>();
 if (candidateRanksMapPath) {
@@ -123,7 +132,7 @@ const moduleFilter = argument('module')?.trim().toLocaleLowerCase();
 const dryRun = flag('dry-run');
 const keepProjectUntilEnd = flag('keep-project-until-end');
 const integrationRepair = flag('integration-repair') || process.env.RECAST_INTEGRATION_REPAIR === '1';
-const integrationFeedbackPath = argument('integration-feedback');
+if (flag('integration-feedback')) throw new Error('--integration-feedback is not supported: hidden evaluator results must never enter the pipeline. Integration uses public requirements and module Host facts.');
 const outputPath = resolve(argument('out', 'results/target-module-pipeline.json')!);
 const adaptationApiUrl = argument('adaptation', process.env.ADAPTATION_API_URL ?? 'http://127.0.0.1:8788')!;
 const semanticPort = Number(argument('semantic-port', process.env.FOREXPLORE_SEMANTIC_QUERY_PORT ?? '8790'));
@@ -134,7 +143,7 @@ function classifyVerifierFailure(description: string): {
   kind: 'environment' | 'unknown';
 } {
   const text = description.toLowerCase();
-  if (text.includes('exhausted its') || text.includes('turn budget') || text.includes('tool-call budget') || text.includes('time budget')) {
+  if (text.includes('exhausted its') || text.includes('turn budget') || text.includes('tool-call budget') || text.includes('time budget') || /context.*budget/.test(text)) {
     return { reason: 'agent-timeout', kind: 'unknown' };
   }
   if (text.includes('model request') || text.includes('invalid completion') || text.includes('api key')) {
@@ -154,7 +163,7 @@ function classifyVerifierDisposition(result: FunctionGroupVerificationResult): M
   }
   const description = `${result.issue?.description ?? ''} ${result.reason ?? ''}`;
   const lower = description.toLowerCase();
-  if (result.reason === 'agent-timeout' || result.reason === 'model-failure' || lower.includes('context budget') || lower.includes('turn budget')) {
+  if (result.issue?.kind === 'unknown' || result.reason === 'agent-timeout' || result.reason === 'model-failure' || lower.includes('context budget') || lower.includes('turn budget')) {
     return 'agent-uncertain';
   }
   if (result.reason === 'coverage-unavailable' || result.reason === 'test-environment-failure' ||
@@ -178,6 +187,21 @@ async function removeReadOnlyTree(root: string): Promise<void> {
     // Cleanup is best effort; the verifier result remains valid if the host
     // process cannot remove an already detached temporary tree.
   }
+}
+
+/** A model turn may finish while the local HTTP read is still queued. Retry
+ * status reads before declaring a module failed; the Host/runtime remains the
+ * source of truth and the retry does not start another translation. */
+async function readWorkspaceRunWithRetry(host: WorkspaceTranslationHost, runId: string, requestId: string): Promise<WorkspaceTranslationRun> {
+  let lastError = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const response = await host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: `${requestId}-${attempt + 1}`, action: 'read', runId });
+    if (response.type === 'WORKSPACE_TRANSLATION_RESULT' && response.run) return response.run;
+    lastError = response.type === 'WORKSPACE_TRANSLATION_ERROR' ? response.message : JSON.stringify(response);
+    if (!/timeout|aborted|timed out|temporar|busy|queue/i.test(lastError)) break;
+    await new Promise(resolveWait => setTimeout(resolveWait, 2_000));
+  }
+  throw new Error(`Workspace run read failed after retries: ${lastError}`);
 }
 
 /**
@@ -215,6 +239,7 @@ if (existsSync(environmentFile)) {
 // Resolve model settings once for the retrieval/rerank side. The translation
 // Agent itself is Codex CLI and uses the user's Codex credential/configuration.
 const modelApiKey = process.env.DEEPSEEK_API_KEY?.trim() ?? readEnvironmentFileValue('DEEPSEEK_API_KEY');
+const workspaceModel = process.env.ADAPTATION_CODEX_MODEL?.trim() || process.env.DEEPSEEK_MODEL?.trim() || 'deepseek-flash';
 const workspaceAgent = process.env.ADAPTATION_WORKSPACE_AGENT?.trim().toLowerCase() || 'codex';
 if (!dryRun && workspaceAgent === 'legacy' && !modelApiKey) throw new Error('A configured DEEPSEEK_API_KEY is required for the legacy workspace Agent loop.');
 function readEnvironmentFileValue(key: string): string | undefined {
@@ -339,13 +364,17 @@ interface ModuleReport {
   /** Host-derived files in the bounded cross-module repair closure. */
   relatedWriteFiles?: string[];
   /** Why a module verifier did not produce a production-code verdict. */
-  verificationDisposition?: 'production-defect' | 'test-environment' | 'agent-uncertain' | 'verified';
+  verificationDisposition?: 'production-defect' | 'test-environment' | 'agent-uncertain' | 'verified' | 'not-applicable';
   candidate?: { repository: string; name: string; moduleId: string; language: string; score: number; hybrid?: number; rerank?: number; title: string };
   candidatesConsidered?: number;
   retrievalCandidates?: SearchCandidate[];
   retrievedCandidates?: Array<{ id: string; rank: number; repository: string; name: string; moduleId?: string; score: number; language: string; summary: string; sourceFiles: string[]; coreApis: string[] }>;
+  referenceSelection?: ImplementationReferenceSelection & {candidateIds:string[]};
   selectedCandidates?: Array<{ id: string; rank: number; repository: string; name: string; moduleId: string; language: string; score: number }>;
   historyViewCandidates?: import('@forexplore/contracts').WorkspaceHistoryCandidate[];
+  historyViewFiles?: string[];
+  historyViewBytes?: number;
+  historyViewManifestHash?: string;
   translationMode?: 'analyzer-translator' | 'direct-translator';
   fallbackReason?: string;
   /** Set when the first history search hit the store's query budget and was retried. */
@@ -360,11 +389,13 @@ interface ModuleReport {
   events?: string[];
   wallMs?: number;
   error?: string;
-  functionMapping?: Pick<ModuleFunctionMapping, 'functions' | 'unmatchedFunctions' | 'diagnostics'>;
+  functionMapping?: Pick<ModuleFunctionMapping, 'functions' | 'unmatchedFunctions' | 'nonExecutableFunctions' | 'diagnostics'>;
   translationVerification?: FunctionGroupVerificationResult;
   translationVerificationAttempts?: FunctionGroupVerificationResult[];
   verificationRepairs?: WorkspaceTranslationRun['verificationRepairs'];
   verificationMode?: 'translation-fidelity' | 'requirement';
+  verifierMs?: number;
+  verifierEvidencePath?: string;
   agent?: WorkspaceTranslationRun['agent'];
   /** Analyzer's structured plan, retained for completeness review. */
   plan?: WorkspaceTranslationPlan;
@@ -432,7 +463,16 @@ async function relatedModuleWriteFiles(
     const explicitDependency = (current.dependsOn ?? []).includes(candidate.id);
     if (isReferenced || explicitDependency) related.push(...candidateFiles);
   }
-  return [...new Set(related)].sort((left, right) => left.localeCompare(right));
+  // A module request is deliberately bounded by the workspace contract's
+  // 128-file write limit. The dependency closure can grow after earlier
+  // modules have been translated (their new declarations become visible), so
+  // reserve space for the current module and keep a deterministic prefix of
+  // the related files. The project Integration Agent remains responsible for
+  // any cross-module repair that does not fit this local closure.
+  const maxRelatedFiles = Math.max(0, 128 - current.sourceFiles.length);
+  return [...new Set(related)]
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, maxRelatedFiles);
 }
 
 function escapeRegExp(value: string): string {
@@ -521,86 +561,18 @@ async function captureModuleSnapshot(args: {
   return { directory, manifest: manifestPath, codeDirectory, changedPaths: [...(args.entry.changedPaths ?? [])] };
 }
 
-type IntegrationFailureCase = { taskId?: string; conditionId?: string; description: string; error?: string };
-
-function readIntegrationFailureCases(path: string | undefined, modules: readonly ModuleReport[]): IntegrationFailureCase[] {
-  if (path) {
-    const value = JSON.parse(readFileSync(resolve(path), 'utf8')) as { Cases?: unknown; cases?: unknown };
-    const cases = Array.isArray(value.Cases) ? value.Cases : Array.isArray(value.cases) ? value.cases : [];
-    return cases.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-      .filter((item) => item.Passed === false || item.passed === false)
-      .map((item) => ({
-        ...(typeof item.TaskId === 'string' ? { taskId: item.TaskId } : typeof item.taskId === 'string' ? { taskId: item.taskId } : {}),
-        ...(typeof item.ConditionId === 'string' ? { conditionId: item.ConditionId } : typeof item.conditionId === 'string' ? { conditionId: item.conditionId } : {}),
-        description: typeof item.Description === 'string' ? item.Description : typeof item.description === 'string' ? item.description : '项目集成行为未通过',
-        ...(typeof item.Error === 'string' ? { error: item.Error } : typeof item.error === 'string' ? { error: item.error } : {}),
-      }));
-  }
-  return modules.flatMap((module) => {
-    const verification = module.translationVerification;
-    if (!verification || verification.status === 'success' || module.verificationDisposition !== 'production-defect') return [];
-    return [{ taskId: module.moduleId, description: verification.issue?.description ?? '模块行为验证失败', error: module.error }];
-  });
-}
-
-/** Map a failure summary to a small set of module owners. Test source is never
- * exposed; only the host-provided descriptions and target module paths are used. */
-function integrationAffectedModules(cases: readonly IntegrationFailureCase[], modules: readonly ProjectModule[]): ProjectModule[] {
-  const text = cases.map((item) => `${item.taskId ?? ''} ${item.conditionId ?? ''} ${item.description} ${item.error ?? ''}`).join(' ').toLowerCase();
-  const groups: Array<{ pattern: RegExp; names: RegExp }> = [
-    { pattern: /attachment|quarantine|file[- ]safety/, names: /domain|polic|application|adapter/ },
-    { pattern: /workflow|event|dispatch|retry/, names: /domain|polic|application|adapter|telemetry|composition/ },
-    { pattern: /reconcil|due[- ]retry|idempotent|rescan/, names: /domain|application|adapter|telemetry/ },
-    { pattern: /order|plugin|reservation|rollback|audit/, names: /domain|polic|application|adapter|telemetry|composition/ },
-  ];
-  const matched = new Set<string>();
-  // Hidden evaluators and module verifiers often preserve the owning module id
-  // in a failure record. Prefer that host-owned identity before relying on
-  // English keywords, which may be absent from a localized description.
-  const explicitOwners = new Set(cases.flatMap((item) => [item.taskId, item.conditionId])
-    .filter((value): value is string => Boolean(value)).map((value) => value.toLowerCase()));
-  for (const module of modules) {
-    const identities = [module.id, module.name, ...(module.sourceFiles ?? [])]
-      .map((value) => value.toLowerCase());
-    if (identities.some((identity) => explicitOwners.has(identity))) matched.add(module.id);
-  }
-  if (matched.size > 0) return modules.filter((module) => matched.has(module.id));
-  for (const group of groups) if (group.pattern.test(text)) {
-    for (const module of modules) {
-      const identity = `${module.name} ${module.id} ${(module.sourceFiles ?? []).join(' ')}`.toLowerCase();
-      if (group.names.test(identity)) matched.add(module.id);
-    }
-  }
-  if (matched.size === 0) {
-    for (const module of modules) if (module.sourceFiles.some((file) => text.includes(file.toLowerCase()))) matched.add(module.id);
-  }
-  return modules.filter((module) => matched.has(module.id));
-}
-
-function integrationFailureSummary(cases: readonly IntegrationFailureCase[], modules: readonly ModuleReport[]): string {
-  const plans = modules.filter((module) => module.plan).map((module) => `${module.moduleId}: ${module.plan!.summary.slice(0, 700)}`).join('\n');
-  const failures = cases.map((item) => `- ${item.taskId ?? 'integration'} / ${item.conditionId ?? 'case'}: ${item.description}${item.error ? `（Host observed: ${item.error}）` : ''}`).join('\n');
-  return [
-    '# Project integration repair',
-    'The module translations are complete. Close only the cross-module behavior failures listed below.',
-    'The failure summaries are Host/evaluator observations; hidden test source and assertions are not available.',
-    'Module plan summaries:', plans || '（无可用计划摘要）',
-    'Observed failures:', failures || '- No failure case was supplied.',
-  ].join('\n');
-}
-
 const report = {
   generatedAt: new Date().toISOString(),
   dryRun,
   database,
   targetRoot,
-  topK, candidateRanks, ...(candidateRanksMapPath ? { candidateRanksMapPath, candidateRanksByModule: Object.fromEntries(candidateRanksByModule) } : {}),
+  topK, referenceSelectionMode: autoSelectReferences ? 'automatic-implementation-v2' : 'manual-ranks', candidateRanks: autoSelectReferences ? undefined : candidateRanks, ...(candidateRanksMapPath ? { candidateRanksMapPath, candidateRanksByModule: Object.fromEntries(candidateRanksByModule) } : {}),
   gates: {} as { compile: string; verification: string | undefined; hiddenSuite: string },
   target: {} as { repositoryId?: string; analysisRevision?: string; projectId?: string; project?: string; modules?: number; hierarchy?: unknown },
+  protocol: undefined as undefined | { path: string; taskIdentity: string; entries: number },
   modules: [] as ModuleReport[],
   integrationRepair: undefined as undefined | {
     requested: boolean;
-    feedbackCases: Array<{ taskId?: string; conditionId?: string; description: string; error?: string }>;
     writeFiles: string[];
     readOnlyFiles: string[];
     status?: WorkspaceTranslationRun['status'];
@@ -610,6 +582,9 @@ const report = {
     error?: string;
     plan?: WorkspaceTranslationPlan;
     agent?: WorkspaceTranslationRun['agent'];
+    run?: WorkspaceTranslationRun;
+    beforeSnapshot?: string;
+    afterSnapshot?: string;
   },
 };
 const snapshotRoot = resolve(`${outputPath}.snapshots`);
@@ -681,6 +656,7 @@ for (const row of assets) console.log(`  asset: ${row.displayName}`);
 // Match the workbench's configured model reranker. Without this injection the
 // offline driver would present raw hybrid Top4, not the choices a user sees.
 const cleanups: Array<() => Promise<unknown>> = [];
+let currentReferenceSelection: ImplementationReferenceSelection | undefined;
 const retrievalBackend = createHttpServer({ adapter: { adapt: async () => { throw new Error('Retrieval-only backend'); } } });
 await new Promise<void>(resolveListen => retrievalBackend.listen(0, '127.0.0.1', resolveListen));
 const retrievalEndpoint = `http://127.0.0.1:${(retrievalBackend.address() as AddressInfo).port}`;
@@ -688,10 +664,40 @@ cleanups.push(() => new Promise<void>((resolveClose, rejectClose) => retrievalBa
 
 let semanticEndpoint: string | undefined;
 const codeIntelligence = new CodeIntelligenceHost({
+  // A reviewed plan is already bounded by its explicit sourceFiles and is
+  // validated by the same host path as any model plan. Do not replace it with
+  // adaptive hierarchy analysis merely because Java has more than 120 files.
+  allowLargeAgentPlan: Boolean(argument('plan-from')),
   runtimeOptions: { ...codeIntelligenceRuntimeOptionsFromEnvironment(process.env, { allowInMemory: false }),
-    moduleCandidateReranker: new ConfiguredModelReranker(() => retrievalEndpoint, async () => undefined) },
+    moduleCandidateReranker: new ConfiguredModelReranker(() => retrievalEndpoint, async () => undefined, undefined, undefined,
+      autoSelectReferences ? {onSelection: selection => { currentReferenceSelection = selection; }} : undefined) },
   identityStore,
   planProject: async (scope) => {
+    const reviewedPath = argument('plan-from');
+    if (reviewedPath) {
+      // Publish the reviewed plan through the same Host validation/projection
+      // as the workbench. Merely using it in this script leaves an older
+      // same-revision summary authoritative during module retrieval.
+      const index = await codeIntelligence.structuralIndexForPath(targetRoot);
+      if (!index || index.repositoryId !== scope.repositoryId || index.analysisRevision !== scope.analysisRevision) {
+        throw new Error('Reviewed module plan does not match the active target index.');
+      }
+      const reviewed = JSON.parse(readFileSync(resolve(reviewedPath), 'utf8')) as ProjectModuleProposal;
+      const files = index.files.filter(file => file.projectId === scope.projectId);
+      const citation = `project:${scope.projectId}`;
+      const proposal: ProjectModuleProposal = { ...reviewed, ...scope, analysisHash: index.analysisHash,
+        modules: reviewed.modules.map(module => ({ ...module,
+          symbolKeys: (module.symbolKeys ?? []).filter(key => index.symbols.some(symbol => symbol.symbolKey === key && module.sourceFiles.includes(symbol.relativePath))),
+          evidenceIds: [citation, ...files.filter(file => module.sourceFiles.includes(file.relativePath)).map(file => `file:${file.fileId}`)],
+        })),
+        dependencies: reviewed.modules.flatMap(module => module.dependsOn.map(dependsOnModuleId =>
+          ({ moduleId: module.id, dependsOnModuleId, evidenceIds: [citation] }))),
+        unassignedFiles: files.filter(file => !reviewed.modules.some(module => module.sourceFiles.includes(file.relativePath)))
+          .map(file => ({ path: file.relativePath, reason: 'Reviewed plan assigns production source; this indexed file is build or supporting metadata.' })),
+      };
+      return { proposal, evidence: { ...scope, analysisHash: index.analysisHash, planHash: projectPlanHash(proposal),
+        evidenceIds: [...new Set(proposal.modules.flatMap(module => module.evidenceIds))] } };
+    }
     // The revision-scoped query port must exist before the service will plan; the
     // workbench starts it the same way before asking for a plan.
     semanticEndpoint = await codeIntelligence.startSemanticQueryServer({
@@ -750,12 +756,21 @@ try {
 
   console.log('\n=== target: module plan ===');
   const projectScope = { ...targetScope, projectId: chosen.projectId };
+  const reviewedPlanPath = argument('plan-from');
+  const reviewedProposal = reviewedPlanPath
+    ? JSON.parse(readFileSync(resolve(reviewedPlanPath), 'utf8')) as ProjectModuleProposal
+    : undefined;
+  if (reviewedProposal && (!Array.isArray(reviewedProposal.modules) || reviewedProposal.modules.length === 0 ||
+      reviewedProposal.modules.some(module => !module.id || !module.name || !Array.isArray(module.sourceFiles) ||
+        module.sourceFiles.some(file => !file || file.includes('..') || file.startsWith('/') || !existsSync(join(targetRoot, file)))))) {
+    throw new Error('--plan-from must contain reviewed modules with valid target-relative source files.');
+  }
   const [previousPlanRows] = await pool.query<Array<RowDataPacket & { updatedAt: string }>>(
     `SELECT updated_at AS updatedAt FROM module_artifacts
        WHERE repository_id=? AND analysis_revision=? AND module_artifact_id=? AND status='current'`,
     [targetScope.repositoryId, targetScope.analysisRevision, `project-job:${chosen.projectId}:code-understanding/v1`]);
   const previousPlanUpdatedAt = previousPlanRows[0]?.updatedAt ? String(previousPlanRows[0].updatedAt) : undefined;
-  if (!flag('reuse-plan') || !previousPlanUpdatedAt) await codeIntelligence.retryProject(projectScope, true);
+  if (reviewedProposal || !flag('reuse-plan') || !previousPlanUpdatedAt) await codeIntelligence.retryProject(projectScope, true);
   // retryProject schedules the analysis and returns; waitForProjects() can observe an
   // empty run set before the scheduled run registers itself, so the published record
   // is polled for instead of trusting a single idle() call.
@@ -778,8 +793,30 @@ try {
   if (!record || record.state !== 'ready' || !record.proposal) {
     throw new Error(`Module plan did not publish for ${chosen.projectId}: ${record?.error ?? record?.state ?? 'no artifact'}`);
   }
-  const proposal = record.proposal;
+  const proposal = reviewedProposal ?? record.proposal;
+  if (reviewedPlanPath) console.log(`  使用已审阅的固定模块规划：${reviewedPlanPath}`);
+  const requirementDirectory = join(targetRoot, 'requirements');
+  const requirementDocuments = existsSync(requirementDirectory)
+    ? readdirSync(requirementDirectory).filter(file => file.endsWith('.md')).sort()
+      .map(file => `## ${file}\n${readFileSync(join(requirementDirectory, file), 'utf8')}`).join('\n\n')
+    : '';
   const ordered = orderModules(proposal.modules ?? []);
+  const protocolIdentity = protocolTaskIdentity({ taskId: `${targetRoot}:${outputPath}:${targetScope.analysisRevision}`, outputPath, targetLanguage: targetLanguage(undefined, ordered.flatMap(module => module.sourceFiles)) });
+  const protocolPath = join(dirname(outputPath), 'global-protocol.json');
+  // A pipeline run owns its protocol sidecar. Never silently reuse a prior run's
+  // protocol, even when the module plan itself is reused.
+  await persistGlobalProtocol(protocolPath, emptyGlobalProtocol());
+  let globalProtocol = (await ensureGlobalProtocol(dirname(outputPath), protocolIdentity)).protocol;
+  if (modelApiKey) {
+    const plannedProtocol = await runIntegrationPlanAgent({
+      targetRoot, requirement: requirementDocuments || 'Read public target contracts and module skeleton.',
+      modules: ordered, taskIdentity: protocolIdentity,
+      model: { apiKey: modelApiKey, modelConfig: undefined },
+    });
+    if (plannedProtocol.warning) console.warn(`  ! Integration Plan Agent failed; continuing with empty protocol: ${plannedProtocol.warning.slice(0, 300)}`);
+    globalProtocol = mergeGlobalProtocol(globalProtocol, plannedProtocol.protocol, protocolIdentity);
+    await persistGlobalProtocol(protocolPath, globalProtocol);
+  }
   report.target = { repositoryId: targetScope.repositoryId, analysisRevision: targetScope.analysisRevision,
     projectId: chosen.projectId, project: chosen.displayName ?? chosen.projectId,
     modules: ordered.length, hierarchy: proposal.hierarchy };
@@ -798,6 +835,7 @@ try {
     hiddenSuite: keepProjectUntilEnd
       ? 'deferred: run project-level hidden evaluator after all modules, then restore the project skeleton'
       : 'skipped: each module is snapshotted and rolled back; evaluate module snapshots separately' };
+  report.protocol = { path: protocolPath, taskIdentity: protocolIdentity, entries: globalProtocol.invariants.length + globalProtocol.boundaries.length + globalProtocol.sharedContracts.length + globalProtocol.openQuestions.length };
   console.log(`\n  编译门槛: ${report.gates.compile}`);
   console.log(`  行为验证: ${report.gates.verification ?? '未配置（使用模块级 verifier；每个模块结束后恢复骨架）'}`);
 
@@ -809,7 +847,7 @@ try {
     const codexHome = await prepareDeepSeekCodexHome({
       explicitHome: process.env.ADAPTATION_CODEX_HOME?.trim() || undefined,
       apiKey: modelApiKey,
-      model: process.env.ADAPTATION_CODEX_MODEL?.trim() || 'deepseek-v4-pro',
+      model: workspaceModel,
       baseUrl: process.env.ADAPTATION_CODEX_BASE_URL?.trim() || process.env.DEEPSEEK_API_BASE?.trim(),
     });
     // Cleanup order is reverse registration: stop Codex before deleting its
@@ -820,8 +858,9 @@ try {
       compileCommand,
       ...(verification ? { verification } : {}),
       codexCommand: process.env.ADAPTATION_CODEX_COMMAND?.trim() || 'codex',
-      codexModel: process.env.ADAPTATION_CODEX_MODEL?.trim() || 'deepseek-v4-pro',
+      codexModel: workspaceModel,
       codexHome: codexHome.path,
+      environment: codexHome.environment,
       maxModelTurns: Number(process.env.ADAPTATION_WORKSPACE_MAX_TURNS ?? 4),
       timeoutMs: Number(process.env.ADAPTATION_WORKSPACE_TIMEOUT_MS ?? 1_800_000),
       // A verifier run consists of one test-generation attempt plus repair
@@ -845,25 +884,34 @@ try {
   for (const [index, module] of selected.entries()) {
     const started = Date.now();
     const language = targetLanguage(module.language, module.sourceFiles);
-    const requirement = [module.purpose ?? module.description, `目标语言：${language}`, `目标工程：${report.target.project}`]
+    const retrievalRequirement = [module.description, module.purpose, `目标语言：${language}`, `目标工程：${report.target.project}`]
       .filter(Boolean).join('\n');
+    const requirement = [retrievalRequirement,
+      requirementDocuments ? `Project requirements (implement this module's responsibilities and necessary dependencies):\n${requirementDocuments}` : '',
+    ].filter(Boolean).join('\n\n');
     const entry: ModuleReport = { moduleId: module.id, module: module.name, language, sourceFiles: module.sourceFiles,
       requirement, status: 'planned' };
     const selectedRanks = candidateRanksByModule.get(module.id) ?? candidateRanks;
     report.modules.push(entry);
     console.log(`\n[${index + 1}/${selected.length}] ${module.name}（${module.sourceFiles.length} 文件, ${language}）`);
     try {
+      // The target watcher may publish a new active revision after the previous
+      // module writes files. Resolve the current revision before retrieval so
+      // the host's stale-selection guard does not reject the next module.
+      const currentTargetScope = await codeIntelligence.activeScopeForPath(targetRoot);
       const target: ModuleTarget = {
         id: module.id, name: module.name, kind: 'module', path: module.sourceFiles[0]!, language,
         signature: module.coreApis?.[0] ?? module.name,
-        module: { repositoryId: targetScope.repositoryId, analysisRevision: targetScope.analysisRevision,
-          projectId: chosen.projectId, sourceFiles: module.sourceFiles, coreApis: module.coreApis ?? [], dependsOn: module.dependsOn ?? [] },
+        module: { repositoryId: currentTargetScope.repositoryId, analysisRevision: currentTargetScope.analysisRevision,
+          projectId: chosen.projectId, moduleId: module.id, purpose: module.purpose, description: module.description,
+          sourceFiles: module.sourceFiles, coreApis: module.coreApis ?? [], dependsOn: module.dependsOn ?? [] },
       };
       // The first search in a fresh process can exceed the store's 60s query budget
       // while the query embedding and module index warm up. Retry that specific
       // timeout once and record it, so the fragility stays visible instead of
       // looking like a missing candidate.
       let candidates: SearchCandidate[] = [];
+      currentReferenceSelection = undefined;
       const retrievalStart = Date.now();
       const reviewedReport = argument('retrieval-from');
       if (reviewedReport) {
@@ -873,10 +921,14 @@ try {
             saved.target.analysisRevision !== targetScope.analysisRevision || saved.topK !== topK ||
             reviewed?.requirement !== requirement || !reviewed.retrievalCandidates?.length) throw new Error('Reviewed Top4 does not match the current target, requirement and revision.');
         candidates = reviewed.retrievalCandidates;
+        if(autoSelectReferences) {
+          if(!reviewed.referenceSelection) throw new Error('Reviewed preview has no automatic reference decision');
+          entry.referenceSelection = reviewed.referenceSelection;
+        }
         console.log('  使用开发人员已审阅的同一份 Top4');
       } else for (let attempt = 0; ; attempt++) {
         try {
-          candidates = await codeIntelligence.searchHistoricalImplementations({ target, requirement, topK });
+          candidates = await codeIntelligence.searchHistoricalImplementations({ target, requirement: '', topK });
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -893,7 +945,15 @@ try {
         repository: candidate.repository, name: candidate.sourceModule?.name ?? candidate.title,
         moduleId: candidate.sourceModule?.moduleId, score: candidate.score.overall, language: candidate.language, summary: candidate.summary,
         sourceFiles: candidate.sourceModule?.sourceFiles ?? [], coreApis: candidate.sourceModule?.coreApis ?? [] }));
-      let selectedCandidates = selectedRanks.map(rank => candidates[rank - 1]).filter((candidate): candidate is SearchCandidate =>
+      if (autoSelectReferences && !entry.referenceSelection) {
+        const decision = currentReferenceSelection as ImplementationReferenceSelection | undefined;
+        if(!decision) throw new Error('Automatic selector did not return a valid decision; hybrid fallback must not choose references');
+        entry.referenceSelection = {...decision, candidateIds:candidates.slice(0,decision.selected.length).map(c=>c.id)};
+      }
+      if(entry.referenceSelection && (entry.referenceSelection.candidateIds.length!==entry.referenceSelection.selected.length ||
+        entry.referenceSelection.candidateIds.some((id,i)=>candidates[i]?.id!==id))) throw new Error('Automatic reference identities do not match retrieved candidates');
+      const referenceRanks = entry.referenceSelection ? entry.referenceSelection.candidateIds.map((_,i)=>i+1) : selectedRanks;
+      let selectedCandidates = referenceRanks.map(rank => candidates[rank - 1]).filter((candidate): candidate is SearchCandidate =>
         Boolean(candidate?.kind === 'module' && candidate.sourceModule?.sourceFiles?.length));
       let top = selectedCandidates[0];
       entry.selectedCandidates = selectedCandidates.map(candidate => ({ id: candidate.id, rank: candidates.indexOf(candidate) + 1,
@@ -917,8 +977,16 @@ try {
           : [];
         entry.relatedWriteFiles = relatedWriteFiles;
         let scope: Awaited<ReturnType<typeof prepareModuleTranslationScope>>;
+      const moduleProtocol = projectModuleProtocol(globalProtocol, {
+        moduleId: module.id,
+        moduleName: module.name,
+        relatedModules: module.dependsOn,
+        relatedInterfaces: module.coreApis,
+        sharedTypes: module.coreApis,
+        ownedFiles: module.sourceFiles,
+      });
         let historyView: Awaited<ReturnType<typeof codeIntelligence.createHistoryModulesView>> | undefined;
-        if (top && !dryRun) {
+        if (top) {
           try {
             historyView = await codeIntelligence.createHistoryModulesView({ workspaceRoot: targetRoot,
               candidates: selectedCandidates.map(candidate => ({
@@ -926,6 +994,7 @@ try {
                 projectId: candidate.sourceModule!.projectId, moduleId: candidate.sourceModule!.moduleId,
                 name: candidate.sourceModule!.name, language: candidate.language,
                 sourceFiles: candidate.sourceModule!.sourceFiles ?? [candidate.path],
+                preferredFiles: candidate.moduleMatch?.previewFiles,
                 relevanceTerms: [target.name, target.path, target.signature, ...(target.module?.sourceFiles ?? []),
                   ...(target.module?.coreApis ?? []), candidate.sourceModule!.name, candidate.sourceModule!.purpose ?? '',
                   ...(candidate.sourceModule!.coreApis ?? [])],
@@ -937,6 +1006,10 @@ try {
               view.moduleId === candidate.sourceModule!.moduleId && view.projectId === candidate.sourceModule!.projectId));
             top = selectedCandidates[0];
             entry.historyViewCandidates = historyView.candidates;
+            entry.historyViewFiles = [...historyView.files];
+            entry.historyViewBytes = historyView.files.reduce((sum, file) =>
+              sum + statSync(join(historyView.root, 'source', file)).size, 0);
+            entry.historyViewManifestHash = historyView.manifestHash;
             verifierSourceRoot = await mkdtemp(join(tmpdir(), 'forexplore-verifier-history-'));
             await cp(join(historyView.root, 'source'), verifierSourceRoot, { recursive: true });
             console.log(`  历史视图：${selectedCandidates.length} 模块，${historyView.files.length} 文件`);
@@ -949,8 +1022,8 @@ try {
           }
         }
         scope = top ? await prepareModuleTranslationScope({ workspaceRoot: targetRoot, target, candidates: selectedCandidates,
-          requirement, decisionNotes: '', relatedWriteFiles, ...(historyView ? { historyView } : {}) })
-          : await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '', relatedWriteFiles });
+          requirement, decisionNotes: entry.referenceSelection ? JSON.stringify({referenceEvidence:entry.referenceSelection.selected,missingResponsibilities:entry.referenceSelection.missingResponsibilities}) : '', relatedWriteFiles, moduleProtocol, ...(historyView ? { historyView } : {}) })
+          : await prepareDirectModuleTranslationScope({ workspaceRoot: targetRoot, target, requirement, decisionNotes: '', relatedWriteFiles, moduleProtocol });
       // Experiment hook, off by default. A full-project run already adds a
       // host-computed direct dependency closure to writeFiles. This opt-in only
       // widens the read inventory for diagnostics; it never widens writes.
@@ -998,9 +1071,7 @@ try {
       let lastProgress = '';
       while (!['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status) && Date.now() < deadline) {
         await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
-        const polled = await host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: `read-${index}`, action: 'read', runId: run.id });
-        if (polled.type !== 'WORKSPACE_TRANSLATION_RESULT' || !polled.run) throw new Error(`read failed: ${JSON.stringify(polled)}`);
-        run = polled.run;
+        run = await readWorkspaceRunWithRetry(host, run.id, `read-${index}`);
         activeRun = run;
         const progress = `${run.status} turns=${run.modelTurns} changes=${run.changes.length}${run.plan ? ` plan=${run.plan.steps.length}` : ''}`;
         if (progress !== lastProgress) { console.log(`    ${progress}`); lastProgress = progress; }
@@ -1019,6 +1090,18 @@ try {
       entry.changedPaths = [...new Set(run.changes.map((change) => change.path))];
       entry.agent = run.agent;
       entry.plan = run.plan;
+      if (run.plan?.protocolCandidates?.length) {
+        globalProtocol = mergeGlobalProtocol(globalProtocol, {
+          invariants: run.plan.protocolCandidates.map(candidate => ({
+            scope: candidate.scope?.length ? candidate.scope : [module.id],
+            rule: candidate.rule,
+            source: 'observed' as const,
+            status: 'proposed' as const,
+            note: [`topic=${candidate.topic}`, candidate.note].filter(Boolean).join('; '),
+          })),
+        }, protocolIdentity);
+        await persistGlobalProtocol(protocolPath, globalProtocol);
+      }
       // The runtime marks a run completed only after its host compile gate, but
       // keep the explicit check here so a verifier can never run on a record
       // with a missing or failed compilation.
@@ -1038,45 +1121,60 @@ try {
           return { sourceFiles: (source.sourceFiles ?? []).map(file => prefix ? `${prefix}/${file}` : file), coreApis: source.coreApis ?? [] };
         });
         const verificationTargetFiles = entry.writeFiles ?? module.sourceFiles;
-        const targetFileContents = Object.fromEntries(verificationTargetFiles.map((file) => {
-          try { return [file, readFileSync(join(targetRoot, file), 'utf8')]; }
-          catch { return [file, '']; }
-        }));
-        // When a module has a bounded dependency closure, include those files
-        // in API-to-file resolution as well. A function such as
-        // OrderStateMachine.Transition may be referenced by the Domain task
-        // while its declaration lives in the Policies module.
-        const mapping = buildModuleFunctionMapping({ ...module, sourceFiles: verificationTargetFiles }, { sourceFiles: sourceModules.flatMap(source => source.sourceFiles),
-          coreApis: sourceModules.flatMap(source => source.coreApis) }, targetFileContents);
-        // Indexers may expose an exported class as a core API. Coverage is
-        // method-based, so expand those target-only subjects before creating
-        // the requirement verifier input.
-        const expandedUnmatched = expandClassLevelFunctions(
-          mapping.unmatchedFunctions,
-          (path) => {
-            try { return readFileSync(join(targetRoot, path), 'utf8'); } catch { return undefined; }
-          },
-        );
-        // Assign even when only the signature changed (for example a
-        // qualified `Type.Method` name with no parameter list). Coverage
-        // matching depends on that normalization too.
-        mapping.unmatchedFunctions = expandedUnmatched;
+        const discoverCurrentMapping = () => {
+          const targetFileContents = Object.fromEntries(verificationTargetFiles.map((file) => {
+            try { return [file, readFileSync(join(targetRoot, file), 'utf8')]; }
+            catch { return [file, '']; }
+          }));
+          // When a module has a bounded dependency closure, include those files
+          // in API-to-file resolution as well. A function such as
+          // OrderStateMachine.Transition may be referenced by the Domain task
+          // while its declaration lives in the Policies module.
+          const discoveryFiles = new Set([...module.sourceFiles, ...run.changes.map(change => change.path)]);
+          const discoveredFunctions = discoverExecutableFunctions(Object.fromEntries(
+            Object.entries(targetFileContents).filter(([file]) => discoveryFiles.has(file)),
+          ));
+          const mapping = buildModuleFunctionMapping({ ...module, sourceFiles: verificationTargetFiles },
+            { sourceFiles: sourceModules.flatMap(source => source.sourceFiles), coreApis: sourceModules.flatMap(source => source.coreApis) },
+            targetFileContents, discoveredFunctions.length ? discoveredFunctions : undefined);
+          // Indexers may expose an exported class as a core API. Coverage is
+          // method-based, so expand those target-only subjects before creating
+          // the requirement verifier input.
+          const expandedUnmatched = expandClassLevelFunctions(
+            mapping.unmatchedFunctions,
+            (path) => {
+              try { return readFileSync(join(targetRoot, path), 'utf8'); } catch { return undefined; }
+            },
+          );
+          // Assign even when only the signature changed (for example a
+          // qualified `Type.Method` name with no parameter list). Coverage
+          // matching depends on that normalization too.
+          mapping.unmatchedFunctions = expandedUnmatched;
+          return mapping;
+        };
+        let mapping = discoverCurrentMapping();
         entry.functionMapping = mapping;
         console.log(`    函数映射：matched=${mapping.functions.length} unmatched=${mapping.unmatchedFunctions.length}`);
         for (const diagnostic of mapping.diagnostics.slice(0, 12)) {
           console.log(`      ! ${diagnostic.targetApi}: ${diagnostic.reason}`);
         }
-        const useTranslationVerification = mapping.functions.length > 0 && Boolean(verifierSourceRoot && top?.sourceModule);
+        let useTranslationVerification = mapping.functions.length > 0 && mapping.unmatchedFunctions.length === 0 && Boolean(verifierSourceRoot && top?.sourceModule);
         entry.verificationMode = useTranslationVerification ? 'translation-fidelity' : 'requirement';
-        const requirementFunctions = mapping.unmatchedFunctions.length > 0
-          ? mapping.unmatchedFunctions
-          : mapping.functions.map(({ target }) => target);
-        if (!useTranslationVerification && requirementFunctions.length === 0) {
+        let requirementFunctions = [...mapping.unmatchedFunctions, ...mapping.functions.map(({ target }) => target)];
+        if (!useTranslationVerification && requirementFunctions.length === 0 && mapping.nonExecutableFunctions.length > 0) {
+          // Interfaces, enums, and delegates are structural declarations. They
+          // cannot produce executable line coverage, so a passing compile and
+          // the host's contract checks are sufficient; do not send them into
+          // an Agent loop that can only return coverage-unavailable.
+          entry.verificationDisposition = 'not-applicable';
+          console.log(`    函数组验证：跳过（${mapping.nonExecutableFunctions.length} 个接口/枚举声明没有可执行函数体）`);
+        } else if (!useTranslationVerification && requirementFunctions.length === 0) {
           entry.translationVerification = {
             status: 'failure', reason: 'mapping-invalid',
             issue: { kind: 'translation', description: '目标模块没有可用于需求验证的函数清单。' },
             functions: [],
           };
+          entry.verificationDisposition = 'agent-uncertain';
           console.log('    函数组验证：跳过（目标模块没有可验证函数）');
         } else {
         const verificationHost = createAgentHost<SingleAgentFunctionGroupTerminalResult>({
@@ -1084,41 +1182,74 @@ try {
             apiKey: () => modelApiKey!,
             apiBase: process.env.DEEPSEEK_API_BASE,
             model: process.env.DEEPSEEK_MODEL,
+            maxOutputTokens: Number(process.env.TRANSLATION_VERIFIER_MAX_OUTPUT_TOKENS ?? 16_384),
+            requestRetry: {
+              maxAttempts: Number(process.env.TRANSLATION_VERIFIER_REQUEST_ATTEMPTS ?? 3),
+              delayMs: Number(process.env.TRANSLATION_VERIFIER_REQUEST_RETRY_DELAY_MS ?? 750),
+            },
           }),
           limits: {
-            maxDurationMs: Number(process.env.TRANSLATION_VERIFIER_MAX_DURATION_MS ?? 300_000),
-            maxTurns: Number(process.env.TRANSLATION_VERIFIER_MAX_TURNS ?? 32),
+            maxDurationMs: Number(process.env.TRANSLATION_VERIFIER_MAX_DURATION_MS ?? 600_000),
+            maxTurns: Number(process.env.TRANSLATION_VERIFIER_MAX_TURNS ?? 48),
+            // One module plus its dependency closure and generated tests can
+            // exceed the generic library's 250k-character cap even without
+            // diagnostic dumps. Keep this explicit and configurable while
+            // retaining the same time, turn, and tool-call budgets.
+            maxContextCharacters: Number(process.env.TRANSLATION_VERIFIER_MAX_CONTEXT_CHARACTERS ?? 1_500_000),
             // A verifier may need a compile/fix/re-run cycle.  Keep this
             // bounded, but leave enough room for one focused test file and
             // its diagnostics instead of cutting the Agent off mid-repair.
-            maxToolCalls: Number(process.env.TRANSLATION_VERIFIER_MAX_TOOL_CALLS ?? 160),
-            maxToolCallsPerTurn: 8,
+            maxToolCalls: Number(process.env.TRANSLATION_VERIFIER_MAX_TOOL_CALLS ?? 320),
+            maxToolCallsPerTurn: Number(process.env.TRANSLATION_VERIFIER_MAX_TOOL_CALLS_PER_TURN ?? 16),
+          },
+          traceLogger: event => {
+            // Save generated tests and real Host test facts once, without
+            // duplicating every model request or full historical source read.
+            if (!['tool.started', 'tool.completed', 'tool.failed', 'run.completed', 'run.failed'].includes(event.event)) return;
+            if (event.event.startsWith('tool.') && !['write_target_test', 'run_function_group_tests', 'finish_function_group', 'report_uncertain'].includes(String(event.toolName))) return;
+            entry.verifierEvidencePath ??= `${outputPath}.${index + 1}-verifier.jsonl`;
+            appendFileSync(entry.verifierEvidencePath, `${JSON.stringify(event)}\n`);
           },
         });
         const verifyFunctionGroup = createFunctionGroupVerifier(verificationHost);
-        const verificationInput: FunctionGroupVerificationInput | import('../services/translation-verifier/src/types.js').RequirementFunctionGroupVerificationInput = useTranslationVerification
+        const createVerificationInput = (): FunctionGroupVerificationInput | import('../services/translation-verifier/src/types.js').RequirementFunctionGroupVerificationInput => useTranslationVerification
           ? {
             schemaVersion: '3.1', sourceLanguage: top!.language, targetLanguage: language,
             sourceProjectPath: verifierSourceRoot!, targetProjectPath: targetRoot, requirement,
             functions: mapping.functions,
+            ...(entry.translationVerification?.testEvidence ? { testEvidence: entry.translationVerification.testEvidence } : {}),
+            moduleProtocol,
             ...(mapping.unmatchedFunctions.length ? { unmatchedFunctions: mapping.unmatchedFunctions } : {}),
           }
           : {
             schemaVersion: '3.1', mode: 'requirement', sourceLanguage: language, targetLanguage: language,
             targetProjectPath: targetRoot, requirement,
             functions: requirementFunctions.map((target) => ({ target })),
+            ...(entry.translationVerification?.testEvidence ? { testEvidence: entry.translationVerification.testEvidence } : {}),
+            moduleProtocol,
           };
-        const verificationStrategy = useTranslationVerification ? 'single-agent-function-group' as const : 'requirement-function-group' as const;
         const configuredAttempts = Number(process.env.TRANSLATION_VERIFIER_MAX_ATTEMPTS ?? 5);
         const maxAttempts = Number.isInteger(configuredAttempts) && configuredAttempts >= 1 ? Math.min(configuredAttempts, 5) : 5;
         for (let verifierAttempt = 1; verifierAttempt <= maxAttempts; verifierAttempt++) {
+          // A Translator repair can add or replace public methods. Never reuse its old subjects.
+          mapping = discoverCurrentMapping();
+          entry.functionMapping = mapping;
+          useTranslationVerification = mapping.functions.length > 0 && mapping.unmatchedFunctions.length === 0 && Boolean(verifierSourceRoot && top?.sourceModule);
+          entry.verificationMode = useTranslationVerification ? 'translation-fidelity' : 'requirement';
+          requirementFunctions = [...mapping.unmatchedFunctions, ...mapping.functions.map(({ target }) => target)];
+          const verificationInput = createVerificationInput();
+          const verificationStrategy = useTranslationVerification ? 'single-agent-function-group' as const : 'requirement-function-group' as const;
+          const verifierStartedAt = Date.now();
           try {
             entry.translationVerification = await verifyFunctionGroup(verificationInput, verificationStrategy, 'verify');
           } catch (error) {
             const description = error instanceof Error ? error.message : String(error);
             const classification = classifyVerifierFailure(description);
+            const retainedTestEvidence = (error as { testEvidence?: FunctionGroupVerificationResult['testEvidence'] })?.testEvidence
+              ?? verificationInput.testEvidence;
             entry.translationVerification = {
               status: 'failure', reason: classification.reason,
+              ...(retainedTestEvidence ? { testEvidence: retainedTestEvidence } : {}),
               issue: { kind: classification.kind, description: `函数组验证器未能完成：${description.slice(0, 600)}` },
               functions: verificationInput.functions.map((mapping) => ({
                 ...('source' in mapping ? { source: mapping.source } : {}),
@@ -1127,6 +1258,9 @@ try {
               })),
           };
           }
+          globalProtocol = recordProtocolChecks(globalProtocol, entry.translationVerification.protocolChecks, module.id);
+          await persistGlobalProtocol(protocolPath, globalProtocol);
+          entry.verifierMs = (entry.verifierMs ?? 0) + Date.now() - verifierStartedAt;
           (entry.translationVerificationAttempts ??= []).push(entry.translationVerification);
           entry.verificationDisposition = classifyVerifierDisposition(entry.translationVerification);
           console.log(`    #44 函数组验证第${verifierAttempt}轮：${entry.translationVerification.status}`);
@@ -1160,9 +1294,7 @@ try {
           const repairDeadline = Date.now() + Number(process.env.ADAPTATION_WORKSPACE_TIMEOUT_MS ?? 1_800_000);
           while (Date.now() < repairDeadline) {
             await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
-            const polled = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: `repair-read-${index}-${verifierAttempt}`, action: 'read', runId: run.id });
-            if (polled.type !== 'WORKSPACE_TRANSLATION_RESULT' || !polled.run) throw new Error(`repair read failed: ${JSON.stringify(polled)}`);
-            run = polled.run;
+            run = await readWorkspaceRunWithRetry(translation.host, run.id, `repair-read-${index}-${verifierAttempt}`);
             activeRun = run;
             if (['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) break;
           }
@@ -1179,6 +1311,8 @@ try {
         entry.status = run.status === 'completed' ? 'completed' : 'failed';
         entry.turns = run.modelTurns;
         entry.acceptance = run.acceptance;
+        if (entry.translationVerification?.testEvidence?.failures.some(item => item.status === 'unresolved')) entry.acceptance = 'compilation-only';
+        else if (entry.translationVerification?.status === 'success') entry.acceptance = 'behavior-verified';
         entry.changedPaths = [...new Set(run.changes.map((change) => change.path))];
         entry.agent = run.agent;
         entry.plan = run.plan;
@@ -1197,7 +1331,7 @@ try {
         for (const line of entry.events.slice(-10)) console.log(`      ${line.slice(0, 200)}`);
       }
       entry.wallMs = Date.now() - started;
-      console.log(`  ${entry.status === 'completed' ? '✓' : '✗'} ${entry.status} turns=${run.modelTurns} acceptance=${run.acceptance ?? '-'} ` +
+      console.log(`  ${entry.status === 'completed' ? '✓' : '✗'} ${entry.status} turns=${run.modelTurns} acceptance=${entry.acceptance ?? '-'} ` +
         `files=${entry.changedPaths.join(',')} ${(entry.wallMs / 1000).toFixed(0)}s`);
       } finally {
         // Preserve the translated implementation before restoring the shared
@@ -1289,6 +1423,9 @@ try {
       entry.wallMs = Date.now() - started;
       console.log(`  ✗ ${entry.error.slice(0, 240)}`);
     }
+    // Preserve completed module evidence if a later model run is interrupted.
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`);
     if (stopAfterRollbackFailure) {
       console.log('  ⏹ 模块 snapshot/回滚未能确认，停止后续模块以避免污染。');
       break;
@@ -1296,22 +1433,15 @@ try {
   }
   if (integrationRepair) {
     const integrationStarted = Date.now();
-    const integrationCases = readIntegrationFailureCases(integrationFeedbackPath, report.modules);
-    const affected = integrationAffectedModules(integrationCases, selected);
-    const affectedIds = new Set(affected.map((module) => module.id));
-    const moduleEntries = report.modules.filter((entry) => affectedIds.has(entry.moduleId));
-    const explicitPaths = integrationCases.flatMap((item) => {
-      const matches = `${item.description} ${item.error ?? ''}`.match(/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:cs|java|kt|ts|tsx|js|py|go|rs)/g) ?? [];
-      return matches.map((path) => path.replaceAll('\\', '/'));
-    });
-    const writeFiles = [...new Set([
-      ...moduleEntries.flatMap((entry) => [...(entry.writeFiles ?? []), ...(entry.relatedWriteFiles ?? [])]),
-      ...explicitPaths.filter((path) => selected.some((module) => module.sourceFiles.includes(path))),
-    ])].filter((path) => existsSync(targetFilePath(targetRoot, path)));
-    const readOnlyFiles = [...new Set(selected.flatMap((module) => module.sourceFiles))].filter((path) => existsSync(targetFilePath(targetRoot, path)));
+    const integrationContext = await prepareProjectIntegrationContext(targetRoot, report.modules);
+    // Integration is deliberately proactive. It runs after all modules, even
+    // when no module verifier reported a production defect, because the point
+    // is to close call chains that local module scopes cannot see. The write
+    // set is the complete production source inventory; hidden tests and their
+    // evaluator output are never used to derive it.
+    const { writeFiles, readOnlyFiles } = integrationContext;
     report.integrationRepair = {
       requested: true,
-      feedbackCases: integrationCases,
       writeFiles,
       readOnlyFiles,
       wallMs: 0,
@@ -1320,19 +1450,21 @@ try {
       report.integrationRepair.error = '--integration-repair 需要 --keep-project-until-end，以便在统一项目状态上执行。';
     } else if (!translation) {
       report.integrationRepair.error = '翻译运行时未启动，无法执行项目集成修复。';
-    } else if (integrationCases.length === 0) {
-      report.integrationRepair.error = '没有 Host/evaluator 失败摘要，跳过项目集成修复。';
     } else if (writeFiles.length === 0) {
-      report.integrationRepair.error = '失败摘要无法映射到任何宿主授权的生产文件。';
+      report.integrationRepair.error = '项目没有可由宿主授权的生产源文件。';
     } else {
       try {
-        const integrationLanguage = targetLanguage(selected[0]?.language, readOnlyFiles);
+        report.integrationRepair.beforeSnapshot = `${outputPath}.before-integration`;
+        await captureProjectSources(report.integrationRepair.beforeSnapshot, integrationContext);
+        const integrationLanguage = targetLanguage(selected[0]?.language, writeFiles);
         const scope = await prepareIntegrationTranslationScope({
           workspaceRoot: targetRoot,
           targetLanguage: integrationLanguage,
           writeFiles,
           readOnlyFiles,
-          requirement: integrationFailureSummary(integrationCases, report.modules),
+          requirement: integrationContext.requirement,
+          context: integrationContext.context,
+          globalProtocol,
         });
         const moduleScopeId = translation.host.rememberModuleScope(scope);
         const described = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-describe', action: 'describe', moduleScopeId });
@@ -1343,17 +1475,25 @@ try {
         let run = startedRun.run;
         report.integrationRepair.runId = run.id;
         const deadline = Date.now() + Number(process.env.ADAPTATION_WORKSPACE_TIMEOUT_MS ?? 1_800_000);
+        let lastProgress = '';
         while (!['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status) && Date.now() < deadline) {
           await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
-          const polled = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-read', action: 'read', runId: run.id });
-          if (polled.type !== 'WORKSPACE_TRANSLATION_RESULT' || !polled.run) throw new Error(`integration read failed: ${JSON.stringify(polled)}`);
-          run = polled.run;
-          console.log(`    integration ${run.status} turns=${run.modelTurns} changes=${run.changes.length}`);
+          run = await readWorkspaceRunWithRetry(translation.host, run.id, 'integration-read');
+          const progress = `integration ${run.status} turns=${run.modelTurns} changes=${run.changes.length}`;
+          if (lastProgress !== progress) { console.log(`    ${progress}`); lastProgress = progress; }
+        }
+        if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) {
+          const cancelled = await translation.host.handle({ type: 'WORKSPACE_TRANSLATION', requestId: 'integration-cancel', action: 'cancel', runId: run.id });
+          if (cancelled.type !== 'WORKSPACE_TRANSLATION_RESULT' || !cancelled.run) throw new Error(`integration cancel failed: ${JSON.stringify(cancelled)}`);
+          run = cancelled.run;
         }
         report.integrationRepair.status = run.status;
         report.integrationRepair.changedPaths = [...new Set(run.changes.map((change) => change.path))];
         report.integrationRepair.plan = run.plan;
         report.integrationRepair.agent = run.agent;
+        report.integrationRepair.run = run;
+        report.integrationRepair.afterSnapshot = `${outputPath}.completed-project`;
+        await captureProjectSources(report.integrationRepair.afterSnapshot, await prepareProjectIntegrationContext(targetRoot));
         if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) {
           report.integrationRepair.error = `项目集成修复超时：${run.status}`;
         } else if (run.error) {
@@ -1380,4 +1520,17 @@ const completed = report.modules.filter((module) => module.status === 'completed
 const failed = report.modules.filter((module) => module.status === 'failed').length;
 console.log(`\n模块 ${report.modules.length} 个：completed ${completed}，failed ${failed}，其余为 dry-run/跳过`);
 console.log(`报告: ${outputPath}`);
-if (failed) process.exitCode = 1;
+if (failed || (integrationRepair && !dryRun && report.integrationRepair?.status !== 'completed')) process.exitCode = 1;
+
+async function captureProjectSources(directory: string, context: { writeFiles: string[]; readOnlyFiles: string[] }): Promise<void> {
+  await mkdir(directory, { recursive: true });
+  const hashes: Record<string, string> = {};
+  for (const file of [...new Set([...context.writeFiles, ...context.readOnlyFiles])]) {
+    const source = targetFilePath(targetRoot, file);
+    const destination = join(directory, file);
+    await mkdir(dirname(destination), { recursive: true });
+    await cp(source, destination);
+    hashes[file] = createHash('sha256').update(readFileSync(destination)).digest('hex');
+  }
+  await writeFile(join(directory, 'snapshot-manifest.json'), `${JSON.stringify({ generatedAt: new Date().toISOString(), files: hashes }, null, 2)}\n`);
+}

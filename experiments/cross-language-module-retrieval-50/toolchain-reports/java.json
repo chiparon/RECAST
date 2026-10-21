@@ -1,0 +1,167 @@
+[
+  {
+    "caseId": "case-036",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-036",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/Views.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-037",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-037",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/DisplayTemplateAdministrationContract.java",
+      "src/main/java/parallelmodule/DisplayTemplateAdministration.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-038",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-038",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/ExtensionPluginContractsContract.java",
+      "src/main/java/parallelmodule/ExtensionPluginContracts.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-039",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-039",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/ExtensionMarketplaceFeedContract.java",
+      "src/main/java/parallelmodule/ExtensionMarketplaceFeed.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-040",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-040",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/CommerceSecurityServicesContract.java",
+      "src/main/java/parallelmodule/CommerceSecurityServices.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-041",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-041",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/Views.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-042",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-042",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/MessagingProviderAdministrationContract.java",
+      "src/main/java/parallelmodule/MessagingProviderAdministration.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-043",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-043",
+      "src/main/java/parallelmodule/Models.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-044",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-044",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/Views.java"
+    ],
+    "output": ""
+  },
+  {
+    "caseId": "case-045",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/share/recast/toolchains/jdk-21.0.12.1+1/bin/javac",
+      "-encoding",
+      "UTF-8",
+      "--release",
+      "17",
+      "-d",
+      "/tmp/recast-skeleton-compile-08dpqbc0/case-045",
+      "src/main/java/parallelmodule/Models.java",
+      "src/main/java/parallelmodule/InventoryRestockSubscriptionsContract.java",
+      "src/main/java/parallelmodule/InventoryRestockSubscriptions.java"
+    ],
+    "output": ""
+  }
+]

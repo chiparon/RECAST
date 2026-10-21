@@ -177,10 +177,11 @@ try {
       const files = indexModuleHierarchy(record.proposal.modules).sourceFiles(id).files;
       if (!files.length) throw new Error(`Selected module has no source manifest: ${id}`);
       const project = await store.getProject({ repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision }, record.projectId);
-      const requirement = [module.purpose ?? module.description, `目标语言：${selection.language}`, `目标工程：${project?.displayName ?? repository.displayName}`].filter(Boolean).join('\n');
+      const requirement = [module.description, module.purpose, `目标语言：${selection.language}`, `目标工程：${project?.displayName ?? repository.displayName}`].filter(Boolean).join('\n');
       const target: ModuleTarget = { id, kind: 'module', name: module.name, language: selection.language as ModuleTarget['language'],
         path: files[0]!, signature: module.coreApis?.[0] ?? module.name,
         module: { repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision, projectId: record.projectId,
+          moduleId: module.id, purpose: module.purpose, description: module.description,
           sourceFiles: files, coreApis: module.coreApis ?? [], dependsOn: module.dependsOn ?? [] } };
       const fullQuery = [target.name, target.signature, target.documentation, requirement, ...(target.module?.coreApis ?? [])].filter(Boolean).join('\n');
       tasks.push({ language: selection.language, module: module.name, moduleId: id, fullQuery,

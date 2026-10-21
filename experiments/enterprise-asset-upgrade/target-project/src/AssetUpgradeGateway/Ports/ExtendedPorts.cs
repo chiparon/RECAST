@@ -103,25 +103,3 @@ public sealed record DispatchBatch(string TenantId, IReadOnlyList<EventEnvelope>
 public sealed record OrderCommand(string TenantId, string ActorId, string OrderId, string CommandId, string Operation);
 
 public sealed record OrderCommitReceipt(string OrderId, string ReservationId, string CommitId, DateTimeOffset CommittedAt);
-
-/// <summary>
-/// Adapter-facing flow persistence boundary. AppendFlowAsync performs the single
-/// atomic tree insert (implementations wrap it in <see cref="ITransactionBoundary"/>),
-/// and FindFlowAsync is the tenant-scoped lookup translating queue/prefix routing.
-/// Routing itself resolves through the existing <see cref="IPluginRegistry"/>.
-/// </summary>
-public interface IWorkflowFlowStore
-{
-    Task AppendFlowAsync(IReadOnlyList<WorkflowFlowEntry> entries, CancellationToken cancellationToken);
-    Task<IReadOnlyList<WorkflowFlowEntry>> FindFlowAsync(string tenantId, string rootEventId, CancellationToken cancellationToken);
-}
-
-/// <summary>
-/// Tenant-scoped publish-receipt store mirroring <see cref="IDispatchAttemptStore"/>.
-/// Persists the outcome of publishing, including whether a consumer stopped processing.
-/// </summary>
-public interface IEventPublishReceiptStore
-{
-    Task AppendAsync(EventPublishReceipt receipt, CancellationToken cancellationToken);
-    Task<IReadOnlyList<EventPublishReceipt>> FindAsync(string tenantId, string eventId, CancellationToken cancellationToken);
-}

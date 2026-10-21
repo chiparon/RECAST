@@ -190,6 +190,8 @@ export function ModuleWorkspace({
           onSelect={(...args) => { setQuery(''); setStatus('all'); onSelectProject(...args); }}
           onRefresh={(id) => onRefreshRepository?.(id)} onAdd={(value) => onAddTarget?.(value)} onOpenSettings={onOpenSettings} /> : null}
 
+        <ProjectModelStatus workspace={workspace} onRetry={onRetry} />
+
         {!onSelectProject && mode === 'history' && explorer.history.length > 1 ? (
           <label className="history-picker">
             <span>参考工程</span>
@@ -591,10 +593,10 @@ function ProjectUnderstandingOverview({
         <div>
           <span className="section-kicker">工程理解结果</span>
           <h2>{workspace.name}</h2>
-          <p>{workspace.analysis?.proposal?.summary ?? '系统已将结构事实组织为可检索的模块与依赖证据。'}</p>
+          <p>{workspace.analysis?.modelingSkippedReason ?? workspace.analysis?.proposal?.summary ?? '系统已将结构事实组织为可检索的模块与依赖证据。'}</p>
         </div>
         <span className={`project-result-state${workspace.analysis?.state === 'ready' ? ' is-ready' : ''}`}>
-          <i />{analysisState(workspace.analysis?.state)}
+          <i />{workspace.analysis?.modelingSkippedReason ? '无需建模' : analysisState(workspace.analysis?.state)}
         </span>
       </header>
       <HistoryStats workspace={workspace} />
@@ -605,6 +607,7 @@ function ProjectUnderstandingOverview({
 }
 
 function AnalysisPipeline({ workspace }: { workspace: ModuleWorkspacePresentation }) {
+  if (workspace.analysis?.modelingSkippedReason) return null;
   const hierarchy = workspace.analysis?.hierarchy;
   const projectionReady = workspace.analysis?.projection === 'ready';
   const steps = [
@@ -649,6 +652,29 @@ function AnalysisPipeline({ workspace }: { workspace: ModuleWorkspacePresentatio
   );
 }
 
+function ProjectModelStatus({ workspace, onRetry }: {
+  workspace: ModuleWorkspacePresentation;
+  onRetry?: ModuleWorkspaceProps['onRetry'];
+}) {
+  const { analysis } = workspace;
+  if (!workspace.repositoryId || !workspace.revision || !workspace.projectId || analysis?.state === 'stale' ||
+      analysis?.modelingSkippedReason || (analysis?.state === 'ready' && analysis.projection === 'ready')) return null;
+  const busy = ['queued', 'analyzing', 'validating'].includes(analysis?.state ?? '');
+  const failed = analysis?.state === 'failed' || analysis?.projection === 'failed';
+  const message = analysis?.state === 'queued' ? '模块建模已排队…'
+    : analysis?.state === 'analyzing' ? '正在分析功能模块，完成后自动更新…'
+    : analysis?.state === 'validating' ? '正在校验模块结果…'
+    : failed ? analysis?.error || '模块建模未完成，请重试。'
+    : analysis?.state === 'ready' ? '模块已生成，等待同步检索。'
+    : '文件索引已就绪，模块建模尚未开始。配置模型 Key 后会自动继续。';
+  return <div className={`project-model-status${failed ? ' is-error' : ''}`} role="status" aria-live="polite">
+    <span>{busy ? <RefreshCw size={13} className="is-spinning" /> : <Sparkles size={13} />}{message}</span>
+    {!busy && onRetry ? <button type="button" className="secondary-action" onClick={() => onRetry({
+      repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId!,
+    }, false)}>{failed ? '重试建模 / 同步' : analysis?.state === 'ready' ? '同步检索' : '开始模块建模'}</button> : null}
+  </div>;
+}
+
 function ProjectEngineeringDetails({
   workspace,
   onRetry,
@@ -669,11 +695,11 @@ function ProjectEngineeringDetails({
       </summary>
       <div className="project-engineering-body">
         <dl className="project-engineering-status">
-          <div><dt>模块来源</dt><dd>{workspace.analysis?.modeling?.strategy === 'structural' ? '离线结构分析' : 'Agent 分析'}</dd></div>
-          <div><dt>检索同步</dt><dd>{projectionLabel(workspace.analysis?.projection)}</dd></div>
+          <div><dt>模块来源</dt><dd>{workspace.analysis?.modelingSkippedReason ? '无需模型分析' : workspace.analysis?.modeling?.strategy === 'structural' ? '离线结构分析' : 'Agent 分析'}</dd></div>
+          <div><dt>检索同步</dt><dd>{workspace.analysis?.modelingSkippedReason ? '沿用基础索引' : projectionLabel(workspace.analysis?.projection)}</dd></div>
           <div><dt>文件归属</dt><dd>{workspace.analysis?.coverage
             ? `${workspace.analysis.coverage.assigned} / ${workspace.analysis.coverage.total}` : '暂无统计'}</dd></div>
-          <div><dt>模块摘要</dt><dd>{workspace.summary.exists && !workspace.summary.error ? '已生成' : workspace.summary.error ? '读取失败' : '未生成'}</dd></div>
+          <div><dt>模块摘要</dt><dd>{workspace.analysis?.modelingSkippedReason ? '不适用' : workspace.summary.exists && !workspace.summary.error ? '已生成' : workspace.summary.error ? '读取失败' : '未生成'}</dd></div>
         </dl>
         {workspace.analysis?.error ? <p className="project-engineering-alert" role="alert">{workspace.analysis.error}</p> : null}
         {workspace.analysis?.state === 'stale' ? <p className="project-engineering-alert">正在浏览历史版本，以下结果不代表当前代码。</p> : null}
@@ -702,7 +728,7 @@ function ProjectEngineeringDetails({
           </li>)}</ul>
         </details>
         <details><summary>版本信息</summary><code>{workspace.repositoryId} / {workspace.projectId} / {workspace.revision}</code></details>
-        {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' ? (
+        {workspace.repositoryId && workspace.revision && workspace.analysis?.state !== 'stale' && !workspace.analysis?.modelingSkippedReason ? (
           <div className="project-actions">
             <button type="button" className="secondary-action" disabled={analyzing || !onRetry}
               onClick={() => onRetry?.({ repositoryId: workspace.repositoryId!, analysisRevision: workspace.revision!, projectId: workspace.projectId! }, false)}>

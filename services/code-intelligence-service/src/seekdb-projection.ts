@@ -235,7 +235,9 @@ export class SeekDbProjection implements SearchProjection {
     let documents: SearchDocumentRecord[] = [];
     let bytes = 0;
     let completed = 0;
+    let filesCompleted = 0;
     let batch = 0;
+    onProgress?.({ stage: 'search-projection', completed, filesCompleted, filesTotal: index.files.length });
     const flush = async () => {
       if (!documents.length) return;
       batch++;
@@ -248,7 +250,7 @@ export class SeekDbProjection implements SearchProjection {
           `(${completed} documents saved, ${documents.length} in batch): ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
       completed += documents.length;
-      onProgress?.({ stage: 'search-projection', completed });
+      onProgress?.({ stage: 'search-projection', completed, filesCompleted, filesTotal: index.files.length });
       documents = []; bytes = 0;
     };
     const append = async (document: SearchDocumentRecord) => {
@@ -266,8 +268,10 @@ export class SeekDbProjection implements SearchProjection {
       if (text !== null && FRAGMENT_DOCUMENTS_ENABLED) {
         for (const document of sourceDocuments(index, file.relativePath, text, symbols)) await append(document);
       }
+      filesCompleted++;
     }
     await flush();
+    onProgress?.({ stage: 'search-projection', completed, filesCompleted, filesTotal: index.files.length });
   }
 
   async project(

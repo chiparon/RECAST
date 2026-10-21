@@ -1,17 +1,26 @@
 namespace AssetUpgradeGateway;
 
+using AssetUpgradeGateway.Application;
+using AssetUpgradeGateway.Policies;
+
+/// <summary>
+/// Public gateway entry point for scheduled retry reconciliation. Only events
+/// that are still retryable are considered, the caller actor must be authorized
+/// for the owning tenant of each event, and every run emits a traceable audit
+/// record so a failed run can be retried safely.
+/// </summary>
 public sealed class ReconciliationService
 {
     private const string RunAction = "reconciliation.run";
-    private const string ForbiddenAction = "reconciliation.forbidden";
-    private const int MaxBackoffSeconds = 60;
-    private const int MaxBackoffShift = 6;
+    private const string EventAction = "reconciliation.event";
+    private const string RunSubject = "reconciliation";
 
     private readonly ITenantAuthorizer authorizer;
     private readonly IRetryableEventStore eventStore;
     private readonly IWorkflowDispatcher dispatcher;
     private readonly IIdempotencyStore idempotency;
     private readonly IAuditSink audit;
+    private readonly IRetryPolicy retry;
 
     public ReconciliationService(
         ITenantAuthorizer authorizer,
@@ -25,104 +34,124 @@ public sealed class ReconciliationService
         this.dispatcher = dispatcher;
         this.idempotency = idempotency;
         this.audit = audit;
+        this.retry = new ExponentialRetryPolicy();
     }
 
-    /// <summary>
-    /// Scheduled reconciliation entry point. Mirrors the historical worker
-    /// <c>RunAsync</c> launcher while carrying the per-run unit of work directly
-    /// on the entry point: it re-drives due retryable events tenant-by-tenant,
-    /// marks a delivery complete exactly once, reschedules retryable events with
-    /// clamped exponential backoff and always writes a traceable run summary.
-    /// Every invocation is independently re-runnable.
-    /// </summary>
     public async Task<ReconciliationReport> RunAsync(
         string actorId,
         DateTimeOffset now,
         int limit,
         CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var effectiveLimit = limit <= 0 ? int.MaxValue : limit;
-        var due = await eventStore
-            .FindDueAsync(now, effectiveLimit, cancellationToken)
-            .ConfigureAwait(false);
-
         var examined = 0;
         var retried = 0;
         var succeeded = 0;
         var failed = 0;
-        var eventIds = new List<string>();
+        var processed = new List<string>();
+        var denied = 0;
+        string? runTenant = null;
+        var runStatus = "Completed";
 
-        foreach (var pending in due)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            var due = await eventStore.FindDueAsync(now, limit, cancellationToken).ConfigureAwait(false)
+                ?? Array.Empty<PendingEvent>();
 
-            examined++;
-            eventIds.Add(pending.Event.EventId);
+            foreach (var pending in due)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
 
-            if (!authorizer.CanAccess(pending.Event.TenantId, actorId))
-            {
-                audit.Record(new AuditRecord(
-                    pending.Event.TenantId,
-                    pending.Event.EventId,
-                    ForbiddenAction,
-                    "forbidden",
-                    now));
-                continue;
-            }
+                var assetEvent = pending?.Event;
+                if (assetEvent is null || !pending!.Retryable)
+                {
+                    continue;
+                }
 
-            if (!pending.Retryable)
-            {
-                continue;
-            }
+                // Tenant isolation: only an actor that can access the owning tenant
+                // may drive (or even observe) the event.
+                if (!authorizer.CanAccess(assetEvent.TenantId, actorId))
+                {
+                    denied++;
+                    continue;
+                }
 
-            if (idempotency.HasCompleted(pending.Event.TenantId, pending.Event.EventId))
-            {
-                continue;
-            }
+                runTenant ??= assetEvent.TenantId;
+                examined++;
+                var eventId = assetEvent.EventId;
 
-            DeliveryResult outcome;
-            try
-            {
-                outcome = await dispatcher
-                    .DispatchAsync(pending.Event, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception)
-            {
-                outcome = new DeliveryResult(false, DeliveryStatus.Retryable);
-            }
+                // Serialize the per-event check-perform-mark critical section so
+                // overlapping reconciliation runs cannot dispatch the same event twice.
+                using var gate = await OperationSerialization.AcquireAsync(assetEvent.TenantId, "reconciliation:" + eventId, cancellationToken).ConfigureAwait(false);
 
-            if (outcome.Status == DeliveryStatus.Accepted)
-            {
-                idempotency.MarkCompleted(pending.Event.TenantId, pending.Event.EventId);
-                succeeded++;
-            }
-            else if (outcome.Status == DeliveryStatus.Retryable)
-            {
+                if (idempotency.HasCompleted(assetEvent.TenantId, eventId))
+                {
+                    // A previous run already completed this event: safe to skip.
+                    processed.Add(eventId);
+                    continue;
+                }
+
+                DeliveryResult delivery;
+                try
+                {
+                    delivery = await dispatcher.DispatchAsync(assetEvent, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    delivery = new DeliveryResult(false, DeliveryStatus.Retryable, exception.Message);
+                }
+
+                processed.Add(eventId);
+
+                if (delivery.Status == DeliveryStatus.Accepted)
+                {
+                    // The required audit runs before the completion marker: if the audit
+                    // write fails the event stays retryable and no completion is recorded,
+                    // so the reconciliation can be retried safely.
+                    audit.Record(new AuditRecord(assetEvent.TenantId, eventId, EventAction, "Completed", now));
+                    idempotency.MarkCompleted(assetEvent.TenantId, eventId);
+                    succeeded++;
+                    continue;
+                }
+
                 var attempts = pending.Attempts + 1;
-                var backoffSeconds = Math.Min(MaxBackoffSeconds, 1 << Math.Min(attempts, MaxBackoffShift));
-                var retryAfter = now + TimeSpan.FromSeconds(backoffSeconds);
-                await eventStore
-                    .MarkRetryableAsync(pending, retryAfter, cancellationToken)
-                    .ConfigureAwait(false);
-                retried++;
+                if (retry.CanRetry(attempts))
+                {
+                    var next = retry.NextAttempt(now, attempts);
+                    await eventStore.MarkRetryableAsync(
+                        pending with { Attempts = attempts, Retryable = true },
+                        next,
+                        cancellationToken).ConfigureAwait(false);
+                    retried++;
+                    audit.Record(new AuditRecord(assetEvent.TenantId, eventId, EventAction, "RetryPending", now));
+                }
+                else
+                {
+                    await eventStore.MarkRetryableAsync(
+                        pending with { Attempts = attempts, Retryable = false },
+                        now,
+                        cancellationToken).ConfigureAwait(false);
+                    failed++;
+                    audit.Record(new AuditRecord(assetEvent.TenantId, eventId, EventAction, "Failed", now));
+                }
             }
-            else
-            {
-                failed++;
-            }
+
+            runStatus = examined == 0 && denied > 0 ? "Unauthorized" : "Completed";
+            return new ReconciliationReport(examined, retried, succeeded, failed, processed);
         }
-
-        var summary =
-            $"examined={examined};retried={retried};succeeded={succeeded};failed={failed};events={string.Join(",", eventIds)}";
-        audit.Record(new AuditRecord("*", actorId, RunAction, summary, now));
-
-        return new ReconciliationReport(examined, retried, succeeded, failed, eventIds);
+        catch (Exception)
+        {
+            runStatus = "Failed";
+            throw;
+        }
+        finally
+        {
+            // Every run is traceable, even when nothing was eligible, the actor was
+            // unauthorized, or the run failed part way through.
+            audit.Record(new AuditRecord(runTenant ?? string.Empty, RunSubject, RunAction, runStatus, now));
+        }
     }
 }

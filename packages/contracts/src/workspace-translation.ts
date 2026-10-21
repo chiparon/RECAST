@@ -230,6 +230,10 @@ export interface WorkspaceTranslationRun {
       readFiles?: string[];
       /** Bounded command metadata from Codex JSONL; command output is omitted. */
       commands?: Array<{ command: string; exitCode?: number | null }>;
+      /** Fixed patch entry results. Patch source and environment are never recorded. */
+      patchTool?: { attempts: number; failures: number; durationMs: number; errors: string[] };
+      /** Host-checked Analyzer excerpts handed to this stage; stale sources require fresh reads. */
+      analysisEvidence?: { entries: number; stalePaths: string[]; excerptChars: number };
       /** Bounded Analyzer final output retained for invalid-plan diagnosis. */
       analyzerOutput?: string;
       /** Final coding-agent report; observed commands/compilation remain the facts. */

@@ -2,7 +2,6 @@
   "folders": [
     { "path": "target-project", "name": "asset-upgrade-target" },
     { "path": "source-repositories/apache-camel", "name": "history-apache-camel" },
-    { "path": "source-repositories/flowable-engine", "name": "history-flowable" },
     { "path": "source-repositories/keycloak", "name": "history-keycloak" },
     { "path": "source-repositories/bullmq", "name": "history-bullmq" },
     { "path": "source-repositories/apscheduler", "name": "history-apscheduler" },
@@ -15,7 +14,6 @@
     ],
     "forexplore.repositoryPaths": [
       "${workspaceFolder:history-apache-camel}",
-      "${workspaceFolder:history-flowable}",
       "${workspaceFolder:history-keycloak}",
       "${workspaceFolder:history-bullmq}",
       "${workspaceFolder:history-apscheduler}",

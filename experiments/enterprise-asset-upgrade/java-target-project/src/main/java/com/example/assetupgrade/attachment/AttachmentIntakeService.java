@@ -1,8 +1,23 @@
 package com.example.assetupgrade.attachment;
 
+import com.example.assetupgrade.common.ActorId;
+import com.example.assetupgrade.common.CorrelationId;
+import com.example.assetupgrade.common.TenantId;
+
 /**
- * Skeleton seam for AttachmentIntakeService.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Application-facing boundary for attachment intake and release.
+ *
+ * <p>{@link #intake(AttachmentIntakeCommand)} validates, quarantines, scans and (when the
+ * scan is clean) releases an attachment. {@link #release(TenantId, ActorId, String,
+ * CorrelationId)} releases an already cleanly scanned attachment and is idempotent. Neither
+ * operation ever produces an approval event for an unscanned, rejected, cross-tenant,
+ * unsafe, oversized or signature-mismatched attachment.</p>
  */
-public interface AttachmentIntakeService { AttachmentIntakeResult intake(AttachmentIntakeCommand command); AttachmentIntakeResult release(com.example.assetupgrade.common.TenantId tenantId, com.example.assetupgrade.common.ActorId actorId, String attachmentId, com.example.assetupgrade.common.CorrelationId correlationId); }
+public interface AttachmentIntakeService {
+
+    /** Accepts and processes an attachment submission. */
+    AttachmentIntakeResult intake(AttachmentIntakeCommand command);
+
+    /** Releases a cleanly scanned attachment for the owning tenant. */
+    AttachmentIntakeResult release(TenantId tenantId, ActorId actorId, String attachmentId, CorrelationId correlationId);
+}

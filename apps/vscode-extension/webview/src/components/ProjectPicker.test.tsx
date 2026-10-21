@@ -13,6 +13,7 @@ const repository = {
 const indexingRepository = {
   repositoryId: 'repo-target', displayName: 'engine', role: 'target', analysisStatus: 'indexing',
   selectedRevision: null, projects: [],
+  indexing: { stage: 'snapshot', position: 1, count: 1 },
 } as unknown as ProjectPickerProps['repositories'][number];
 const workspace = { id: 'repo-history', repositoryId: 'repo-history', projectId: 'cargo-project',
   name: 'account-stream-rs / Cargo', rootLabel: '.',
@@ -51,7 +52,7 @@ it('supports keyboard opening, navigation and escape with restored focus', async
   const trigger = document.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!;
   trigger.focus();
   await act(async () => trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
-  expect(document.activeElement?.getAttribute('role')).toBe('menuitemradio');
+  expect(document.activeElement?.tagName).toBe('SUMMARY');
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })));
   expect(document.activeElement?.textContent).toContain('管理参考工程');
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
@@ -105,4 +106,33 @@ it('renders a live index state for a target directory that has no projects yet',
   expect(row).toBeDefined();
   expect(row.disabled).toBe(true);
   expect(row.querySelector('.is-spinning')).not.toBeNull();
+});
+
+it('groups multi-project repositories once and identifies projects by name and path', async () => {
+  const multi = { ...repository, projects: [
+    { ...repository.projects[0]!, projectId: 'core', displayName: 'Core', relativePath: 'packages/core' },
+    { ...repository.projects[0]!, projectId: 'web', displayName: 'Web', relativePath: 'packages/web' },
+  ] };
+  await mount('history', { repositories: [multi, multi] });
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!.click());
+  expect(document.querySelectorAll('.workspace-picker-repository')).toHaveLength(1);
+  const options = [...document.querySelectorAll('.workspace-picker-option')];
+  expect(options.map(option => option.textContent)).toEqual(['Corepackages/core', 'Webpackages/web']);
+  expect(document.querySelector('.workspace-picker-group')?.textContent).toContain('2 个子项目');
+});
+
+it('distinguishes collocated build types and identifies an empty build boundary', async () => {
+  const multi = { ...repository, projects: [
+    { ...repository.projects[0]!, projectId: 'maven', displayName: 'admin-ui', relativePath: 'apps/admin-ui', kind: 'maven',
+      analysis: { repositoryId: repository.repositoryId, analysisRevision: 'revision-one', projectId: 'maven', analysisProfile: 'profile',
+        state: 'ready' as const, projection: 'ready' as const, updatedAt: '', modelingSkippedReason: '工程没有独立文件，无需建模' } },
+    { ...repository.projects[0]!, projectId: 'node', displayName: 'admin-ui', relativePath: 'apps/admin-ui', kind: 'node' },
+  ] };
+  const callbacks = await mount('history', { repositories: [multi] });
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!.click());
+  const options = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  expect(options.map(option => option.querySelector('strong')?.textContent)).toEqual(['admin-ui（Maven）', 'admin-ui（Node）']);
+  expect(options[0]?.textContent).toContain('无独立文件');
+  await act(async () => options[1]!.click());
+  expect(callbacks.onSelect).toHaveBeenCalledExactlyOnceWith(repository.repositoryId, 'revision-one', 'node');
 });

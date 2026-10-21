@@ -34,6 +34,7 @@ import {
   type AgentTraceLogger,
 } from "./trace-log.js";
 import type { TestCorrectionReviewer } from "./test-evidence.js";
+import { createModelTestCorrectionReviewer } from "./test-correction-reviewer.js";
 
 export type AgentHostOptions<Result = unknown> = {
   modelClient: AgentModelClient;
@@ -108,7 +109,7 @@ export function createAgentHost<Result = unknown>(
         budget.assertActive();
         const context: ToolContext = {
           ...resolvedContext,
-          ...(options.reviewTestCorrection ? { reviewTestCorrection: options.reviewTestCorrection } : {}),
+          reviewTestCorrection: options.reviewTestCorrection ?? createModelTestCorrectionReviewer(options.modelClient, budget, limits),
           runner: bindTestRunner(resolvedContext),
           ...(task.functionGroup
             ? { functionGroupRunner: bindFunctionGroupTestRunner(resolvedContext) }
@@ -205,6 +206,8 @@ function withRuntimeTestInstructions(
     "- Use the exact types and public signatures from the files you read; do not guess dependency names or dump the whole assembly through reflection probes. If a signature is unclear, read only its declaring file.",
     "- The Host retains executed failures and immutable test versions. A later green run or deletion of an assertion does not resolve historical failures. Test compilation errors with zero executed failures do not create requirement failures.",
     "- You may freely correct test-authoring mistakes. When changing a previously failed assertion, include write_target_test.corrections with its failureId, an explanation, and an exact excerpt from the public requirement. A proposal alone is not confirmation; unresolved facts remain available to Integration. Retain actual requirement failures and report_uncertain when their correctness cannot be established.",
+    "- Copy failureId exactly from the latest tool result's testEvidence.unresolvedFailures[].id or the earlier unresolved Host failures below, never from a compiler diagnostic or the test name. Invalid references reject the write; retry with the exact Host id. Compilation-only repairs need no corrections metadata.",
+    "- Keep the original test case identity when correcting a fixture or assertion. After editing, run the corrected version: the Host then independently reviews the immutable failing version against the executed replacement. If renaming or consolidating is necessary, preserve the failing scenario and its assertions in the replacement; deletion alone cannot discharge a failure.",
     ...(runtime.functionGroup?.testEvidence?.failures.some(item => item.status === "unresolved")
       ? [`- Earlier unresolved Host failures: ${JSON.stringify(runtime.functionGroup.testEvidence.failures.filter(item => item.status === "unresolved"))}`] : []),
   ].join("\n");

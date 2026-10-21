@@ -1,4 +1,6 @@
+import { initializeSchema, schemaInitializationError, isSchemaBusy, type SchemaInitializationOptions } from './schema-initialization.js';
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { queryRows } from './abortable-query.js';
 import { SearchQueryGate } from './search-query-gate.js';
 import { seekDbQueryTimeoutMs } from './seekdb-timeouts.js';
@@ -103,6 +105,7 @@ export function compactLexicalQuery(query: string, maxChars = 4_096, maxTerms = 
 }
 
 export interface SeekDbIndexStoreConfig {
+  initialization?: SchemaInitializationOptions;
   host: string;
   port: number;
   user: string;
@@ -462,6 +465,25 @@ function toSearchDocument(scope: RepositoryRevisionScope, row: SearchDocumentRow
   };
 }
 
+/** Call only for reads or writes whose committed result can be recognized on retry. */
+async function retryTransientSql<T>(operation: () => Promise<T>, signal?: AbortSignal,
+  wait: (ms: number) => Promise<unknown> = ms => delay(ms, undefined, { signal })): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
+    try { return await operation(); }
+    catch (error) {
+      signal?.throwIfAborted();
+      const failure = error as { code?: string; errno?: number; message?: string };
+      const transient = ['ER_QUERY_TIMEOUT', 'ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT',
+        'PROTOCOL_CONNECTION_LOST', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE'].includes(failure?.code ?? '') ||
+        [4012, 1205, 1213].includes(failure?.errno ?? 0) || /maximum query timeout|query has reached.*timeout/i.test(failure?.message ?? '');
+      if (!transient || attempt >= 2) throw error;
+      console.warn('[forexplore] Retrying transient database operation', { attempt: attempt + 1, code: failure.code, errno: failure.errno });
+      await wait(1000 * (attempt + 1));
+    }
+  }
+}
+
 async function withTransaction<T>(pool: Pool, operation: (connection: PoolConnection) => Promise<T>): Promise<T> {
   const connection = await pool.getConnection();
   let previousTimeout: number | undefined;
@@ -548,7 +570,7 @@ function searchDocumentProjectId(document: SearchDocumentRecord, filesByPath: Re
 }
 
 /** Version of the last migration in SeekDbIndexStore.#migrate(); read-only tools compare against it. */
-export const seekDbSchemaVersion = 4;
+export const seekDbSchemaVersion = 5;
 
 function connectionLimit(config: SeekDbIndexStoreConfig): number {
   const limit = config.connectionLimit ?? 8;
@@ -575,7 +597,7 @@ export class SeekDbIndexStore implements IndexStore {
   #embeddingProviderDocuments = 0;
   readonly #searchQueryGate: SearchQueryGate | undefined;
 
-  constructor(config: SeekDbIndexStoreConfig, private readonly pool: Pool = mysql.createPool({
+  constructor(private readonly config: SeekDbIndexStoreConfig, private readonly pool: Pool = mysql.createPool({
     host: config.host,
     port: config.port,
     user: config.user,
@@ -656,11 +678,15 @@ export class SeekDbIndexStore implements IndexStore {
   }
 
   async initialize(): Promise<void> {
-    const [versions] = await this.pool.query<RowDataPacket[]>('SELECT VERSION() AS version');
+    await initializeSchema(this.pool, this.config.database, connection => this.initializeLocked(connection), this.config.initialization);
+  }
+
+  private async initializeLocked(connection: PoolConnection): Promise<void> {
+    const [versions] = await connection.query<RowDataPacket[]>('SELECT VERSION() AS version');
     const version = /seekdb-v(\d+)\.(\d+)/i.exec(String(versions[0]?.version ?? ''));
     const supportsAsyncIndex = version !== null && (Number(version[1]) > 1 || Number(version[1]) === 1 && Number(version[2]) >= 3);
-    await this.pool.query(`CREATE DATABASE IF NOT EXISTS ${this.#database}`);
-    await this.pool.query(`
+    await connection.query(`CREATE DATABASE IF NOT EXISTS ${this.#database}`);
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.repositories} (
         repository_id VARCHAR(256) PRIMARY KEY NOT NULL,
         display_name VARCHAR(1024) NOT NULL,
@@ -672,7 +698,7 @@ export class SeekDbIndexStore implements IndexStore {
         updated_at VARCHAR(64) NOT NULL
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.analysisRevisions} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -689,7 +715,7 @@ export class SeekDbIndexStore implements IndexStore {
         INDEX idx_analysis_revisions_repository (repository_id, created_at)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.projects} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -704,7 +730,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, project_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.files} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -721,7 +747,7 @@ export class SeekDbIndexStore implements IndexStore {
         INDEX idx_files_path (repository_id, analysis_revision, relative_path(512))
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.symbols} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -745,7 +771,7 @@ export class SeekDbIndexStore implements IndexStore {
         UNIQUE KEY uq_symbols_key (repository_id, analysis_revision, symbol_key)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.dependencyEdges} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -765,7 +791,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, dependency_edge_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.diagnostics} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -781,7 +807,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, diagnostic_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.moduleArtifacts} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -797,7 +823,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, module_artifact_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.searchDocuments} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -818,27 +844,27 @@ export class SeekDbIndexStore implements IndexStore {
           WITH (DISTANCE=cosine, TYPE=hnsw, LIB=vsag${supportsAsyncIndex ? ', SYNC_MODE=immediate' : ''})
       ) ORGANIZATION = HEAP
     `);
-    await this.#migrate();
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingConfiguration} (
+    await this.#migrate(connection);
+    await connection.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingConfiguration} (
       slot INT PRIMARY KEY, config_hash CHAR(64) NOT NULL
     ) ORGANIZATION = HEAP`);
-    const [configured] = await this.pool.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
+    const [configured] = await connection.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
     if (!configured.length && !this.#legacyHashCompatible) {
-      const [existing] = await this.pool.query<RowDataPacket[]>(`SELECT search_document_id FROM ${this.#tables.searchDocuments} LIMIT 1`);
+      const [existing] = await connection.query<RowDataPacket[]>(`SELECT search_document_id FROM ${this.#tables.searchDocuments} LIMIT 1`);
       if (existing.length) throw new Error('Existing vectors have no model identity. Use a separate database and rebuild projections for this embedding model.');
     }
-    await this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingConfiguration} (slot, config_hash) VALUES (1, ?)`, [this.#embeddingIdentity]);
-    const [identity] = await this.pool.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
+    await connection.query(`INSERT IGNORE INTO ${this.#tables.embeddingConfiguration} (slot, config_hash) VALUES (1, ?)`, [this.#embeddingIdentity]);
+    const [identity] = await connection.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
     if (String(identity[0]?.config_hash) !== this.#embeddingIdentity) {
       throw new Error('Embedding model/configuration does not match stored vectors. Use a separate database and rebuild projections.');
     }
     if (supportsAsyncIndex) {
-      const [definitions] = await this.pool.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
+      const [definitions] = await connection.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
       if (!/sync_mode\s*=\s*'?immediate'?/i.test(String(definitions[0]?.['Create Table'] ?? ''))) {
         throw new Error('Existing search index uses an incompatible asynchronous configuration. If the old analysis data is disposable, run scripts/reset-code-intelligence-index.ts --database <database> --apply, then reload the extension and reanalyze the selected repositories.');
       }
     }
-    if (this.#persistEmbeddings) await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingCache} (
+    if (this.#persistEmbeddings) await connection.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingCache} (
       content_hash CHAR(64) PRIMARY KEY, embedding JSON NOT NULL
     ) ORGANIZATION = HEAP`);
   }
@@ -848,11 +874,11 @@ export class SeekDbIndexStore implements IndexStore {
    * changes are appended here and never edited. Each step is probe-guarded, so a crash
    * between a change and its record only re-runs an idempotent step.
    */
-  async #migrate(): Promise<void> {
+  async #migrate(connection: PoolConnection): Promise<void> {
     const migrations: ReadonlyArray<readonly [version: number, name: string, up: () => Promise<void>]> = [
       [1, 'search_documents.source_range and path/project/symbol lookup indexes', async () => {
-        const [sourceRangeColumns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'source_range'`);
-        if (!sourceRangeColumns.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN source_range JSON NULL`);
+        const [sourceRangeColumns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'source_range'`);
+        if (!sourceRangeColumns.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN source_range JSON NULL`);
         for (const [table, name, columns] of [
           [this.#tables.files, 'idx_files_project', 'repository_id, analysis_revision, project_id'],
           [this.#tables.symbols, 'idx_symbols_path', 'repository_id, analysis_revision, relative_path(512)'],
@@ -861,38 +887,49 @@ export class SeekDbIndexStore implements IndexStore {
           [this.#tables.dependencyEdges, 'idx_dependencies_source_symbol', 'repository_id, analysis_revision, source_symbol_key'],
           [this.#tables.dependencyEdges, 'idx_dependencies_target_symbol', 'repository_id, analysis_revision, target_symbol_key'],
         ]) {
-          const [indexes] = await this.pool.query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
-          if (!indexes.length) await this.pool.query(`ALTER TABLE ${table} ADD INDEX ${name} (${columns})`);
+          const [indexes] = await connection.query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
+          if (!indexes.length) await connection.query(`ALTER TABLE ${table} ADD INDEX ${name} (${columns})`);
         }
       }],
       [2, 'search_documents.project_id backfill and scope index', async () => {
-        const [projectColumns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'project_id'`);
-        if (!projectColumns.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN project_id VARCHAR(256) NULL`);
-        await this.backfillSearchDocumentProjects();
-        const [indexes] = await this.pool.query<RowDataPacket[]>(`SHOW INDEX FROM ${this.#tables.searchDocuments} WHERE Key_name = 'idx_search_documents_scope'`);
-        if (!indexes.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD INDEX idx_search_documents_scope (repository_id, analysis_revision, kind, project_id)`);
+        const [projectColumns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'project_id'`);
+        if (!projectColumns.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN project_id VARCHAR(256) NULL`);
+        await this.backfillSearchDocumentProjects(connection);
+        const [indexes] = await connection.query<RowDataPacket[]>(`SHOW INDEX FROM ${this.#tables.searchDocuments} WHERE Key_name = 'idx_search_documents_scope'`);
+        if (!indexes.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD INDEX idx_search_documents_scope (repository_id, analysis_revision, kind, project_id)`);
       }],
       [3, 'analysis_revisions.failure_stage for safe parse reuse', async () => {
-        const [columns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.analysisRevisions} LIKE 'failure_stage'`);
-        if (!columns.length) await this.pool.query(`ALTER TABLE ${this.#tables.analysisRevisions} ADD COLUMN failure_stage VARCHAR(32) NULL`);
+        const [columns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.analysisRevisions} LIKE 'failure_stage'`);
+        if (!columns.length) await connection.query(`ALTER TABLE ${this.#tables.analysisRevisions} ADD COLUMN failure_stage VARCHAR(32) NULL`);
       }],
       [4, 'stored source-fragment eligibility for bounded search', async () => {
-        const [columns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'implementation_eligible'`);
+        const [columns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'implementation_eligible'`);
         // A stored generated column applies the same predicate to existing,
         // newly indexed and restored documents. Reading long source text and
         // evaluating REGEXP in each lookup can force a full scope scan instead
         // of the full-text index; eligibility is computed only when a row changes.
-        if (!columns.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments}
+        if (!columns.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments}
           ADD COLUMN implementation_eligible TINYINT GENERATED ALWAYS AS
             (CASE WHEN kind = 'source-fragment'
               THEN LENGTH(document_text) >= 24 AND document_text REGEXP '[^[:space:]]'
               ELSE 1 END) STORED`);
       }],
+      [5, 'covering indexes for revision language statistics', async () => {
+        // Status polling must not scan the full symbols table or fetch source
+        // rows through a secondary index on every refresh of a large corpus.
+        for (const [table, name, columns] of [
+          [this.#tables.files, 'idx_files_language_statistics', 'repository_id, analysis_revision, language_id'],
+          [this.#tables.symbols, 'idx_symbols_language_statistics', 'repository_id, analysis_revision, language_id, provider'],
+        ]) {
+          const [indexes] = await connection.query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
+          if (!indexes.length) await connection.query(`ALTER TABLE ${table} ADD INDEX ${name} (${columns})`);
+        }
+      }],
     ];
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.schemaMigrations} (
+    await connection.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.schemaMigrations} (
       version INT PRIMARY KEY, name VARCHAR(256) NOT NULL, applied_at VARCHAR(64) NOT NULL
     ) ORGANIZATION = HEAP`);
-    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT version FROM ${this.#tables.schemaMigrations}`);
+    const [rows] = await connection.query<RowDataPacket[]>(`SELECT version FROM ${this.#tables.schemaMigrations}`);
     const applied = new Set(rows.map((row) => Number(row.version)));
     const supported = migrations.at(-1)![0];
     if (supported !== seekDbSchemaVersion) throw new Error('seekDbSchemaVersion must equal the last migration version.');
@@ -902,8 +939,13 @@ export class SeekDbIndexStore implements IndexStore {
     }
     for (const [version, name, up] of migrations) {
       if (applied.has(version)) continue;
-      await up();
-      await this.pool.query(`INSERT IGNORE INTO ${this.#tables.schemaMigrations} (version, name, applied_at) VALUES (?, ?, ?)`,
+      this.config.initialization?.onProgress?.({ stage: 'migrating', migration: version, message: `正在升级索引数据库（第 ${version} 项），完成后自动继续；请勿关闭窗口…` });
+      try { await up(); }
+      catch (error) {
+        if (isSchemaBusy(error)) throw error;
+        throw schemaInitializationError(error, `结构升级 ${version}: ${name}`);
+      }
+      await connection.query(`INSERT IGNORE INTO ${this.#tables.schemaMigrations} (version, name, applied_at) VALUES (?, ?, ?)`,
         [version, name, new Date().toISOString()]);
     }
   }
@@ -912,11 +954,11 @@ export class SeekDbIndexStore implements IndexStore {
    * Derive search_documents.project_id for rows written without it: rows that predate
    * migration 2, and rows restored from such a backup. Idempotent; touches NULLs only.
    */
-  async backfillSearchDocumentProjects(): Promise<void> {
-    await this.pool.query(`UPDATE ${this.#tables.searchDocuments} d JOIN ${this.#tables.files} f
+  async backfillSearchDocumentProjects(connection: Pick<PoolConnection, 'query'> = this.pool): Promise<void> {
+    await connection.query(`UPDATE ${this.#tables.searchDocuments} d JOIN ${this.#tables.files} f
       ON f.repository_id = d.repository_id AND f.analysis_revision = d.analysis_revision AND f.relative_path = d.relative_path
       SET d.project_id = f.project_id WHERE d.kind <> 'summary' AND d.project_id IS NULL`);
-    await this.pool.query(`UPDATE ${this.#tables.searchDocuments}
+    await connection.query(`UPDATE ${this.#tables.searchDocuments}
       SET project_id = JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(document_text), document_text, '{}'), '$.projectId'))
       WHERE kind = 'summary' AND project_id IS NULL`);
   }
@@ -940,8 +982,8 @@ export class SeekDbIndexStore implements IndexStore {
     for (let offset = 0; offset < unique.length; offset += 128) {
       signal?.throwIfAborted();
       const batch = unique.slice(offset, offset + 128);
-      const [cached] = await this.pool.query<RowDataPacket[]>(`SELECT content_hash, embedding FROM ${this.#tables.embeddingCache}
-        WHERE content_hash IN (${batch.map(() => '?').join(',')})`, batch.map(([key]) => key));
+      const [cached] = await retryTransientSql(() => this.pool.query<RowDataPacket[]>(`SELECT content_hash, embedding FROM ${this.#tables.embeddingCache}
+        WHERE content_hash IN (${batch.map(() => '?').join(',')})`, batch.map(([key]) => key)), signal);
       for (const row of cached) {
         const vector = typeof row.embedding === 'string' ? JSON.parse(row.embedding) : row.embedding;
         if (!Array.isArray(vector)) throw new Error('Invalid persisted embedding.');
@@ -961,8 +1003,8 @@ export class SeekDbIndexStore implements IndexStore {
           vectors.set(key, vector);
           return [key, JSON.stringify(vector)];
         });
-        await this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingCache} (content_hash, embedding)
-          VALUES ${inputs.map(() => '(?, ?)').join(',')}`, parameters);
+        await retryTransientSql(() => this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingCache} (content_hash, embedding)
+          VALUES ${inputs.map(() => '(?, ?)').join(',')}`, parameters), signal);
       }
     }
     return keys.map((key) => [...vectors.get(key)!]);
@@ -1258,16 +1300,32 @@ export class SeekDbIndexStore implements IndexStore {
     signal?.throwIfAborted();
     const embeddings = await this.embedDocuments(texts, signal);
     if (embeddings.length !== documents.length) throw new Error('Embedding provider returned an unexpected document count.');
-    await this.#writeBuilding(index, (connection) => insertBatches(connection, `INSERT INTO ${this.#tables.searchDocuments} (
+    if (!documents.length) return;
+    await retryTransientSql(() => this.#writeBuilding(index, async connection => {
+      // A COMMIT acknowledgement can be lost even though the rows are durable.
+      // The revision lock serializes retries; matching immutable rows are reused.
+      const [existing] = await connection.query<RowDataPacket[]>(`SELECT search_document_id, content_hash, kind FROM ${this.#tables.searchDocuments}
+        WHERE repository_id = ? AND analysis_revision = ? AND search_document_id IN (${documents.map(() => '?').join(',')})`,
+      [...scopeParams(index), ...documents.map(document => document.searchDocumentId)]);
+      const saved = new Map(existing.map(row => [String(row.search_document_id), row]));
+      const pending = documents.flatMap((document, position) => {
+        const prior = saved.get(document.searchDocumentId);
+        if (prior && (prior.content_hash !== document.contentHash || prior.kind !== document.kind)) {
+          throw new Error('Persisted search document conflicts with the immutable projection batch.');
+        }
+        return prior ? [] : [{ document, position }];
+      });
+      await insertBatches(connection, `INSERT INTO ${this.#tables.searchDocuments} (
       repository_id, analysis_revision, search_document_id, kind, relative_path, symbol_key, source_range,
       module_artifact_id, content_hash, title, document_text, search_text, project_id, embedding
-    )`, insertRows(documents, (document, position) => {
+    )`, insertRows(pending, ({ document, position }) => {
       const embedding = embeddings[position]!;
       assertEmbedding(embedding, this.#vectorDimension);
       return { vector: vectorHex(embedding), values: [document.repositoryId, document.analysisRevision, document.searchDocumentId,
         document.kind, document.relativePath, document.symbolKey ?? null, document.sourceRange ? JSON.stringify(document.sourceRange) : null,
         null, document.contentHash, document.title, document.text, texts[position]!, searchDocumentProjectId(document, facts.filesByPath)] };
-    })), signal);
+      }));
+    }, signal), signal);
   }
 
   async getSourceText(scope: RepositoryRevisionScope, relativePath: string): Promise<string | null> {
@@ -1942,6 +2000,7 @@ export class SeekDbIndexStore implements IndexStore {
 }
 
 export const seekDbIndexStoreInternals = {
+  retryTransientSql,
   compactLexicalQuery,
   withTransaction,
   insertBatches,

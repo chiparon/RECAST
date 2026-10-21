@@ -11,13 +11,18 @@ public interface IValidationRule<in T>
 public sealed class ValidationPipeline<T>
 {
     private readonly IReadOnlyList<IValidationRule<T>> rules;
-    public ValidationPipeline(IEnumerable<IValidationRule<T>> rules) => this.rules = rules.ToArray();
+    public ValidationPipeline(IEnumerable<IValidationRule<T>> rules) => this.rules = rules?.ToArray() ?? Array.Empty<IValidationRule<T>>();
 
     public PolicyResult Evaluate(T value)
     {
         var issues = new List<ValidationIssue>();
         foreach (var rule in rules)
         {
+            if (rule is null)
+            {
+                continue;
+            }
+
             var issue = rule.Validate(value);
             if (issue is not null)
             {
@@ -25,53 +30,37 @@ public sealed class ValidationPipeline<T>
             }
         }
 
-        var allowed = !issues.Any(issue => issue.BlocksOperation);
-        return new PolicyResult(allowed, issues);
+        return new PolicyResult(issues.All(issue => !issue.BlocksOperation), issues);
     }
 
-    public IReadOnlyList<string> RuleNames()
-    {
-        return rules.Select(rule => rule.GetType().Name).ToList();
-    }
+    public IReadOnlyList<string> RuleNames() => rules.Select(rule => rule.GetType().Name).ToArray();
 }
 
 public sealed class RequiredAssetIdRule : IValidationRule<AssetEvent>
 {
     public ValidationIssue? Validate(AssetEvent value)
-    {
-        if (value is null || string.IsNullOrWhiteSpace(value.AssetId))
-        {
-            return new ValidationIssue("asset.id.required", "Asset id is required.", ValidationSeverity.Error);
-        }
+        => value is null || string.IsNullOrWhiteSpace(value.AssetId)
+            ? Error("event.asset.required", "An asset identifier is required.")
+            : null;
 
-        return null;
-    }
+    internal static ValidationIssue Error(string code, string message)
+        => new(code, message, ValidationSeverity.Error);
 }
 
 public sealed class RequiredEventTypeRule : IValidationRule<AssetEvent>
 {
     public ValidationIssue? Validate(AssetEvent value)
-    {
-        if (value is null || string.IsNullOrWhiteSpace(value.EventType))
-        {
-            return new ValidationIssue("asset.eventtype.required", "Event type is required.", ValidationSeverity.Error);
-        }
-
-        return null;
-    }
+        => value is null || string.IsNullOrWhiteSpace(value.EventType)
+            ? RequiredAssetIdRule.Error("event.type.required", "An event type is required.")
+            : null;
 }
 
 public sealed class EventTenantRule : IValidationRule<AssetEvent>
 {
     public ValidationIssue? Validate(AssetEvent value)
-    {
-        if (value is null || string.IsNullOrWhiteSpace(value.TenantId))
-        {
-            return new ValidationIssue("asset.tenant.required", "Tenant id is required.", ValidationSeverity.Error);
-        }
-
-        return null;
-    }
+        => value is null || string.IsNullOrWhiteSpace(value.TenantId)
+            ? RequiredAssetIdRule.Error("event.tenant.required", "An event tenant is required.")
+            : null;
 }
 
 public sealed class OrderCurrencyRule : IValidationRule<OrderRequest>
@@ -83,15 +72,26 @@ public sealed class OrderCurrencyRule : IValidationRule<OrderRequest>
     {
         if (value is null || string.IsNullOrWhiteSpace(value.Currency))
         {
-            return new ValidationIssue("order.currency.unsupported", "Currency is required and must be supported.", ValidationSeverity.Error);
+            return RequiredAssetIdRule.Error("order.currency.empty", "An order currency is required.");
         }
 
-        if (supported is not null && !supported.Contains(value.Currency))
+        var allowed = supported;
+        if (allowed is null || allowed.Count == 0)
         {
-            return new ValidationIssue("order.currency.unsupported", $"Currency '{value.Currency}' is not supported.", ValidationSeverity.Error);
+            return null;
         }
 
-        return null;
+        foreach (var candidate in allowed)
+        {
+            if (string.Equals(candidate, value.Currency, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+        }
+
+        return RequiredAssetIdRule.Error(
+            "order.currency.unsupported",
+            $"Currency '{value.Currency}' is not supported.");
     }
 }
 
@@ -102,14 +102,17 @@ public sealed class OrderLineCountRule : IValidationRule<OrderRequest>
 
     public ValidationIssue? Validate(OrderRequest value)
     {
-        if (value is null || value.Lines is null || value.Lines.Count == 0)
+        var lines = value?.Lines;
+        if (lines is null || lines.Count == 0)
         {
-            return new ValidationIssue("order.lines.empty", "Order must contain at least one line.", ValidationSeverity.Error);
+            return RequiredAssetIdRule.Error("order.lines.empty", "An order requires at least one line.");
         }
 
-        if (maximum > 0 && value.Lines.Count > maximum)
+        if (maximum > 0 && lines.Count > maximum)
         {
-            return new ValidationIssue("order.lines.exceeded", $"Order line count {value.Lines.Count} exceeds the maximum of {maximum}.", ValidationSeverity.Error);
+            return RequiredAssetIdRule.Error(
+                "order.lines.max",
+                $"Order has {lines.Count} lines which exceeds the maximum of {maximum}.");
         }
 
         return null;
@@ -118,65 +121,61 @@ public sealed class OrderLineCountRule : IValidationRule<OrderRequest>
 
 public sealed class AttachmentTenantRule : IValidationRule<AttachmentInput>
 {
-    private readonly string? expectedTenant;
-    public AttachmentTenantRule(string? expectedTenant = null) => this.expectedTenant = expectedTenant;
-
     public ValidationIssue? Validate(AttachmentInput value)
-    {
-        if (value is null || string.IsNullOrWhiteSpace(value.TenantId))
-        {
-            return new ValidationIssue("attachment.tenant.invalid", "Attachment tenant is required.", ValidationSeverity.Error);
-        }
-
-        if (expectedTenant is not null && !string.Equals(value.TenantId, expectedTenant, StringComparison.Ordinal))
-        {
-            return new ValidationIssue("attachment.tenant.invalid", "Attachment tenant does not match the request tenant.", ValidationSeverity.Error);
-        }
-
-        return null;
-    }
+        => value is null || string.IsNullOrWhiteSpace(value.TenantId)
+            ? RequiredAssetIdRule.Error("attachment.tenant.required", "An attachment tenant is required.")
+            : null;
 }
 
 public sealed class AttachmentScanRule : IValidationRule<AttachmentInput>
 {
     public ValidationIssue? Validate(AttachmentInput value)
-    {
-        if (value is null || !value.Scanned)
-        {
-            return new ValidationIssue("attachment.scan.pending", "Attachment has not passed scanning.", ValidationSeverity.Warning);
-        }
-
-        return null;
-    }
+        => value is null || !value.Scanned
+            ? RequiredAssetIdRule.Error(
+                "attachment.scan.required",
+                $"Attachment '{value?.AttachmentId}' has not passed scanning and must remain quarantined.")
+            : null;
 }
 
 public sealed class ValidationIssueCatalog
 {
-    private static readonly IReadOnlyDictionary<string, string> Defaults = new Dictionary<string, string>(StringComparer.Ordinal)
+    private static readonly IReadOnlyDictionary<string, string> Table = new Dictionary<string, string>(StringComparer.Ordinal)
     {
-        ["asset.id.required"] = "Asset id is required.",
-        ["asset.eventtype.required"] = "Event type is required.",
-        ["asset.tenant.required"] = "Tenant id is required.",
-        ["order.currency.unsupported"] = "Currency is required and must be supported.",
-        ["order.lines.exceeded"] = "Order line count exceeds the maximum.",
-        ["order.lines.empty"] = "Order must contain at least one line.",
-        ["attachment.tenant.invalid"] = "Attachment tenant is invalid.",
-        ["attachment.scan.pending"] = "Attachment has not passed scanning.",
+        ["event.asset.required"] = "An asset identifier is required.",
+        ["event.type.required"] = "An event type is required.",
+        ["event.tenant.required"] = "An event tenant is required.",
+        ["order.currency.empty"] = "An order currency is required.",
+        ["order.currency.unsupported"] = "The order currency is not supported.",
+        ["order.lines.empty"] = "An order requires at least one line.",
+        ["order.lines.max"] = "The order exceeds the maximum number of lines.",
+        ["attachment.tenant.required"] = "An attachment tenant is required.",
+        ["attachment.scan.required"] = "The attachment has not passed scanning and remains quarantined.",
+        ["attachment.tenant.mismatch"] = "The attachment belongs to a different tenant.",
+        ["attachment.required"] = "An attachment is required.",
+        ["attachment.unauthorized"] = "The actor is not authorized for the attachment tenant.",
+        ["attachment.scan.failed"] = "The attachment scan did not report a clean payload.",
+        ["order.invalid"] = "The order request is invalid.",
+        ["order.duplicate"] = "The order operation already completed.",
+        ["inventory.unavailable"] = "Inventory could not be reserved for the order.",
+        ["inventory.commit.failed"] = "The order commit failed and was rolled back.",
+        ["workflow.unauthorized"] = "The actor is not authorized for the workflow tenant.",
+        ["workflow.tenant.mismatch"] = "The event tenant does not match the command tenant.",
+        ["delivery.duplicate"] = "The event already has an accepted delivery attempt.",
+        ["reconciliation.busy"] = "The reconciliation lease is already held.",
+        ["reconciliation.unauthorized"] = "The actor is not authorized for the reconciliation tenant.",
+        ["plugin.required"] = "A plugin descriptor is required.",
+        ["plugin.tenant"] = "The plugin belongs to a different tenant.",
+        ["plugin.capabilities.empty"] = "A plugin must declare at least one capability.",
+        ["plugin.unauthorized"] = "The actor is not authorized for the plugin tenant.",
+        ["plugin.not_found"] = "The plugin could not be found.",
     };
 
-    private readonly IReadOnlyDictionary<string, string> descriptions = Defaults;
+    private readonly IReadOnlyDictionary<string, string> descriptions = Table;
 
     public string Describe(string code)
-    {
-        if (code is not null && descriptions.TryGetValue(code, out var message))
-        {
-            return message;
-        }
-
-        return code ?? string.Empty;
-    }
+        => code is not null && descriptions.TryGetValue(code, out var description) ? description : code ?? string.Empty;
 
     public bool Contains(string code) => code is not null && descriptions.ContainsKey(code);
 
-    public IReadOnlyCollection<string> Codes => descriptions.Keys.ToList();
+    public IReadOnlyCollection<string> Codes => descriptions.Keys.ToArray();
 }

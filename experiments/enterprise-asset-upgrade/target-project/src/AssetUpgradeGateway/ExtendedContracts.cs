@@ -1,5 +1,7 @@
 namespace AssetUpgradeGateway;
 
+using AssetUpgradeGateway.Domain;
+
 // These contracts reserve the seams needed by a production-sized solution.
 // They are intentionally infrastructure-neutral; the evaluated Agent decides
 // whether to use an in-memory, database, broker, or hosted-service adapter.
@@ -18,8 +20,9 @@ public sealed record PolicyResult(
     bool Allowed,
     IReadOnlyList<ValidationIssue> Issues)
 {
-    public static PolicyResult Allow() => new(true, System.Array.Empty<ValidationIssue>());
-    public static PolicyResult Deny(params ValidationIssue[] issues) => new(false, issues ?? System.Array.Empty<ValidationIssue>());
+    public static PolicyResult Allow() => new(true, Array.Empty<ValidationIssue>());
+    public static PolicyResult Deny(params ValidationIssue[] issues)
+        => new(false, issues ?? Array.Empty<ValidationIssue>());
 }
 
 public sealed record OperationContext(
@@ -131,39 +134,23 @@ public interface IRetryPolicy
     DateTimeOffset NextAttempt(DateTimeOffset now, int attempts);
 }
 
-// Flow-production vocabulary. Entries describe the flattened, roots-first plan
-// handed to a store; results mirror the produced tree; the report summarizes a
-// completed production. Outcomes reuse DeliveryStatus/DeliveryResult.
-public sealed record WorkflowFlowEntry(
-    string TenantId,
-    string EventId,
-    string? ParentEventId,
-    bool IsParent,
-    string? CorrelationId = null);
-
-public sealed record WorkflowFlowResult(
-    string TenantId,
-    string EventId,
-    DeliveryStatus Status,
-    DeliveryResult? Delivery = null,
-    IReadOnlyList<WorkflowFlowResult>? Children = null);
-
-public sealed record FlowProductionReport(
-    string TenantId,
-    string RootEventId,
-    int Produced,
-    int Waiting,
-    IReadOnlyList<string> EventIds);
-
 /// <summary>
-/// Publish outcome carrying the historical IStopProcessingEvent semantics: the
-/// consumer's stop signal is reported as a receipt rather than mutating a shared
-/// event. Outcomes reuse <see cref="DeliveryStatus"/> and tenant/time conventions.
+/// Deterministic translation from the domain inspection vocabulary to the
+/// infrastructure-neutral contract vocabulary. An attachment that has not
+/// passed scanning always maps to <see cref="AttachmentState.Quarantined"/> so
+/// it can never enter the approval workflow.
 /// </summary>
-public sealed record EventPublishReceipt(
-    string TenantId,
-    string EventId,
-    DeliveryStatus Status,
-    bool Stopped,
-    DateTimeOffset PublishedAt,
-    string? Detail = null);
+public static class AttachmentStateMapping
+{
+    public static AttachmentState ToAttachmentState(this AttachmentInspectionState state)
+        => state switch
+        {
+            AttachmentInspectionState.Clean => AttachmentState.Scanned,
+            AttachmentInspectionState.Released => AttachmentState.Released,
+            AttachmentInspectionState.Rejected => AttachmentState.Rejected,
+            _ => AttachmentState.Quarantined,
+        };
+
+    public static AttachmentState Map(AttachmentInspectionState state)
+        => state.ToAttachmentState();
+}

@@ -71,7 +71,7 @@ export function createRunFunctionGroupTestsTool(): HostToolFactory {
         }
         const versions = await Promise.all(input.paths.map(path => snapshotTest(context, path)));
         const result = await context.functionGroupRunner!.run(input.paths);
-        recordTestRun(context, result, versions);
+        await recordTestRun(context, result, versions);
         context.budget?.assertActive();
         context.state.lastFunctionGroupTest = result;
         context.state.functionGroupTests ??= [];

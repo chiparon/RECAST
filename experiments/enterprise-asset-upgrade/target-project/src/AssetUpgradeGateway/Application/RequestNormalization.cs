@@ -5,35 +5,36 @@ using System.Security.Cryptography;
 using System.Text;
 using AssetUpgradeGateway;
 using AssetUpgradeGateway.Domain;
+using AssetUpgradeGateway.Policies;
 
 public sealed class RequestNormalizer
 {
     public AttachmentInput Normalize(AttachmentInput input)
     {
         ArgumentNullException.ThrowIfNull(input);
+
         return input with
         {
-            AttachmentId = Trim(input.AttachmentId),
-            TenantId = Trim(input.TenantId),
-            FileName = Trim(input.FileName),
-            DeclaredContentType = Trim(input.DeclaredContentType).ToLowerInvariant(),
+            FileName = input.FileName?.Trim() ?? string.Empty,
+            DeclaredContentType = MimeCompatibilityPolicy.NormalizeContentType(input.DeclaredContentType),
         };
     }
 
     public OrderRequest Normalize(OrderRequest input)
     {
         ArgumentNullException.ThrowIfNull(input);
+
         var lines = (input.Lines ?? Array.Empty<OrderLine>())
-            .Where(line => line is not null && line.Quantity > 0)
-            .OrderBy(line => line.Sku, StringComparer.Ordinal)
-            .ToList();
+            .Where(line => line is not null)
+            .Select(line => line with { Sku = line.Sku?.Trim() ?? string.Empty })
+            .ToArray();
 
         return input with
         {
-            OrderId = Trim(input.OrderId),
-            TenantId = Trim(input.TenantId),
-            ActorId = Trim(input.ActorId),
-            Currency = Trim(input.Currency).ToUpperInvariant(),
+            OrderId = input.OrderId?.Trim() ?? string.Empty,
+            TenantId = input.TenantId?.Trim() ?? string.Empty,
+            ActorId = input.ActorId?.Trim() ?? string.Empty,
+            Currency = (input.Currency ?? string.Empty).Trim().ToUpperInvariant(),
             Lines = lines,
         };
     }
@@ -41,60 +42,39 @@ public sealed class RequestNormalizer
     public AssetEvent Normalize(AssetEvent input)
     {
         ArgumentNullException.ThrowIfNull(input);
+
         return input with
         {
-            EventId = Trim(input.EventId),
-            TenantId = Trim(input.TenantId),
-            AssetId = Trim(input.AssetId),
-            EventType = Trim(input.EventType),
-            AttachmentId = input.AttachmentId is null ? null : input.AttachmentId.Trim(),
+            EventId = input.EventId?.Trim() ?? string.Empty,
+            TenantId = input.TenantId?.Trim() ?? string.Empty,
+            AssetId = input.AssetId?.Trim() ?? string.Empty,
+            EventType = input.EventType?.Trim() ?? string.Empty,
+            AttachmentId = string.IsNullOrWhiteSpace(input.AttachmentId) ? null : input.AttachmentId.Trim(),
         };
     }
-
-    private static string Trim(string value) => value is null ? string.Empty : value.Trim();
 }
 
 public sealed class RequestFingerprint
 {
-    private const char FieldSeparator = '\u001f';
-    private const char LineSeparator = '\u001e';
-
     public string ForOrder(OrderRequest order)
     {
         ArgumentNullException.ThrowIfNull(order);
-        var builder = new StringBuilder();
-        builder.Append(order.TenantId).Append(FieldSeparator);
-        builder.Append(order.OrderId).Append(FieldSeparator);
-        builder.Append(order.Currency).Append(FieldSeparator);
-
-        var lines = order.Lines ?? Array.Empty<OrderLine>();
-        foreach (var line in lines.OrderBy(line => line.Sku, StringComparer.Ordinal))
-        {
-            builder.Append(line.Sku).Append(LineSeparator);
-            builder.Append(line.Quantity.ToString(CultureInfo.InvariantCulture)).Append(LineSeparator);
-            builder.Append(line.UnitPriceMinor.ToString(CultureInfo.InvariantCulture)).Append(FieldSeparator);
-        }
-
-        return Hash(builder.ToString());
+        return order.StableFingerprint();
     }
 
     public string ForEvent(AssetEvent assetEvent)
     {
         ArgumentNullException.ThrowIfNull(assetEvent);
-        var builder = new StringBuilder();
-        builder.Append(assetEvent.EventId).Append(FieldSeparator);
-        builder.Append(assetEvent.TenantId).Append(FieldSeparator);
-        builder.Append(assetEvent.AssetId).Append(FieldSeparator);
-        builder.Append(assetEvent.EventType).Append(FieldSeparator);
-        builder.Append(assetEvent.AttachmentId ?? string.Empty);
-        return Hash(builder.ToString());
-    }
 
-    private static string Hash(string value)
-    {
-        var bytes = Encoding.UTF8.GetBytes(value);
-        var hash = SHA256.HashData(bytes);
-        return Convert.ToHexString(hash).ToLowerInvariant();
+        var payload = string.Join(
+            '\u001e',
+            assetEvent.TenantId ?? string.Empty,
+            assetEvent.EventId ?? string.Empty,
+            assetEvent.AssetId ?? string.Empty,
+            assetEvent.EventType ?? string.Empty,
+            assetEvent.AttachmentId ?? string.Empty);
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
     }
 }
 
@@ -102,23 +82,33 @@ public sealed class ErrorResponseFactory
 {
     public IReadOnlyDictionary<string, object> Create(IEnumerable<ValidationIssue> issues, string correlationId)
     {
-        var materialized = issues?.ToList() ?? new List<ValidationIssue>();
-        var payload = materialized
-            .Select(issue => (object)new Dictionary<string, object>(StringComparer.Ordinal)
+        var materialized = (issues ?? Array.Empty<ValidationIssue>())
+            .Where(issue => issue is not null)
+            .ToArray();
+
+        var byCode = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var issue in materialized)
+        {
+            byCode[issue.Code] = issue.Message;
+        }
+
+        var descriptions = materialized
+            .Select(issue => new Dictionary<string, object>
             {
                 ["code"] = issue.Code,
                 ["message"] = issue.Message,
                 ["severity"] = issue.Severity.ToString(),
-                ["blocks"] = issue.BlocksOperation,
+                ["blocking"] = issue.BlocksOperation,
             })
-            .ToList();
+            .ToArray();
 
         return new Dictionary<string, object>(StringComparer.Ordinal)
         {
             ["correlationId"] = correlationId ?? string.Empty,
-            ["count"] = materialized.Count,
-            ["blocked"] = materialized.Any(issue => issue.BlocksOperation),
-            ["issues"] = payload,
+            ["allowed"] = materialized.All(issue => !issue.BlocksOperation),
+            ["codes"] = materialized.Select(issue => issue.Code).ToArray(),
+            ["errors"] = byCode,
+            ["issues"] = descriptions,
         };
     }
 }

@@ -9,6 +9,8 @@ export interface BackendLaunchConfiguration {
   semanticPort: number;
   /** Owned IDE backends ask the OS for a free port; external endpoints stay fixed. */
   dynamicPort?: boolean;
+  /** A service-only bootstrap can serve planning before a target is selected. */
+  workspaceTranslation?: boolean;
   compileCommand?: { executable: string; args: string[]; timeoutMs?: number };
   verification?: { command: { executable: string; args: string[]; timeoutMs?: number }; protectedFiles: string[] };
 }
@@ -54,14 +56,19 @@ export class BackendProcess {
   }
 
   private async validateEndpoint(config: BackendLaunchConfiguration, root: string, capabilities: BackendCapabilities): Promise<void> {
-    if (!capabilities.retrievalRerank || !capabilities.semanticPlanning || !capabilities.workspaceTranslation) {
+    if (!capabilities.retrievalRerank || !capabilities.semanticPlanning ||
+        (config.workspaceTranslation !== false && !capabilities.workspaceTranslation)) {
       throw new Error('现有后端缺少重排、语义规划或工作区翻译能力，请更新后端。');
-    }
-    if (!capabilities.workspaceRoot || await realpath(capabilities.workspaceRoot) !== root) {
-      throw new Error(`后端 ${new URL(config.url).origin} 绑定了其他目标工程或未声明目标；请为本窗口配置另一 adaptationApiUrl。`);
     }
     if (capabilities.semanticQueryUrl?.replace(/\/+$/, '') !== `http://127.0.0.1:${config.semanticPort}`) {
       throw new Error('现有后端绑定了另一窗口的语义查询端口；请为本窗口配置另一 adaptationApiUrl，或由本窗口自动启动后端。');
+    }
+    if (config.workspaceTranslation === false) {
+      if (capabilities.workspaceTranslation) throw new Error('启动服务不应绑定目标工程。');
+      return;
+    }
+    if (!capabilities.workspaceRoot || await realpath(capabilities.workspaceRoot) !== root) {
+      throw new Error(`后端 ${new URL(config.url).origin} 绑定了其他目标工程或未声明目标；请为本窗口配置另一 adaptationApiUrl。`);
     }
     let authorized: Response;
     try {
@@ -89,6 +96,17 @@ export class BackendProcess {
     const url = new URL(config.url);
     if (!config.trusted) throw new Error('请先信任工作区，再启动模型后端。');
     const root = await realpath(config.workspaceRoot);
+    if (this.child && this.verified?.workspaceTranslation === false && config.workspaceTranslation !== false) {
+      // Only the service-only child can be rebound automatically. A real
+      // target-bound process may own translation jobs and retains its guard.
+      const bootstrap = this.child;
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(() => { bootstrap.kill(); }, 5000);
+        bootstrap.once('exit', () => { clearTimeout(timer); resolve(); });
+        if (bootstrap.connected) bootstrap.send({ type: 'shutdown' }, error => { if (error) bootstrap.kill(); });
+        else bootstrap.kill();
+      });
+    }
     if (this.child && (this.ownedRoot !== root || this.ownedOrigin !== url.origin)) {
       throw new Error('后端仍绑定另一目标或端口；请关闭该扩展开发窗口后在新目标中重开，避免中断正在进行的翻译。');
     }
@@ -117,7 +135,9 @@ export class BackendProcess {
       this.probePending = false; this.lastProbeAt = Date.now();
       return this.verified = probe.value;
     }
-    const existing = await this.capabilities(config.url);
+    // A bootstrap has no workspace-authentication route. Only trust a child
+    // this host starts; never attach it to an unverified external process.
+    const existing = config.workspaceTranslation === false ? undefined : await this.capabilities(config.url);
     if (existing) {
       try {
         await this.validateEndpoint(config, root, existing);
@@ -143,7 +163,7 @@ export class BackendProcess {
         ADAPTATION_HOST: url.hostname === '[::1]' ? '::1' : '127.0.0.1', ADAPTATION_PORT: config.dynamicPort ? '0' : url.port || '80',
         ADAPTATION_PROJECT_ROOT: root, ADAPTATION_SKELETON_PROJECT_PATH: root,
         ADAPTATION_SEMANTIC_INDEX_ENABLED: 'true', SEMANTIC_QUERY_PORT_URL: `http://127.0.0.1:${config.semanticPort}`,
-        ADAPTATION_WORKSPACE_TRANSLATION_ENABLED: 'true', ADAPTATION_WORKSPACE_TRANSLATION_TOKEN: this.translationToken,
+        ADAPTATION_WORKSPACE_TRANSLATION_ENABLED: config.workspaceTranslation === false ? 'false' : 'true', ADAPTATION_WORKSPACE_TRANSLATION_TOKEN: this.translationToken,
         ADAPTATION_MODULE_GENERATION_ENABLED: 'true', ADAPTATION_MODULE_GENERATION_TOKEN: this.moduleGenerationToken,
         ADAPTATION_WORKSPACE_COMPILE_COMMAND: JSON.stringify(compile),
         ADAPTATION_WORKSPACE_VERIFICATION: config.verification ? JSON.stringify(config.verification) : '',
@@ -189,7 +209,7 @@ export class BackendProcess {
           await this.validateEndpoint({ ...config, url: listeningUrl! }, root, ready);
           if (this.disposed || this.child !== child) throw new Error('后端进程已退出。');
           this.endpoint = listeningUrl; this.verified = ready; this.lastProbeAt = Date.now();
-          this.log(`模型后端已就绪：${this.endpoint}；分析、模型重排、翻译。`);
+          this.log(`模型后端已就绪：${this.endpoint}；${config.workspaceTranslation === false ? '分析、模型重排；导入目标工程后启用翻译' : '分析、模型重排、翻译'}。`);
           return ready;
         } catch (error) { if (!(error instanceof BackendProbeUnavailable)) throw error; }
       }

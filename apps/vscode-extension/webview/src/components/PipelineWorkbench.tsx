@@ -3,6 +3,7 @@ import { ArrowDown, ArrowRight, Check, CheckCircle2, ChevronDown, FileText, Fold
 import type { WorkspaceTranslationRun } from '@forexplore/contracts';
 import { canApplyAdaptation, type WorkflowEvent, type WorkflowState } from '@forexplore/workflow-core';
 import type { TranslationProvider } from '../workspace-translation-provider';
+import type { RequirementDraft } from '../requirement-draft';
 import { PatchStage } from './PatchStage';
 import { WorkspaceTranslation } from './WorkspaceTranslation';
 
@@ -20,6 +21,8 @@ const eventPhaseLabels: Record<WorkspaceTranslationRun['status'], string> = {
 };
 
 interface Props {
+  draft: RequirementDraft;
+  onDraftChange(draft: RequirementDraft): void;
   state: WorkflowState;
   dispatch: React.Dispatch<WorkflowEvent>;
   historyPaths: string[];
@@ -41,8 +44,7 @@ interface Props {
 
 export function PipelineWorkbench(props: Props) {
   const { state, dispatch } = props;
-  const [document, setDocument] = useState('');
-  const [fileName, setFileName] = useState('');
+  const { text: document, fileName } = props.draft;
   const [fileError, setFileError] = useState('');
   const [readingFile, setReadingFile] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
@@ -141,7 +143,7 @@ export function PipelineWorkbench(props: Props) {
       if (!alive.current) return;
       if (text.length > 8000) { setFileError(`文档共 ${text.length} 字，超过 8000 字上限，请精简后重试。`); return; }
       if (!text.trim()) { setFileError('文档内容为空，请选择其他文档。'); return; }
-      setDocument(text); setFileName(file.name);
+      props.onDraftChange({ text, fileName: file.name });
     } catch { if (alive.current) setFileError('文档读取失败，请重试或直接粘贴正文。'); }
     finally { documentReading.current = false; if (alive.current) setReadingFile(false); }
   }
@@ -209,7 +211,7 @@ export function PipelineWorkbench(props: Props) {
                   <button type="button" className="text-button" disabled={locked || readingFile} onClick={() => fileInput.current?.click()}><Upload size={13} />导入文档</button>
                   <input hidden ref={fileInput} type="file" accept=".txt,.md,.markdown,text/plain,text/markdown" aria-label="导入需求文档" onChange={event => { void importDocument(event.target.files?.[0]); event.target.value = ''; }} /></header>
                 <label htmlFor="pipeline-requirement" className="sr-only">需求文档正文</label>
-                <textarea id="pipeline-requirement" rows={9} value={document} maxLength={8000} disabled={locked || readingFile} onChange={event => { setDocument(event.target.value); setFileName(''); setFileError(''); }}
+                <textarea id="pipeline-requirement" rows={9} value={document} maxLength={8000} disabled={locked || readingFile} onChange={event => { props.onDraftChange({ text: event.target.value, fileName: '' }); setFileError(''); }}
                   placeholder={'描述业务目标、功能需求和验收标准，也可将需求文档拖到这里。\n\n例如：为订单服务增加多租户隔离。\n• 所有查询按租户过滤，禁止跨租户访问\n• 接口返回明确的权限错误\n• 验收覆盖正常访问、越权和空租户场景'} />
                 <footer><span>{readingFile ? '正在读取文档…' : fileName || '拖拽或点击导入 TXT / Markdown，最多 8000 字'}</span><span>{document.length.toLocaleString()} / 8000</span></footer>
                 {dragging ? <div className="project-document-drop-overlay"><Upload size={28} /><strong>松开导入需求文档</strong><span>支持 TXT / Markdown</span></div> : null}

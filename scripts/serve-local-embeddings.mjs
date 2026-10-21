@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { embeddingBatches } from './embedding-batches.mjs';
+import { createFeatureEncoder } from './feature-encoder.mjs';
 
 // Optional local inference runtime; keep native ML dependencies out of the extension bundle.
 const requireRuntime = createRequire(path.resolve(process.env.FOREXPLORE_EMBEDDING_TOOLS ?? process.cwd(), 'package.json'));
@@ -70,14 +71,20 @@ for (const candidate of requestedDevice ? [requestedDevice] : defaultDevices) {
   }
 }
 if (!extractor) throw new Error('No usable inference device for embeddings.');
-await extractor(['query: warmup'], { pooling: 'mean', normalize: true });
-console.log(JSON.stringify({ stage: 'model-ready', model: modelId, device, dtype }));
+const encoder = await createFeatureEncoder({ extractor, runtime: runtime.default ?? runtime,
+  enabled: model === 'Xenova/multilingual-e5-small' && revision === '761b726dd34fb83930e26aab4e9ac3899aa1fa78',
+  loadTokenizer: () => requireRuntime('tokenizers').Tokenizer.fromFile(
+    existsSync(path.join(revisionDirectory, 'tokenizer.json')) ? path.join(revisionDirectory, 'tokenizer.json') : cached('tokenizer.json')),
+  onFallback: error => console.warn(`Native tokenizer unavailable; using JavaScript tokenization: ${error.message}`),
+});
+await encoder.encode(['query: warmup']);
+console.log(JSON.stringify({ stage: 'model-ready', model: modelId, device, dtype, tokenizer: encoder.kind }));
 let pending = 0;
 let queue = Promise.resolve();
 const server = createServer(async (request, response) => {
   response.setHeader('content-type', 'application/json');
   if (request.url === '/health' && request.method === 'GET') {
-    response.end(JSON.stringify({ ready: true, model: modelId, revision, device, dtype, pending })); return;
+    response.end(JSON.stringify({ ready: true, model: modelId, revision, device, dtype, tokenizer: encoder.kind, pending })); return;
   }
   if (request.url !== '/v1/embeddings' || request.method !== 'POST') { response.writeHead(404); response.end('{}'); return; }
   if (pending >= 8) { response.writeHead(429); response.end('{"error":{"message":"Inference queue is full"}}'); return; }
@@ -100,7 +107,7 @@ const server = createServer(async (request, response) => {
         if (response.destroyed) throw new Error('Client disconnected');
         // The model tokenizer already truncates to its token window. Do not
         // truncate by characters or decode/re-encode tokens and change vectors.
-        const tensor = await extractor(batch.map(entry => entry.text), { pooling: 'mean', normalize: true });
+        const tensor = await encoder.encode(batch.map(entry => entry.text));
         return tensor.tolist();
       });
       queue = task.then(() => undefined, () => undefined);

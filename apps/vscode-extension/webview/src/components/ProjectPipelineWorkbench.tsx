@@ -1,20 +1,22 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowRight, Check, CheckCircle2, ChevronDown, FileText, FolderOpen, History, Play, ShieldCheck, Terminal, Upload } from 'lucide-react';
 import { type ProjectPipelineRun, type ProjectPipelineStart } from '../../../src/project-pipeline-types';
 import type { MessageBus } from '../vscode-api';
+import type { RequirementDraft } from '../requirement-draft';
 
 const stages = ['入库与建模', '模块检索', '分析与计划', '翻译与集成修复', '联合验收', '输出项目与报告'];
 const stageDescriptions = ['解析项目结构与模块依赖', '匹配历史实现与可复用资产', '确定改动范围和实施步骤', '生成代码并修复集成问题', '编译项目并运行已配置的验收', '保存输出项目和验收记录'];
 const stageOrder = { modeling: 0, retrieving: 1, analyzing: 2, generating: 3, verifying: 4, publishing: 5, complete: 5 };
-export function ProjectPipelineWorkbench({ bus, run, scope, projectName, historyPaths, importing, importMessage, error, topK,
+export function ProjectPipelineWorkbench({ bus, run, scope, projectName, historyPaths, importing, importMessage, error, topK, draft, onDraftChange,
   onImportHistory, onImportTarget, onActivityChange, onStart }: {
   bus: MessageBus; run?: ProjectPipelineRun; scope?: { repositoryId: string; projectId: string }; projectName: string;
   historyPaths: string[]; importing: boolean; importMessage?: string; error: string | null; topK: number;
+  draft: RequirementDraft; onDraftChange(draft: RequirementDraft): void;
   onImportHistory(): void; onImportTarget(): void; onActivityChange(active: boolean): void; onStart(input: ProjectPipelineStart): void;
 }) {
-  const [requirement, setRequirement] = useState('');
+  const { text: requirement, fileName: documentName } = draft;
   const [starting, setStarting] = useState(false), [reading, setReading] = useState(false);
-  const [documentName, setDocumentName] = useState(''), [documentError, setDocumentError] = useState('');
+  const [documentError, setDocumentError] = useState('');
   const [following, setFollowing] = useState(true);
   const [setupOpen, setSetupOpen] = useState(!run);
   const [executionRequested, setExecutionRequested] = useState(false);
@@ -31,7 +33,7 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
     if (error && starting) setSetupOpen(true);
   }, [run, error]);
   useEffect(() => {
-    if (run && !requirement) { setRequirement(run.requirement); }
+    if (run && !requirement) { onDraftChange({ text: run.requirement, fileName: '' }); }
     if (run) setSetupOpen(false);
   }, [run?.id]);
   useEffect(() => { if (following && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight; }, [run?.events.length, following]);
@@ -54,7 +56,7 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
       const text = (await file.text()).replace(/^\uFEFF/, '');
       if (!alive.current) return;
       if (!text.trim() || text.length > 8000) { setDocumentError('文档为空或超过 8000 字上限，已保留原有正文。'); return; }
-      setRequirement(text); setDocumentName(file.name);
+      onDraftChange({ text, fileName: file.name });
     } catch { if (alive.current) setDocumentError('文档读取失败，请直接粘贴正文或重试。'); }
     finally { documentReading.current = false; if (alive.current) setReading(false); }
   }
@@ -113,7 +115,7 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
                   <button type="button" className="text-button" disabled={active || reading} onClick={() => fileInput.current?.click()}><Upload size={13} />导入文档</button>
                   <input hidden ref={fileInput} type="file" accept=".txt,.md,.markdown,text/plain,text/markdown" aria-label="导入项目需求文档" onChange={event => { void importFile(event.target.files?.[0]); event.target.value = ''; }} /></header>
                 <label htmlFor="project-requirement" className="sr-only">项目需求文档正文</label>
-                <textarea id="project-requirement" rows={9} value={requirement} maxLength={8000} disabled={active || reading} onChange={event => { setRequirement(event.target.value); setDocumentName(''); setDocumentError(''); }}
+                <textarea id="project-requirement" rows={9} value={requirement} maxLength={8000} disabled={active || reading} onChange={event => { onDraftChange({ text: event.target.value, fileName: '' }); setDocumentError(''); }}
                   placeholder={'描述业务目标、功能需求和验收标准，也可将需求文档拖到这里。\n\n例如：为订单服务增加多租户隔离。\n• 所有查询按租户过滤，禁止跨租户访问\n• 接口返回明确的权限错误\n• 验收覆盖正常访问、越权和空租户场景'} />
                 <footer><span>{reading ? '正在读取文档…' : documentName || '拖拽或点击导入 TXT / Markdown，最多 8000 字'}</span><span>{requirement.length.toLocaleString()} / 8000</span></footer>
                 {dragging ? <div className="project-document-drop-overlay"><Upload size={28} /><strong>松开导入需求文档</strong><span>支持 TXT / Markdown</span></div> : null}
@@ -172,11 +174,15 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
     </section> : null}
   </main>;
 }
-function moduleVerificationLabel(run: ProjectPipelineRun, id: string): string {
+function moduleVerificationLabel(run: ProjectPipelineRun, id: string): ReactNode {
   const final = run.validation?.modules?.find(item => item.id === id)?.verification;
   const generated = run.modules.find(item => item.id === id)?.moduleVerification;
   const evidence = final ?? generated;
   if (!evidence) return run.modules.find(item => item.id === id)?.translation?.compilations.at(-1)?.success ? '编译通过' : '尚无通过记录';
-  const label = { verified: '行为验证通过', 'not-applicable': '声明模块，无可执行函数', 'production-defect': '存在生产代码缺陷', 'test-environment': '验证环境不可用', 'agent-uncertain': '行为结论未确定' }[evidence.disposition];
-  return final ? label : label + '（生成阶段）';
+  const coverageUnavailable = evidence.result?.reason === 'coverage-unavailable' || evidence.result?.functions.some(item => item.reason === 'coverage-unavailable');
+  const label = coverageUnavailable ? '覆盖率无法确认' : { verified: '行为验证通过', 'not-applicable': '声明模块，无可执行函数', 'production-defect': '存在生产代码缺陷', 'test-environment': '验证环境不可用', 'agent-uncertain': '行为结论未确定' }[evidence.disposition];
+  const text = final ? label : label + '（生成阶段）';
+  const issues = evidence.result?.functions.filter(item => item.coverageIssue).map(item => `${item.target.signature ?? item.target.name}：${item.coverageIssue}`) ?? [];
+  if (!issues.length && evidence.result?.issue?.description) issues.push(evidence.result.issue.description);
+  return issues.length ? <details className="project-verification-details"><summary>{text}</summary>{issues.map((issue, index) => <p key={index}>{issue}</p>)}</details> : text;
 }

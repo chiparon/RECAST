@@ -1,6 +1,8 @@
 import { access, readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { prepareDeepSeekCodexHome } from "./codex-experiment-home";
+import { tmpdir } from "node:os";
+import { isAbsolute, relative, sep } from "node:path";
 
 describe("isolated experiment Codex home", () => {
   it("writes a DeepSeek-only config and removes it on cleanup", async () => {
@@ -14,7 +16,13 @@ describe("isolated experiment Codex home", () => {
       expect(home.generated).toBe(true);
       expect(config).toContain('model_provider = "deepseek"');
       expect(config).toContain('model = "deepseek-v4-pro"');
-      expect(config).toContain('experimental_bearer_token = "deepseek-test-key"');
+      expect(config).toContain('env_key = "DEEPSEEK_API_KEY"');
+      expect(config).not.toContain('deepseek-test-key');
+      expect(home.environment).toEqual({ DEEPSEEK_API_KEY: 'deepseek-test-key' });
+      const fromTemp = relative(tmpdir(), home.path);
+      expect(isAbsolute(fromTemp) || fromTemp.startsWith(`..${sep}`)).toBe(true);
+      if (process.platform === 'win32') expect(config).toContain('[windows]\nsandbox = "unelevated"');
+      else expect(config).not.toContain('[windows]');
     } finally {
       await home.cleanup();
     }

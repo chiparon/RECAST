@@ -1,8 +1,8 @@
 namespace AssetUpgradeGateway.Application;
 
-using System.Diagnostics;
 using AssetUpgradeGateway;
 using AssetUpgradeGateway.Ports;
+using AssetUpgradeGateway.Telemetry;
 
 public interface IHealthProbe
 {
@@ -14,30 +14,47 @@ public sealed class HealthProbeRunner
 {
     private readonly IReadOnlyList<IHealthProbe> probes;
     private readonly IClock clock;
-    public HealthProbeRunner(IEnumerable<IHealthProbe> probes, IClock? clock = null) { this.probes = probes.ToArray(); this.clock = clock ?? new Adapters.SystemClock(); }
+    public HealthProbeRunner(IEnumerable<IHealthProbe> probes, IClock? clock = null) { this.probes = probes?.ToArray() ?? Array.Empty<IHealthProbe>(); this.clock = clock ?? new Adapters.SystemClock(); }
 
     public async Task<ServiceHealthReport> RunAsync(CancellationToken cancellationToken = default)
     {
-        var checks = new List<HealthCheckResult>(probes.Count);
-        foreach (var probe in probes)
+        // Every probe runs concurrently; the results keep the declared order and
+        // a thrown or failed probe becomes an unhealthy check instead of aborting.
+        var checks = probes.Select(probe => RunProbeAsync(probe, cancellationToken)).ToArray();
+        var results = await Task.WhenAll(checks).ConfigureAwait(false);
+
+        var report = results.Where(result => result is not null).Select(result => result!).ToArray();
+        return new ServiceHealthReport(clock.UtcNow, report);
+    }
+
+    private async Task<HealthCheckResult?> RunProbeAsync(IHealthProbe? probe, CancellationToken cancellationToken)
+    {
+        if (probe is null)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var stopwatch = Stopwatch.StartNew();
-            try
-            {
-                var result = await probe.CheckAsync(cancellationToken).ConfigureAwait(false);
-                stopwatch.Stop();
-                checks.Add(result);
-            }
-            catch (Exception exception)
-            {
-                stopwatch.Stop();
-                var detail = $"{exception.GetType().Name}: {exception.Message}";
-                checks.Add(new HealthCheckResult(probe.Name, Healthy: false, stopwatch.Elapsed, detail));
-            }
+            return null;
         }
 
-        return new ServiceHealthReport(clock.UtcNow, checks);
+        var started = clock.UtcNow;
+        try
+        {
+            var result = await probe.CheckAsync(cancellationToken).ConfigureAwait(false);
+            var duration = clock.UtcNow - started;
+            if (result is null)
+            {
+                return new HealthCheckResult(probe.Name, false, duration, "The probe returned no result.");
+            }
+
+            var component = string.IsNullOrWhiteSpace(result.Component) ? probe.Name : result.Component;
+            return new HealthCheckResult(component, result.Healthy, duration, result.Detail);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return new HealthCheckResult(probe.Name, false, clock.UtcNow - started, exception.Message);
+        }
     }
 }
 
@@ -46,11 +63,13 @@ public sealed class InMemoryHealthProbe : IHealthProbe
     private readonly Func<bool>? check;
     public InMemoryHealthProbe(string name, Func<bool>? check = null) { Name = name; this.check = check; }
     public string Name { get; }
+
     public Task<HealthCheckResult> CheckAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var healthy = check?.Invoke() ?? true;
-        return Task.FromResult(new HealthCheckResult(Name, healthy, TimeSpan.Zero));
+        var healthy = check is null || check();
+        var detail = healthy ? null : $"Probe '{Name}' reported unhealthy.";
+        return Task.FromResult(new HealthCheckResult(Name, healthy, TimeSpan.Zero, detail));
     }
 }
 
@@ -62,19 +81,30 @@ public sealed class AuditQueryService
 
     public async Task<IReadOnlyList<AuditRecord>> SearchAsync(AuditQuery request, string actorId, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        if (!authorizer.CanAccess(request.TenantId, actorId))
+        if (request is null)
         {
             return Array.Empty<AuditRecord>();
         }
 
-        var records = await query.FindAsync(request.TenantId, request.SubjectId, request.From, request.To, cancellationToken).ConfigureAwait(false);
-        if (request.Limit <= 0 || request.Limit >= records.Count)
+        if (!authorizer.CanAccess(request.TenantId, actorId))
         {
-            return records;
+            // Reject cross-tenant searches by returning no data rather than leaking rows.
+            return Array.Empty<AuditRecord>();
         }
 
-        return records.Take(request.Limit).ToList();
+        var records = await query.FindAsync(
+            request.TenantId,
+            request.SubjectId,
+            request.From,
+            request.To,
+            cancellationToken).ConfigureAwait(false);
+
+        if (request.Limit > 0 && records.Count > request.Limit)
+        {
+            records = records.Take(request.Limit).ToArray();
+        }
+
+        return records;
     }
 }
 
@@ -87,7 +117,8 @@ public sealed class TenantBoundaryService
     {
         if (!authorizer.CanAccess(tenantId, actorId))
         {
-            throw new UnauthorizedAccessException($"Actor '{actorId}' is not authorized for tenant '{tenantId}'.");
+            throw new UnauthorizedAccessException(
+                $"Actor '{actorId}' is not authorized for tenant '{tenantId}'.");
         }
     }
 
@@ -95,7 +126,51 @@ public sealed class TenantBoundaryService
     {
         if (!string.Equals(expectedTenant, actualTenant, StringComparison.Ordinal))
         {
-            throw new UnauthorizedAccessException($"Tenant mismatch: expected '{expectedTenant}' but found '{actualTenant}'.");
+            throw new UnauthorizedAccessException(
+                $"Tenant '{actualTenant}' cannot be used in the scope of tenant '{expectedTenant}'.");
         }
+    }
+}
+
+/// <summary>
+/// Composition seam that binds the telemetry surface to the health and audit
+/// pipeline. Probes report metrics-sink readiness for the workflow, order and
+/// attachment components plus the tenant itself, and the audit decorator keeps
+/// every recorded row countable without mutating it.
+/// </summary>
+public static class TelemetryHealthComposition
+{
+    private static readonly string[] DefaultComponents = { "workflow", "order", "attachment" };
+
+    public static IAuditSink Decorate(IAuditSink audit, IMetricsSink? metrics)
+        => AuditMetricsDecorator.Wrap(audit, metrics);
+
+    public static IReadOnlyList<IHealthProbe> MetricsProbes(IMetricsSink metrics, string tenantId, IEnumerable<string>? components = null)
+    {
+        var probes = new List<IHealthProbe>();
+        foreach (var component in components ?? DefaultComponents)
+        {
+            if (string.IsNullOrWhiteSpace(component))
+            {
+                continue;
+            }
+
+            probes.Add(new MetricsHealthProbe(metrics, tenantId, component));
+        }
+
+        probes.Add(new MetricsHealthProbe(metrics, tenantId));
+        return probes;
+    }
+
+    public static HealthProbeRunner MetricsRunner(IMetricsSink metrics, string tenantId, IEnumerable<IHealthProbe>? probes = null, IClock? clock = null)
+    {
+        var all = new List<IHealthProbe>();
+        if (probes is not null)
+        {
+            all.AddRange(probes);
+        }
+
+        all.AddRange(MetricsProbes(metrics, tenantId));
+        return new HealthProbeRunner(all, clock);
     }
 }

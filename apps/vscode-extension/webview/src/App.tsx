@@ -5,6 +5,7 @@ import { PanelLeft, Settings2 } from 'lucide-react';
 import { createTranslationProvider } from './workspace-translation-provider';
 import { PipelineWorkbench } from './components/PipelineWorkbench';
 import { ProjectPipelineWorkbench } from './components/ProjectPipelineWorkbench';
+import type { RequirementDraft } from './requirement-draft';
 import type { ProjectPipelineRun } from '../../src/project-pipeline-types';
 import type { CodeIntelligencePresentation, RepositoryStatus, ServiceStatus } from '../../src/ui-types';
 import type { ModuleExplorerMode, ModuleExplorerNode } from '../../src/ui-types';
@@ -16,6 +17,7 @@ import {
 } from '@forexplore/workflow-core';
 import type { PanelInitPayload, PanelSettingsPresentation } from '../../src/protocol/messages';
 import { FooterStatus } from './components/FooterStatus';
+import { HistoryImportProgress, historyImportState } from './components/HistoryImportProgress';
 import { ModuleWorkspace } from './components/ModuleWorkspace';
 import { idleTargetAdd, targetAddMessage, type TargetAddUiState } from './components/ProjectPicker';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -110,6 +112,9 @@ export default function App() {
   const [moduleTranslation, setModuleTranslation] = useState<{ moduleScopeId: string } | null>(null);
   const [pipelineActive, setPipelineActive] = useState(false);
   const [executionScope, setExecutionScope] = useState<'project' | 'module'>('project');
+  // Workbenches unmount when the execution scope changes; their drafts belong to the panel.
+  const [projectDraft, setProjectDraft] = useState<RequirementDraft>({ text: '', fileName: '' });
+  const [moduleDraft, setModuleDraft] = useState<RequirementDraft>({ text: '', fileName: '' });
   const [projectRun, setProjectRun] = useState<ProjectPipelineRun>();
   const [importingHistory, setImportingHistory] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -199,6 +204,11 @@ export default function App() {
         case 'CODE_INTELLIGENCE_STATUS':
           setCodeIntelligence(message.presentation);
           setTargetAdd((current) => reconcileTargetAddFromIndex(current, message.presentation, targetAddStartTargetIdsRef.current));
+          break;
+        case 'REPOSITORY_INDEXING_PROGRESS':
+          setCodeIntelligence(current => current ? { ...current, repositories: current.repositories.map(repository =>
+            repository.repositoryId === message.progress.repositoryId ? { ...repository, analysisStatus: 'indexing',
+              indexing: { ...message.progress, position: message.progress.position ?? 1, count: message.progress.count ?? 1 } } : repository) } : current);
           break;
         case 'SERVICE_STATUS':
           setServiceStatus(message.status);
@@ -424,6 +434,7 @@ export default function App() {
   }
 
   const indexingTarget = codeIntelligence?.repositories.find(repository => repository.role === 'target' && repository.analysisStatus === 'indexing');
+  const historyBusy = codeIntelligence?.repositories.some(repository => repository.role === 'history' && historyImportState(repository).busy) ?? false;
 
   return (
     <div className="app">
@@ -454,6 +465,15 @@ export default function App() {
       </header>
 
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
+      {codeIntelligence?.status === 'error' && codeIntelligence.runtimeStatus === 'error' && codeIntelligence.repositories.length > 0
+        ? <div className="error-banner" role="status">{codeIntelligence.message}</div> : null}
+      <HistoryImportProgress repositories={codeIntelligence?.repositories ?? []} onRetry={repository => {
+        const pending = repository.projects.filter(project => project.analysis?.state !== 'ready' || project.analysis?.projection !== 'ready');
+        if (repository.activeRevision && repository.analysisStatus !== 'failed' && pending.length) {
+          for (const project of pending) bus.post({ type: 'RETRY_PROJECT_ANALYSIS', repositoryId: repository.repositoryId,
+            analysisRevision: repository.activeRevision, projectId: project.projectId, force: false });
+        } else bus.post({ type: 'REFRESH_REPOSITORY', repositoryId: repository.repositoryId });
+      }} />
       <ModuleWorkspace
         primaryContent
         navigationOpen={resourcesOpen}
@@ -511,15 +531,17 @@ export default function App() {
         ) : null}
         <div className="pipeline-container" hidden={settingsOpen}>
           {executionScope === 'project' ? <ProjectPipelineWorkbench bus={bus} run={projectRun}
+            draft={projectDraft} onDraftChange={setProjectDraft}
             scope={moduleExplorer.target.repositoryId && moduleExplorer.target.projectId ? { repositoryId: moduleExplorer.target.repositoryId, projectId: moduleExplorer.target.projectId } : undefined}
             projectName={moduleExplorer.target.projectId ? moduleExplorer.target.name : ''} topK={payload.settings.topK}
-            historyPaths={payload.settings.repositoryPaths} importing={targetAdd.status === 'pending' || settingsSaving || importingHistory}
+            historyPaths={payload.settings.repositoryPaths} importing={targetAdd.status === 'pending' || settingsSaving || importingHistory || historyBusy}
             importMessage={targetAdd.status !== 'idle' ? targetAddMessage(targetAdd) : indexingTarget ? `正在建立项目索引：${indexingTarget.displayName}` : importingHistory ? '请选择历史仓目录…' : undefined}
             error={error} onActivityChange={setPipelineActive} onImportHistory={() => void handleImportHistory()} onImportTarget={() => { setExplorerMode('target'); setResourcesOpen(true); handleAddTarget('browse'); }}
             onStart={input => { setError(null); bus.post({ type: 'START_PROJECT_PIPELINE', input }); }} />
           : <PipelineWorkbench state={state} dispatch={dispatch} historyPaths={payload.settings.repositoryPaths}
+            draft={moduleDraft} onDraftChange={setModuleDraft}
             targetName={moduleExplorer.target.projectId ? moduleExplorer.target.name : ''}
-            importing={targetAdd.status === 'pending' || settingsSaving || importingHistory} error={error}
+            importing={targetAdd.status === 'pending' || settingsSaving || importingHistory || historyBusy} error={error}
             importMessage={targetAdd.status !== 'idle' ? targetAddMessage(targetAdd) : indexingTarget ? `正在建立项目索引：${indexingTarget.displayName}` : importingHistory ? '请选择历史仓目录…' : settingsSaving ? '正在保存历史仓配置…' : undefined}
             moduleScopeId={moduleTranslation?.moduleScopeId} translation={translation}
             onImportHistory={() => void handleImportHistory()} onImportTarget={() => { setExplorerMode('target'); setResourcesOpen(true); handleAddTarget('browse'); }}

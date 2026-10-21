@@ -10,6 +10,29 @@ vi.mock('vscode', () => ({ workspace: { getConfiguration: () => ({
 }) } }));
 import { BackendProcess } from './backend-process';
 import { ServiceManager } from './service-manager';
+import type { CodeIntelligencePresentation } from './ui-types';
+
+it('keeps the indexing service connected when an individual repository fails', () => {
+  const manager = new ServiceManager({ appendLine: vi.fn() } as unknown as OutputChannel);
+  manager.setIndexStatus({ status: 'error', runtimeStatus: 'ready', storage: 'seekdb', repositories: [] });
+  expect(manager.serviceStatus.moduleSearch).toBe('connected');
+  manager.setIndexStatus({ status: 'error', storage: 'seekdb', repositories: [] } as CodeIntelligencePresentation);
+  expect(manager.serviceStatus.moduleSearch).toBe('error');
+});
+
+it('keeps index initialization pending until backend readiness is confirmed', async () => {
+  let resolve!: () => void;
+  const ensure = vi.fn(() => new Promise<void>(done => { resolve = done; }));
+  const manager = new ServiceManager({ appendLine: vi.fn() } as unknown as OutputChannel,
+    { ensure, dispose: vi.fn() } as unknown as BackendProcess);
+  manager.setIndexInitialization('等待数据库升级');
+  const pending = manager.ensureStarted();
+  expect(manager.serviceStatus).toMatchObject({ moduleSearch: 'starting', adaptation: 'starting', message: '等待数据库升级' });
+  expect(() => manager.getAdaptationPort()).toThrow('等待数据库升级');
+  resolve(); await pending;
+  expect(manager.serviceStatus.adaptation).toBe('connected');
+  expect(manager.serviceStatus.message).toBeUndefined();
+});
 
 it('keeps an unauthorized backend red even when its public health endpoint is healthy', async () => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), 'recast-service-status-')));

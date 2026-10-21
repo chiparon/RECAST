@@ -214,6 +214,13 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
       this.options.onChange?.();
     };
     try {
+      if (!index.files.some(file => file.projectId === scope.projectId)) {
+        record = { ...scope, analysisProfile: projectAnalysisProfile, state: 'ready', projection: 'ready', updatedAt: '',
+          modelingSkippedReason: '工程没有独立文件，仅保留构建定义，无需功能模块建模。',
+          coverage: { total: 0, assigned: 0, unassigned: [] } };
+        await persist();
+        return;
+      }
       // Projection-only retries do not call the model again.
       if (force || record.state !== 'ready' || !record.proposal) {
         record = { ...scope, analysisProfile: projectAnalysisProfile, state: 'queued', projection: 'pending', updatedAt: '' };

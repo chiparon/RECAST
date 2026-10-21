@@ -65,6 +65,34 @@ function hierarchicalResult(index: StructuralIndex, scope: ProjectAnalysisScope)
 }
 
 describe('project understanding lifecycle', () => {
+  it('completes empty build boundaries without a model call and recovers their older failed jobs', async () => {
+    const { runtime, index, scopes } = await setup();
+    const scope = { ...scopes[0]!, projectId: 'empty-build-boundary' };
+    const empty = { ...index.projects[0]!, projectId: scope.projectId, kind: 'maven', relativePath: 'wrapper', manifestPaths: ['wrapper/pom.xml'] };
+    vi.spyOn(runtime.store, 'getStructuralIndex').mockResolvedValue({ ...index, projects: [...index.projects, empty] });
+    const plan = vi.fn(async () => result(index, scope));
+    const decide = vi.fn(async (request: ModuleHierarchyDecisionRequest) => coherentDecision(request));
+    const project = vi.fn(async () => {});
+    const coordinator = new ProjectAnalysisCoordinator({ store: runtime.store, plan, hierarchyPlanner: { decide }, project });
+    await coordinator.ensure(scope);
+    const record = await coordinator.read(scope);
+    expect(record).toMatchObject({ state: 'ready', projection: 'ready', coverage: { total: 0, assigned: 0 },
+      modelingSkippedReason: expect.stringContaining('没有独立文件') });
+    expect(record.proposal).toBeUndefined();
+    expect(record.modeling).toBeUndefined();
+    const [artifact] = await runtime.store.listModuleArtifacts(scope);
+    const { modelingSkippedReason: _reason, ...old } = record;
+    const payload: ProjectAnalysisRecord = { ...old, state: 'failed', projection: 'pending', error: 'Agent 未能完成有效的功能模块分析' };
+    await runtime.store.putModuleArtifact({ ...artifact!, payload, contentHash: projectPlanHash(payload).slice('sha256:'.length) });
+    const reopened = new ProjectAnalysisCoordinator({ store: runtime.store, plan, hierarchyPlanner: { decide }, project });
+    await reopened.ensure(scope);
+    expect(await reopened.read(scope)).toMatchObject({ state: 'ready', projection: 'ready', modelingSkippedReason: record.modelingSkippedReason });
+    expect((await reopened.read(scope)).error).toBeUndefined();
+    expect(plan).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    expect(project).not.toHaveBeenCalled();
+  });
+
   it('reuses durable validated decisions after recreating the coordinator', async () => {
     const { runtime, scopes } = await setup();
     const scope = scopes[0]!;

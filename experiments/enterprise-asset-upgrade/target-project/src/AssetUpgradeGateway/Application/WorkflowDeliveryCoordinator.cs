@@ -1,10 +1,11 @@
 namespace AssetUpgradeGateway.Application;
 
-using System.Diagnostics;
 using AssetUpgradeGateway;
 using AssetUpgradeGateway.Domain;
 using AssetUpgradeGateway.Policies;
 using AssetUpgradeGateway.Ports;
+using AssetUpgradeGateway.Telemetry;
+using System.Globalization;
 
 public sealed record WorkflowDeliveryCommand(string TenantId, string ActorId, AssetEvent Event, string CorrelationId);
 public sealed record WorkflowDeliveryResult(bool Accepted, DeliveryStatus Status, WorkflowState State, int Attempts, IReadOnlyList<ValidationIssue> Issues);
@@ -21,99 +22,217 @@ public sealed class WorkflowDeliveryCoordinator
     private readonly IClock clock;
     private readonly IWorkflowStateMachine stateMachine;
     private readonly IRetryPolicy retryPolicy;
+    private readonly TraceFactory? traces;
     private readonly DuplicateDeliveryPolicy duplicatePolicy = new();
 
-    public WorkflowDeliveryCoordinator(ITenantAuthorizer authorizer, IWorkflowDispatcher dispatcher, IEventEnvelopeStore envelopes, IDispatchAttemptStore history, IDeadLetterSink deadLetters, IAuditSink audit, IMetricsSink metrics, IClock? clock = null, IWorkflowStateMachine? stateMachine = null, IRetryPolicy? retryPolicy = null)
+    public WorkflowDeliveryCoordinator(ITenantAuthorizer authorizer, IWorkflowDispatcher dispatcher, IEventEnvelopeStore envelopes, IDispatchAttemptStore history, IDeadLetterSink deadLetters, IAuditSink audit, IMetricsSink metrics, IClock? clock = null, IWorkflowStateMachine? stateMachine = null, IRetryPolicy? retryPolicy = null, TraceFactory? traces = null)
     {
-        this.authorizer = authorizer; this.dispatcher = dispatcher; this.envelopes = envelopes; this.history = history; this.deadLetters = deadLetters; this.audit = audit; this.metrics = metrics; this.clock = clock ?? new Adapters.SystemClock(); this.stateMachine = stateMachine ?? new WorkflowStateTransitionPolicy(); this.retryPolicy = retryPolicy ?? new ExponentialRetryPolicy();
+        this.authorizer = authorizer; this.dispatcher = dispatcher; this.envelopes = envelopes; this.history = history; this.deadLetters = deadLetters; this.audit = TelemetryHealthComposition.Decorate(audit, metrics); this.metrics = metrics; this.clock = clock ?? new Adapters.SystemClock(); this.stateMachine = stateMachine ?? new WorkflowStateTransitionPolicy(); this.retryPolicy = retryPolicy ?? new ExponentialRetryPolicy(); this.traces = traces;
     }
 
     public async Task<WorkflowDeliveryResult> DeliverAsync(WorkflowDeliveryCommand command, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(command);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var tenantId = command.TenantId;
-        var eventId = command.Event.EventId;
-
-        if (!authorizer.CanAccess(tenantId, command.ActorId))
+        using var scope = traces?.Start(command.CorrelationId, "workflow.delivery", command.TenantId, command.ActorId);
+        var assetEvent = command.Event;
+        if (assetEvent is null)
         {
-            return Deny(DeliveryStatus.Rejected, new ValidationIssue("workflow.tenant.forbidden", "Actor is not authorized for the tenant.", ValidationSeverity.Error));
+            Decorate(scope, DeliveryStatus.Rejected.ToString(), true, "workflow.event.required");
+            return Deny(
+                DeliveryStatus.Rejected,
+                new ValidationIssue("workflow.event.required", "An asset event is required.", ValidationSeverity.Error));
         }
 
-        var envelope = await envelopes.FindAsync(tenantId, eventId, cancellationToken).ConfigureAwait(false)
-            ?? new EventEnvelope(command.Event, command.CorrelationId);
+        if (!authorizer.CanAccess(command.TenantId, command.ActorId))
+        {
+            Decorate(scope, DeliveryStatus.Rejected.ToString(), true, "workflow.unauthorized");
+            return Deny(
+                DeliveryStatus.Rejected,
+                new ValidationIssue(
+                    "workflow.unauthorized",
+                    $"Actor '{command.ActorId}' is not authorized for tenant '{command.TenantId}'.",
+                    ValidationSeverity.Error));
+        }
 
-        var attempts = await history.FindAsync(tenantId, eventId, cancellationToken).ConfigureAwait(false);
-        var duplicate = duplicatePolicy.Evaluate(attempts, command.Event);
+        if (!string.Equals(assetEvent.TenantId, command.TenantId, StringComparison.Ordinal))
+        {
+            Decorate(scope, DeliveryStatus.Rejected.ToString(), true, "workflow.tenant.mismatch");
+            return Deny(
+                DeliveryStatus.Rejected,
+                new ValidationIssue(
+                    "workflow.tenant.mismatch",
+                    $"Event '{assetEvent.EventId}' belongs to tenant '{assetEvent.TenantId}' and not to '{command.TenantId}'.",
+                    ValidationSeverity.Error));
+        }
+
+        var eventId = assetEvent.EventId;
+        scope?.AddTag("eventId", eventId);
+
+        // Serialize per-event delivery so two concurrent callers cannot both
+        // observe "no accepted attempt" and dispatch the same event twice.
+        using var gate = await OperationSerialization.AcquireAsync(command.TenantId, "workflow-delivery:" + eventId, cancellationToken).ConfigureAwait(false);
+
+        var attempts = await history.FindAsync(command.TenantId, eventId, cancellationToken).ConfigureAwait(false);
+
+        var duplicate = duplicatePolicy.Evaluate(attempts, assetEvent);
         if (!duplicate.Allowed)
         {
-            var issue = duplicate.Issues.Count > 0
-                ? duplicate.Issues[0]
-                : new ValidationIssue("workflow.duplicate", "Event was already delivered.", ValidationSeverity.Warning);
-            audit.Record(new AuditRecord(tenantId, eventId, "workflow.duplicate", "duplicate", clock.UtcNow));
-            return Deny(DeliveryStatus.Duplicate, issue);
+            audit.Record(new AuditRecord(command.TenantId, eventId, "workflow.delivery", DeliveryStatus.Duplicate.ToString(), clock.UtcNow));
+            metrics.Increment("workflow.delivery.duplicate", command.TenantId);
+            scope?.AddTag("attempts", attempts.Count.ToString(CultureInfo.InvariantCulture));
+            Decorate(scope, DeliveryStatus.Duplicate.ToString(), false);
+            return new WorkflowDeliveryResult(false, DeliveryStatus.Duplicate, assetEvent.State, attempts.Count, duplicate.Issues);
+        }
+
+        var envelope = await envelopes.FindAsync(command.TenantId, eventId, cancellationToken).ConfigureAwait(false)
+            ?? new EventEnvelope(assetEvent, command.CorrelationId) { Stage = EventProcessingStage.Enqueued };
+
+        if (!string.IsNullOrEmpty(command.CorrelationId))
+        {
+            envelope = envelope with { CorrelationId = command.CorrelationId };
+        }
+
+        // A stored envelope that already reached a terminal stage (delivered or
+        // dead-lettered) is a completed operation: a replay must be a duplicate or
+        // no-op and must never repeat the dispatch side effect.
+        if (envelope.Stage.IsTerminal())
+        {
+            audit.Record(new AuditRecord(command.TenantId, eventId, "workflow.delivery", DeliveryStatus.Duplicate.ToString(), clock.UtcNow));
+            metrics.Increment("workflow.delivery.duplicate", command.TenantId);
+            scope?.AddTag("attempts", attempts.Count.ToString(CultureInfo.InvariantCulture));
+            Decorate(scope, DeliveryStatus.Duplicate.ToString(), false);
+            return new WorkflowDeliveryResult(false, DeliveryStatus.Duplicate, envelope.Event?.State ?? assetEvent.State, attempts.Count, Array.Empty<ValidationIssue>());
         }
 
         var attemptNumber = attempts.Count + 1;
-        var started = clock.UtcNow;
-        var stopwatch = Stopwatch.StartNew();
-        var outcome = await dispatcher.DispatchAsync(command.Event, cancellationToken).ConfigureAwait(false);
-        stopwatch.Stop();
-        var finished = clock.UtcNow;
-
-        await history.AppendAsync(new DispatchAttempt(tenantId, eventId, attemptNumber, started, finished, outcome.Status, outcome.Detail), cancellationToken).ConfigureAwait(false);
-        metrics.Increment("workflow.delivery.attempts", tenantId);
-        metrics.Timing("workflow.delivery", tenantId, stopwatch.Elapsed);
-
-        if (outcome.Status == DeliveryStatus.Accepted)
+        scope?.AddTag("attempt", attemptNumber.ToString(CultureInfo.InvariantCulture));
+        scope?.AddTag("from", assetEvent.State.ToString());
+        var startedAt = clock.UtcNow;
+        DeliveryResult delivery;
+        try
         {
-            var delivered = envelope.MarkDelivered(clock.UtcNow);
-            await envelopes.SaveAsync(delivered, cancellationToken).ConfigureAwait(false);
-            audit.Record(new AuditRecord(tenantId, eventId, "workflow.delivered", WorkflowState.Completed.ToString().ToLowerInvariant(), clock.UtcNow));
-            return new WorkflowDeliveryResult(true, DeliveryStatus.Accepted, WorkflowState.Completed, attemptNumber, Array.Empty<ValidationIssue>());
+            delivery = await dispatcher.DispatchAsync(assetEvent, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            delivery = new DeliveryResult(false, DeliveryStatus.Retryable, exception.Message);
+            scope?.AddTag("dispatch.error", exception.Message);
         }
 
-        if (outcome.Status == DeliveryStatus.Retryable)
+        var finishedAt = clock.UtcNow;
+        await history.AppendAsync(
+            new DispatchAttempt(command.TenantId, eventId, attemptNumber, startedAt, finishedAt, delivery.Status, delivery.Detail),
+            cancellationToken).ConfigureAwait(false);
+
+        if (delivery.Status == DeliveryStatus.Accepted)
         {
-            if (retryPolicy.CanRetry(attemptNumber))
+            var finalState = Advance(assetEvent.State, WorkflowState.Completed);
+            var delivered = assetEvent.WithState(finalState);
+
+            envelope = envelope with
             {
-                var scheduled = envelope.NextAttempt(clock.UtcNow);
-                await envelopes.SaveAsync(scheduled, cancellationToken).ConfigureAwait(false);
-                var retryIssue = new ValidationIssue("workflow.retry", outcome.Detail ?? "Delivery failed and was scheduled for retry.", ValidationSeverity.Warning);
-                audit.Record(new AuditRecord(tenantId, eventId, "workflow.retry", WorkflowState.RetryPending.ToString().ToLowerInvariant(), clock.UtcNow));
-                return new WorkflowDeliveryResult(false, DeliveryStatus.Retryable, WorkflowState.RetryPending, attemptNumber, new[] { retryIssue });
+                Event = delivered,
+                Stage = EventProcessingStage.Delivered,
+                DeliveryAttempt = attemptNumber,
+                DeliveredAt = finishedAt,
+            };
+            await envelopes.SaveAsync(envelope, cancellationToken).ConfigureAwait(false);
+
+            audit.Record(new AuditRecord(command.TenantId, eventId, "workflow.delivery", finalState.ToString(), finishedAt));
+            metrics.Increment("workflow.delivery.accepted", command.TenantId);
+
+            scope?.AddTag("to", finalState.ToString());
+            Decorate(scope, DeliveryStatus.Accepted.ToString(), false);
+            return new WorkflowDeliveryResult(true, DeliveryStatus.Accepted, finalState, attemptNumber, Array.Empty<ValidationIssue>());
+        }
+
+        WorkflowState retryState;
+        if (retryPolicy.CanRetry(attemptNumber))
+        {
+            retryState = Advance(assetEvent.State, WorkflowState.RetryPending);
+            envelope = envelope with
+            {
+                Event = assetEvent.WithState(retryState),
+                Stage = EventProcessingStage.RetryScheduled,
+                DeliveryAttempt = attemptNumber,
+            };
+            await envelopes.SaveAsync(envelope, cancellationToken).ConfigureAwait(false);
+
+            audit.Record(new AuditRecord(command.TenantId, eventId, "workflow.delivery", retryState.ToString(), finishedAt));
+            metrics.Increment("workflow.delivery.retry", command.TenantId);
+
+            scope?.AddTag("to", retryState.ToString());
+            Decorate(scope, DeliveryStatus.Retryable.ToString(), true, delivery.Detail);
+        }
+        else
+        {
+            retryState = Advance(assetEvent.State, WorkflowState.Failed);
+            envelope = envelope with
+            {
+                Event = assetEvent.WithState(retryState),
+                Stage = EventProcessingStage.DeadLettered,
+                DeliveryAttempt = attemptNumber,
+            };
+            await envelopes.SaveAsync(envelope, cancellationToken).ConfigureAwait(false);
+
+            await deadLetters.PublishAsync(
+                new DeadLetterEvent(assetEvent, attemptNumber, delivery.Detail ?? "retry budget exhausted", finishedAt),
+                cancellationToken).ConfigureAwait(false);
+
+            audit.Record(new AuditRecord(command.TenantId, eventId, "workflow.delivery", retryState.ToString(), finishedAt));
+            metrics.Increment("workflow.delivery.dead_letter", command.TenantId);
+
+            scope?.AddTag("to", retryState.ToString());
+            Decorate(scope, DeliveryStatus.Retryable.ToString(), true, delivery.Detail);
+        }
+
+        return new WorkflowDeliveryResult(false, DeliveryStatus.Retryable, retryState, attemptNumber, Array.Empty<ValidationIssue>());
+    }
+
+    /// <summary>
+    /// Walks the canonical workflow chain (Approved -> Dispatched -> target) so a
+    /// single accepted delivery always lands on the requested terminal state and
+    /// a later replay is caught by the duplicate policy instead of advancing twice.
+    /// </summary>
+    private WorkflowState Advance(WorkflowState current, WorkflowState target)
+    {
+        if (current.IsTerminal())
+        {
+            return current;
+        }
+
+        var chain = new[] { WorkflowState.Approved, WorkflowState.Dispatched, target };
+        var state = current;
+        foreach (var step in chain)
+        {
+            if (state == step)
+            {
+                continue;
             }
 
-            await deadLetters.PublishAsync(new DeadLetterEvent(command.Event, attemptNumber, outcome.Detail ?? "Retry budget exhausted.", clock.UtcNow), cancellationToken).ConfigureAwait(false);
-            var deadIssue = new ValidationIssue("workflow.deadletter", outcome.Detail ?? "Delivery failed permanently.", ValidationSeverity.Error);
-            audit.Record(new AuditRecord(tenantId, eventId, "workflow.deadlettered", WorkflowState.Failed.ToString().ToLowerInvariant(), clock.UtcNow));
-            return new WorkflowDeliveryResult(false, DeliveryStatus.Rejected, WorkflowState.Failed, attemptNumber, new[] { deadIssue });
+            if (stateMachine.CanTransition(state, step))
+            {
+                state = stateMachine.Transition(state, step);
+            }
         }
 
-        if (outcome.Status == DeliveryStatus.Duplicate)
-        {
-            var duplicateIssue = new ValidationIssue("workflow.duplicate", outcome.Detail ?? "Delivery was reported as a duplicate.", ValidationSeverity.Warning);
-            audit.Record(new AuditRecord(tenantId, eventId, "workflow.duplicate", WorkflowState.Completed.ToString().ToLowerInvariant(), clock.UtcNow));
-            return new WorkflowDeliveryResult(false, DeliveryStatus.Duplicate, WorkflowState.Completed, attemptNumber, new[] { duplicateIssue });
-        }
-
-        var reason = outcome.Detail ?? $"Delivery {outcome.Status}.";
-        await deadLetters.PublishAsync(new DeadLetterEvent(command.Event, attemptNumber, reason, clock.UtcNow), cancellationToken).ConfigureAwait(false);
-        var terminal = new ValidationIssue("workflow.rejected", reason, ValidationSeverity.Error);
-        audit.Record(new AuditRecord(tenantId, eventId, "workflow.deadlettered", WorkflowState.Failed.ToString().ToLowerInvariant(), clock.UtcNow));
-        return new WorkflowDeliveryResult(false, outcome.Status, WorkflowState.Failed, attemptNumber, new[] { terminal });
+        return state;
     }
 
     private static WorkflowDeliveryResult Deny(DeliveryStatus status, ValidationIssue issue)
+        => new(false, status, WorkflowState.New, 0, new[] { issue });
+
+    private static void Decorate(TraceScope? scope, string status, bool failed, string? reason = null)
     {
-        var state = status switch
+        scope?.AddTag("status", status);
+        if (failed)
         {
-            DeliveryStatus.Duplicate => WorkflowState.Completed,
-            DeliveryStatus.Retryable => WorkflowState.RetryPending,
-            _ => WorkflowState.Failed,
-        };
-        return new WorkflowDeliveryResult(false, status, state, 0, new[] { issue });
+            scope?.MarkFailed(reason);
+        }
     }
 }
 
@@ -141,12 +260,17 @@ public sealed class WorkflowBatchDispatcher
 
     public async Task<IReadOnlyList<WorkflowDeliveryResult>> DispatchAsync(string tenantId, string actorId, IReadOnlyList<AssetEvent> events, string correlationId, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(events);
-        var results = new List<WorkflowDeliveryResult>(events.Count);
-        foreach (var assetEvent in events)
+        var results = new List<WorkflowDeliveryResult>();
+        foreach (var assetEvent in events ?? Array.Empty<AssetEvent>())
         {
-            var command = new WorkflowDeliveryCommand(tenantId, actorId, assetEvent, correlationId);
-            results.Add(await coordinator.DeliverAsync(command, cancellationToken).ConfigureAwait(false));
+            if (assetEvent is null)
+            {
+                continue;
+            }
+
+            results.Add(await coordinator.DeliverAsync(
+                new WorkflowDeliveryCommand(tenantId, actorId, assetEvent, correlationId),
+                cancellationToken).ConfigureAwait(false));
         }
 
         return results;

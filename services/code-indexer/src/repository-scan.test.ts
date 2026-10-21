@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import childProcess, { type ChildProcess } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
@@ -14,6 +15,23 @@ afterEach(async () => {
 });
 
 describe('scanRepositoryStructuralIndex', () => {
+  it('reports snapshot verification and rejects source changed after capture', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'code-indexer-snapshot-verification-'));
+    temporaryRoots.push(root);
+    await Promise.all(Array.from({ length: 40 }, (_, i) => writeFile(path.join(root, `file${i}.ts`), `export const value${i} = ${i};`)));
+    const progress: Array<{ stage: string; completed?: number; total?: number }> = [];
+    const request = { repositoryId: 'verification', analysisRevision: 'one', repositoryRoot: root };
+    const result = await scanRepositoryStructuralIndex({ ...request, onProgress: update => progress.push(update) });
+    expect(result.index.files).toHaveLength(40);
+    const verification = progress.filter(update => update.stage === 'snapshot-verify');
+    expect(verification[0]?.completed).toBe(0);
+    expect(verification[0]?.total).toBeGreaterThanOrEqual(result.index.files.length);
+    expect(verification.at(-1)?.completed).toBe(verification[0]?.total);
+    expect(verification.map(update => update.completed)).toEqual([...verification.map(update => update.completed)].sort((a, b) => a! - b!));
+    await expect(scanRepositoryStructuralIndex({ ...request, analysisRevision: 'changed', onProgress: update => {
+      if (update.stage === 'snapshot-verify' && update.completed === 0) writeFileSync(path.join(root, 'file0.ts'), 'export const changedAfterCapture = true;');
+    } })).rejects.toThrow('Repository changed during source snapshot capture');
+  });
   it('preserves complete and incremental indexes across background assembly and the injected parser path', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'code-indexer-assembly-equality-'));
     temporaryRoots.push(root);

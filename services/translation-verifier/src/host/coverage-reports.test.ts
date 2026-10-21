@@ -82,6 +82,41 @@ describe("framework coverage reports", () => {
     expect(parseCobertura(xml, { ...subject, signature: "DomainExtensions.StableFingerprint(this AttachmentInput attachment, int limit = 4)" }).executed).toBe(false);
     expect(() => parseCobertura(xml, { ...subject, signature: "DomainExtensions.StableFingerprint(PluginInvocation invocation)" })).toThrow("Cannot uniquely locate");
   });
+  it("attributes real Coverlet generic and nullable-reference overloads independently", () => {
+    const xml = `<coverage><packages><package><classes><class name="AssetUpgradeGateway.Domain.ContentSignature" filename="Domain/AssetLifecycle.cs"><methods>
+      <method name="Matches" signature="(System.ReadOnlySpan\`1&lt;System.Byte&gt;)"><lines><line number="1" hits="1"/><line number="2" hits="0"/></lines></method>
+      <method name="Matches" signature="(System.String,System.ReadOnlySpan\`1&lt;System.Byte&gt;)"><lines><line number="3" hits="0"/></lines></method>
+    </methods></class></classes></package></packages></coverage>`;
+    const subject = { path: "Domain/AssetLifecycle.cs", name: "Matches" };
+    expect(parseCobertura(xml, { ...subject, signature: "AssetUpgradeGateway.Domain.ContentSignature.Matches(ReadOnlySpan<byte> content)" })).toMatchObject({ executed: true, lineCoverage: 50 });
+    expect(parseCobertura(xml, { ...subject, signature: "AssetUpgradeGateway.Domain.ContentSignature.Matches(string? fileName, ReadOnlySpan<byte> content)" })).toMatchObject({ executed: false, lineCoverage: 0 });
+    expect(() => parseCobertura(xml, { ...subject, signature: "ContentSignature.Matches(ReadOnlySpan<int> content)" })).toThrow("0 matches");
+    expect(() => parseCobertura(xml, { ...subject, signature: "ContentSignature.Matches" })).toThrow("2 matches");
+  });
+  it("matches nested generic arguments without confusing nullable values, array ranks or ref overloads", () => {
+    const xml = `<coverage><packages><package><classes><class name="App.Parser" filename="Parser.cs"><methods>
+      <method name="Read" signature="(System.Collections.Generic.Dictionary\`2&lt;System.String,System.Collections.Generic.List\`1&lt;System.Nullable\`1&lt;System.Int32&gt;[]&gt;&gt;,System.String)"><lines><line number="1" hits="1"/></lines></method>
+      <method name="Read" signature="(System.Int32)"><lines><line number="2" hits="1"/></lines></method>
+      <method name="Read" signature="(System.Nullable\`1&lt;System.Int32&gt;)"><lines><line number="3" hits="0"/></lines></method>
+      <method name="Read" signature="(System.Int32&amp;)"><lines><line number="4" hits="0"/></lines></method>
+    </methods></class></classes></package></packages></coverage>`;
+    const subject = { path: "Parser.cs", name: "Read" };
+    const parse = (params: string) => parseCobertura(xml, { ...subject, signature: `Parser.Read(${params})` });
+    expect(parse('Dictionary<string, List<int?[]>> values, string? separator = "a,b"').executed).toBe(true);
+    expect(parse("int value").executed).toBe(true);
+    expect(parse("int? value").executed).toBe(false);
+    expect(parse("ref int value").executed).toBe(false);
+    expect(() => parse('Dictionary<string, List<int?[,]>> values, string separator')).toThrow("0 matches");
+    expect(() => parse('Dictionary<string, List<byte?[]>> values, string separator')).toThrow("0 matches");
+    expect(() => parse('Dictionary<string, List<int?[]> values, string separator')).toThrow("0 matches");
+  });
+  it("rejects ambiguous short generic type names and honors explicit namespaces", () => {
+    const method = (owner: string, hits: number) => `<method name="Read" signature="(${owner}.Box\`1&lt;System.Byte&gt;)"><lines><line number="1" hits="${hits}"/></lines></method>`;
+    const xml = `<coverage><packages><package><classes><class name="App.Parser" filename="Parser.cs"><methods>${method("First", 1)}${method("Second", 0)}</methods></class></classes></package></packages></coverage>`;
+    const subject = { path: "Parser.cs", name: "Read" };
+    expect(() => parseCobertura(xml, { ...subject, signature: "Parser.Read(Box<byte> value)" })).toThrow("2 matches");
+    expect(parseCobertura(xml, { ...subject, signature: "Parser.Read(global::Second.Box<byte> value)" }).executed).toBe(false);
+  });
   it("maps real Coverlet async state machines to their declaring method and rejects ambiguous overloads", () => {
     const state = (owner: string, ordinal: number) => `<class name="${owner}/&lt;SubmitAsync&gt;d__${ordinal}" filename="Service.cs"><methods><method name="MoveNext" signature="()"><lines><line number="5" hits="1"/></lines></method></methods></class>`;
     const report = (classes: string) => `<coverage><sources><source>/project</source></sources><packages><package><classes>${classes}</classes></package></packages></coverage>`;

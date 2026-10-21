@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
@@ -16,27 +16,92 @@ async function eventually<T>(read: () => T, done: (value: T) => boolean): Promis
 }
 
 describe("CodexWorkspaceTranslationRuntime", () => {
+  it.each(['sibling', 'nested', 'outside'])('rejects a history root outside the direct-child allowlist (%s)', async kind => {
+    const root = await mkdtemp(join(tmpdir(), 'codex-history-boundary-'));
+    const runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root,
+      compileCommand: { executable: process.execPath, args: ['--version'] } });
+    try {
+      await writeFile(join(root, 'main.ts'), 'export const value = 0;');
+      const runId = '11111111-2222-3333-4444-555555555555';
+      const history = kind === 'sibling' ? join(root, '.forexpore', 'history-views-backup', runId)
+        : kind === 'nested' ? join(root, '.forexpore', 'history-views', 'nested', runId)
+        : join(root, '.forexpore', 'history-views', '..', runId);
+      expect(() => runtime.start({ spec: 'implement value', sourceLanguage: 'TypeScript', targetLanguage: 'TypeScript',
+        context: [], workspaceFiles: ['main.ts'], writeFiles: ['main.ts'], historyView: {
+          root: history, files: ['Legacy.ts'], repositoryId: 'history', analysisRevision: 'r1', moduleId: 'legacy', runId,
+          manifestHash: 'a'.repeat(64),
+        } })).toThrow('历史参考目录无效');
+    } finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('rejects a history directory link that resolves outside the allowlist before launching Codex', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codex-history-link-'));
+    const runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root,
+      compileCommand: { executable: process.execPath, args: ['--version'] } });
+    try {
+      await writeFile(join(root, 'main.ts'), 'export const value = 0;');
+      const runId = '11111111-2222-3333-4444-555555555555';
+      await mkdir(join(root, '.forexpore', 'history-views'), { recursive: true });
+      const outside = join(root, 'outside'); await mkdir(outside);
+      const history = join(root, '.forexpore', 'history-views', runId);
+      await symlink(outside, history, process.platform === 'win32' ? 'junction' : 'dir');
+      const run = runtime.start({ spec: 'implement value', sourceLanguage: 'TypeScript', targetLanguage: 'TypeScript',
+        context: [], workspaceFiles: ['main.ts'], writeFiles: ['main.ts'], historyView: {
+          root: history, files: ['Legacy.ts'], repositoryId: 'history', analysisRevision: 'r1', moduleId: 'legacy', runId,
+          manifestHash: 'a'.repeat(64),
+        } });
+      const result = await eventually(() => runtime.get(run.id), value => value.status === 'failed');
+      expect(result.error).toContain('symlink escapes its allowlist');
+      expect(result.agent?.stages ?? []).toHaveLength(0);
+      expect(await readFile(join(root, 'main.ts'), 'utf8')).toBe('export const value = 0;');
+    } finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('starts without model credentials and refuses the translation when credentials are missing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codex-deferred-credentials-'));
+    let preparations = 0;
+    const runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root,
+      compileCommand: { executable: process.execPath, args: ['--version'] },
+      prepareCodexHome: async () => { preparations++; throw new Error('Configure the model API Key.'); } });
+    try {
+      await writeFile(join(root, 'main.ts'), 'export const value = 0;');
+      expect(runtime.configuration().agent).toBe('codex');
+      expect(preparations).toBe(0);
+      const run = runtime.start({ spec: 'implement value', translationMode: 'direct-translator', sourceLanguage: 'TypeScript', targetLanguage: 'TypeScript',
+        context: [{ id: 'requirement', kind: 'summary', content: 'implement value' }], workspaceFiles: ['main.ts'], writeFiles: ['main.ts'] });
+      const failed = await eventually(() => runtime.get(run.id), value => value.status === 'failed');
+      expect(failed.error).toBe('Configure the model API Key.');
+      expect(preparations).toBe(1);
+      expect(await readFile(join(root, 'main.ts'), 'utf8')).toBe('export const value = 0;');
+    } finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+  });
+
   it('cancels the owned Codex process tree before returning', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codex-cancel-tree-'));
     const scripts = await mkdtemp(join(tmpdir(), 'codex-cancel-cli-'));
     let descendant: number | undefined;
     let runtime: CodexWorkspaceTranslationRuntime | undefined;
+    let cleanups = 0;
     const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
     try {
       await writeFile(join(root, 'main.ts'), 'export const value = 0;');
       const marker = join(scripts, 'pid.json'), cli = join(scripts, 'codex.mjs');
       await writeFile(cli, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+if (process.env.RECAST_TEST_RUN_CREDENTIAL !== 'request-only-key' || process.env.CODEX_HOME !== process.env.RECAST_TEST_HOME) process.exit(31);
 writeFileSync(process.env.RECAST_TEST_PID_FILE, JSON.stringify({ pid: child.pid }));
 setInterval(() => {}, 1000);`);
       runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root, codexCommand: cli,
-        environment: { RECAST_TEST_PID_FILE: marker }, compileCommand: { executable: process.execPath, args: ['--check', 'main.ts'] } });
+        prepareCodexHome: async () => ({ path: scripts, generated: false,
+          environment: { RECAST_TEST_RUN_CREDENTIAL: 'request-only-key' }, cleanup: async () => { cleanups++; } }),
+        environment: { RECAST_TEST_PID_FILE: marker, RECAST_TEST_HOME: scripts }, compileCommand: { executable: process.execPath, args: ['--check', 'main.ts'] } });
       const run = runtime.start({ spec: 'implement value', translationMode: 'direct-translator', sourceLanguage: 'TypeScript', targetLanguage: 'TypeScript',
         context: [{ id: 'requirement', kind: 'summary', content: 'implement value' }], workspaceFiles: ['main.ts'], writeFiles: ['main.ts'] });
       expect(await eventually(() => existsSync(marker), Boolean)).toBe(true);
       descendant = JSON.parse(await readFile(marker, 'utf8')).pid;
       expect(alive(descendant!)).toBe(true);
       expect((await runtime.cancel(run.id)).status).toBe('cancelled');
+      expect(cleanups).toBe(1);
       expect(await eventually(() => alive(descendant!), value => !value)).toBe(false);
       expect(await readFile(join(root, 'main.ts'), 'utf8')).toBe('export const value = 0;');
     } finally {
@@ -129,6 +194,35 @@ writeFileSync(process.argv[process.argv.indexOf('--output-last-message') + 1], '
         expect(completed.acceptance).toBe("compilation-only");
       } finally { await runtime.shutdown(); }
     } finally { await Promise.all([rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }), rm(scripts, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })]); }
+  });
+  it.each([
+    ['analyzer', JSON.stringify({ status: 'blocked', summary: 'Every shell command was rejected by execution policy.' })],
+    ['analyzer', '# Implementation Plan\nAnalyzer tooling note: process execution was blocked by policy, so the current file bodies and manifest could not be opened.'],
+    ['translator', JSON.stringify({ status: 'blocked', summary: 'Implementation was not applied; the workspace is read-only.' })],
+    ['translator', 'I could not apply the repair because this session’s tool policy blocks all file access.'],
+  ])('rejects a zero-exit %s that reports blocked tools before compiling or verifying', async (stage, message) => {
+    const root = await mkdtemp(join(tmpdir(), 'codex-blocked-test-'));
+    const scripts = await mkdtemp(join(tmpdir(), 'codex-blocked-script-'));
+    let runtime: CodexWorkspaceTranslationRuntime | undefined;
+    try {
+      await writeFile(join(root, 'main.cs'), 'class Target {}');
+      const cli = join(scripts, 'blocked.mjs');
+      await writeFile(cli, `import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[process.argv.indexOf('--output-last-message') + 1], ${JSON.stringify(message)});
+`);
+      runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root, codexCommand: cli,
+        compileCommand: { executable: process.execPath, args: ['--version'] } });
+      const run = runtime.start({ spec: 'Implement target', sourceLanguage: 'C#', targetLanguage: 'C#',
+        workspaceFiles: ['main.cs'], writeFiles: ['main.cs'], context: [],
+        ...(stage === 'translator' ? { translationMode: 'direct-translator' } : {}) });
+      const result = await eventually(() => runtime!.get(run.id), value => ['completed', 'failed'].includes(value.status));
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('执行未完成');
+      expect(result.compilations).toEqual([]);
+      expect(result.agent?.stages).toHaveLength(1);
+      if (stage === 'analyzer') expect(result.plan).toBeUndefined();
+      expect(await readFile(join(root, 'main.cs'), 'utf8')).toBe('class Target {}');
+    } finally { await runtime?.shutdown(); await Promise.all([rm(root, { recursive: true, force: true }), rm(scripts, { recursive: true, force: true })]); }
   });
   it("does not accept an interrupted integration process that exits zero without a final message", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-integration-incomplete-"));
@@ -457,7 +551,7 @@ if (prompt.includes('Analyzer Codex')) {
       });
       const failed = await eventually(() => runtime.get(repaired.id), value => ["completed", "failed"].includes(value.status));
       expect(failed.status).toBe("failed");
-      expect(failed.error).toContain("after production verifier feedback");
+      expect(failed.error).toContain("Translator 多轮未修改允许的生产文件");
       expect(failed.verificationRepairs?.at(-1)?.status).toBe("failed");
       await runtime.shutdown();
     } finally {
@@ -485,7 +579,7 @@ const prompt = readFileSync(0, 'utf8');
 if (!prompt.includes('You are the Analyzer Codex')) {
   const plan = ${JSON.stringify(invalidPlan)};
   const expected = typeof plan === 'string' ? plan : JSON.stringify(plan);
-  if (readFileSync('CODEX_IMPLEMENTATION_PLAN.md', 'utf8') !== expected || !prompt.includes(expected)) process.exit(23);
+  if (readFileSync('CODEX_IMPLEMENTATION_PLAN.md', 'utf8') !== expected || prompt.includes(expected) || !prompt.includes('CODEX_IMPLEMENTATION_PLAN.md')) process.exit(23);
   writeFileSync('target/src.cs', 'class Target { public int Answer() => 42; }\\n');
   writeFileSync(output, 'Implemented the public requirement.');
 }

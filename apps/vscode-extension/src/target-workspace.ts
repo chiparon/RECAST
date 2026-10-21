@@ -234,13 +234,17 @@ export async function addTargetWorkspace(
   }
   options.signal?.throwIfAborted();
   const config = vscode.workspace.getConfiguration('forexplore');
+  // An explicit workspace value (including []) overrides user settings. Save
+  // the choice at that level so the next synchronization actually sees it.
+  const configurationTarget = config.inspect('targetRepositoryPaths')?.workspaceValue !== undefined
+    ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
   // Read the existing selection through the same normalisation that decides the
   // match, so a quoted duplicate is recognised instead of being appended twice.
   const previous = normaliseConfiguredPaths(config.get<unknown[]>('targetRepositoryPaths', []));
   const previousResolved = resolveWorkspaceConfiguredPaths(previous);
   const remember = async (workspacePath = resolved) => {
     if (!previousResolved.some((entry) => sameTargetPath(entry, workspacePath))) {
-      await config.update('targetRepositoryPaths', [...previous, workspacePath], vscode.ConfigurationTarget.Global);
+      await config.update('targetRepositoryPaths', [...previous, workspacePath], configurationTarget);
     }
   };
   const folders = vscode.workspace.workspaceFolders ?? [];
@@ -258,7 +262,7 @@ export async function addTargetWorkspace(
   await remember();
   options.signal?.throwIfAborted();
   if (!await attachWorkspaceFolder(resolved, options.signal)) {
-    await config.update('targetRepositoryPaths', previous, vscode.ConfigurationTarget.Global);
+    await config.update('targetRepositoryPaths', previous, configurationTarget);
     // An empty window has no workspace to splice a folder into, which is a
     // permanent condition rather than a transient one.
     throw new Error(folders.length === 0

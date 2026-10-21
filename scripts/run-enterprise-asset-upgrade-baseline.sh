@@ -19,6 +19,12 @@ agent_shell="${BASELINE_AGENT:-claude}"
 # sonnet [1m] alias keeps the long context mode while remaining accepted by
 # the current Claude Code model registry.
 model="${BASELINE_MODEL:-claude-sonnet-4-6[1m]}"
+model_explicit=0
+
+# A baseline must be sourced from an explicit clean snapshot when the working
+# target directory belongs to another experiment.
+target_source="${BASELINE_TARGET_SOURCE:-$target_source}"
+requirements_source="$target_source/requirements"
 
 usage() {
   cat <<'EOF'
@@ -29,12 +35,14 @@ Options:
   --run-id ID          Store this run under experiments/enterprise-asset-upgrade/results/ID.
   --agent NAME         Agent shell: claude (default) or codex.
   --model MODEL        Claude shell model alias (default: claude-sonnet-4-6[1m]).
+  BASELINE_TARGET_SOURCE Override the source skeleton directory.
   --help               Show this help.
 
 Environment:
   CODEX_BIN             Codex executable, defaults to codex.
   CLAUDE_BIN            Claude executable when --agent claude is selected.
   DEEPSEEK_API_KEY      DeepSeek key used by the Claude Code Anthropic adapter.
+  DEEPSEEK_API_BASE     DeepSeek Responses API base URL (Codex; default https://api.deepseek.com/).
   BASELINE_RESULTS_ROOT  Override the results directory.
 EOF
 }
@@ -52,11 +60,15 @@ while (($#)); do
       agent_shell="$2"; shift 2 ;;
     --model)
       (($# >= 2)) || { echo "--model requires a value" >&2; exit 2; }
-      model="$2"; shift 2 ;;
+      model="$2"; model_explicit=1; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "$agent_shell" == "codex" && "$model_explicit" == "0" && -z "${BASELINE_MODEL:-}" ]]; then
+  model="deepseek-flash"
+fi
 
 run_dir="$results_root/$run_id"
 
@@ -75,7 +87,11 @@ fi
 
 # cp only the target project. In particular, source-repositories is never copied
 # and is not passed through --add-dir or the prompt.
-cp -a "$target_source" "$run_dir/target-project"
+mkdir -p "$run_dir/target-project"
+cp -a "$target_source"/. "$run_dir/target-project"/
+for transient in .forexpore .forexplore .git target; do
+  rm -rf "$run_dir/target-project/$transient"
+done
 mkdir -p "$run_dir/requirements"
 cp -a "$requirements_source"/. "$run_dir/requirements/"
 
@@ -101,12 +117,19 @@ copy created specifically for this run.
 EOF
 fi
 
+if [[ "$agent_shell" == "codex" ]]; then
+  api_base="${DEEPSEEK_API_BASE:-https://api.deepseek.com/}"
+else
+  api_base="https://api.deepseek.com/anthropic"
+fi
+
 cat > "$run_dir/run-manifest.json" <<EOF
 {
   "runId": "${run_id}",
   "kind": "coding-agent-baseline",
+  "language": "C#",
   "provider": "deepseek",
-  "apiBase": "https://api.deepseek.com/anthropic",
+  "apiBase": "${api_base}",
   "settingSources": "project,local",
   "model": "${model}",
   "apiModel": "deepseek-flash",
@@ -115,6 +138,7 @@ cat > "$run_dir/run-manifest.json" <<EOF
   "workspace": "target-project",
   "requirements": "requirements",
   "historyExposed": false,
+  "hiddenTestsExposed": false,
   "sourceDataset": "target-project"
 }
 EOF
@@ -128,8 +152,46 @@ else
   exit 2
 fi
 command -v "$launcher" >/dev/null 2>&1 || { echo "Coding Agent executable not found: $launcher" >&2; exit 127; }
-if [[ "$agent_shell" == "claude" && "${BASELINE_DRY_RUN:-0}" != "1" ]]; then
-  [[ -n "${DEEPSEEK_API_KEY:-}" ]] || { echo "DEEPSEEK_API_KEY is required for Claude Code + DeepSeek." >&2; exit 1; }
+if [[ "${BASELINE_DRY_RUN:-0}" != "1" ]]; then
+  [[ -n "${DEEPSEEK_API_KEY:-}" ]] || { echo "DEEPSEEK_API_KEY is required for DeepSeek baseline." >&2; exit 1; }
+fi
+
+agent_temp_root=""
+agent_workspace="$run_dir/target-project"
+codex_home=""
+if [[ "${BASELINE_DRY_RUN:-0}" != "1" ]]; then
+  # Keep the Agent outside the repository containing this result directory.
+  # Otherwise git can discover the monorepo's ancestor .git directory even
+  # though no repository metadata was copied into the baseline workspace.
+  agent_temp_root="$(mktemp -d /tmp/recast-csharp-baseline.XXXXXX)"
+  agent_workspace="$agent_temp_root/target-project"
+  mkdir -p "$agent_workspace"
+  cp -a "$run_dir/target-project"/. "$agent_workspace"/
+  chmod 700 "$agent_temp_root"
+  if [[ "$agent_shell" == "codex" ]]; then
+    codex_home="$agent_temp_root/codex-home"
+    mkdir -p "$codex_home"
+    chmod 700 "$codex_home"
+  fi
+  cleanup_agent_temp() {
+    chmod -R u+w "$agent_temp_root" 2>/dev/null || true
+    rm -rf "$agent_temp_root"
+  }
+  trap cleanup_agent_temp EXIT
+fi
+if [[ "$agent_shell" == "codex" && "${BASELINE_DRY_RUN:-0}" != "1" ]]; then
+  cat > "$codex_home/config.toml" <<EOF
+model_provider = "deepseek"
+model = "$model"
+model_reasoning_effort = "high"
+
+[model_providers.deepseek]
+name = "deepseek"
+base_url = "${DEEPSEEK_API_BASE:-https://api.deepseek.com/}"
+wire_api = "responses"
+experimental_bearer_token = "$DEEPSEEK_API_KEY"
+EOF
+  chmod 600 "$codex_home/config.toml"
 fi
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf 'Starting baseline in %s\n' "$run_dir"
@@ -144,14 +206,14 @@ if [[ "${BASELINE_DRY_RUN:-0}" == "1" ]]; then
 else
   set +e
   if [[ "$agent_shell" == "codex" ]]; then
-    (cd "$run_dir/target-project" && "$launcher" exec \
-      --model "$model" --cd "$run_dir/target-project" \
-      --sandbox danger-full-access --skip-git-repo-check --ephemeral --json \
+    (cd "$agent_workspace" && CODEX_HOME="$codex_home" "$launcher" exec \
+      --model "$model" --cd "$agent_workspace" \
+      --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral --json \
       -o "$run_dir/agent-final.txt" - < "$run_dir/task-prompt.md") \
       2>&1 | tee "$run_dir/agent-stream.jsonl"
   else
     (
-      cd "$run_dir/target-project"
+      cd "$agent_workspace"
       ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic" \
       ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY" \
       ANTHROPIC_API_KEY="$DEEPSEEK_API_KEY" \
@@ -173,6 +235,14 @@ else
 fi
 
 finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Persist the disposable Agent workspace only after the Agent exits. The
+# evaluator always reads this copy, never the temporary staging directory.
+if [[ "${BASELINE_DRY_RUN:-0}" != "1" ]]; then
+  chmod -R u+w "$run_dir/target-project" 2>/dev/null || true
+  rm -rf "$run_dir/target-project"
+  mkdir -p "$run_dir/target-project"
+  cp -a "$agent_workspace"/. "$run_dir/target-project"/
+fi
 python3 - "$run_dir/run-result.json" "$run_id" "$started_at" "$finished_at" "$agent_status" "$run_dir/agent-stream.jsonl" <<'PY'
 import json, pathlib, sys
 out, run_id, started, finished, status, log_path = sys.argv[1:]
@@ -241,9 +311,12 @@ PY
 # outside target-project and is never copied into the Agent workspace.
 hidden_evaluator="$dataset_root/evaluation/run-hidden-evaluation.sh"
 hidden_status=2
-if [[ -x "$hidden_evaluator" ]]; then
+if [[ "${BASELINE_DRY_RUN:-0}" == "1" ]]; then
+  hidden_status=0
+  printf '%s\n' '{"type":"dry-run","message":"Hidden evaluator skipped."}' > "$run_dir/hidden-evaluation.log"
+elif [[ -f "$hidden_evaluator" ]]; then
   set +e
-  "$hidden_evaluator" \
+  bash "$hidden_evaluator" \
     --target "$run_dir/target-project" \
     --output "$run_dir/hidden-evaluation.json" \
     2>&1 | tee "$run_dir/hidden-evaluation.log"

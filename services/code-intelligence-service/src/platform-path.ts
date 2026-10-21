@@ -17,3 +17,11 @@ export function platformLocalPath(stored: string): string {
   const windows = /^([A-Za-z]):[\\/](.*)$/.exec(stored);
   return windows ? `/mnt/${windows[1]!.toLowerCase()}/${windows[2]!.replace(/\\/g, '/')}` : stored;
 }
+
+/** One identity for a drive checkout, including its mounted WSL spelling. */
+export function repositoryPathIdentity(value: string): string {
+  const normalized = value.replaceAll('\\', '/').replace(/\/+/g, '/').replace(/\/$/, '');
+  const mounted = /^\/mnt\/([a-z])(?:\/(.*))?$/i.exec(normalized);
+  const drive = mounted ? `${mounted[1]}:/${mounted[2] ?? ''}` : normalized;
+  return /^[a-z]:\//i.test(drive) ? drive.toLowerCase() : drive || '/';
+}

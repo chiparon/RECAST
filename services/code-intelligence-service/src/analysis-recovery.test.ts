@@ -31,6 +31,38 @@ async function setup() {
 }
 
 describe('failed projection recovery', () => {
+  it('scans a shared repository using the current platform path without rewriting its stored root', async () => {
+    const { store, scanner, runtime } = await setup();
+    const repository = (await store.getRepository('recover'))!;
+    const stored = process.platform === 'win32' ? '/mnt/e/Code/history' : 'E:\\Code\\history';
+    await store.putRepository({ ...repository, localPath: stored });
+    const scan = vi.spyOn(scanner, 'scan').mockRejectedValueOnce(new Error('stop-after-root-validation'));
+    await expect(runtime.coordinator.run({ repositoryId: 'recover' })).rejects.toThrow('stop-after-root-validation');
+    expect(scan).toHaveBeenCalledWith(expect.objectContaining({ root: process.platform === 'win32' ? 'E:\\Code\\history' : '/mnt/e/Code/history' }));
+    expect((await store.getRepository('recover'))?.localPath).toBe(stored);
+  });
+  it('projects from the persisted immutable revision after the source spool disappears', async () => {
+    const { store, scanner, runtime, root } = await setup();
+    vi.mocked(store.appendSearchDocuments).mockRestore();
+    const scan = RepositoryStructuralScanner.prototype.scan.bind(scanner);
+    let dispose!: () => Promise<void>;
+    vi.spyOn(scanner, 'scan').mockImplementation(async request => {
+      const result = await scan(request);
+      const reader = result.sourceReader!;
+      dispose = reader.dispose!.bind(reader);
+      return result;
+    });
+    const persist = store.putStructuralIndexFromSource.bind(store);
+    vi.spyOn(store, 'putStructuralIndexFromSource').mockImplementation(async (...args) => {
+      await persist(...args);
+      await dispose();
+      await writeFile(path.join(root, 'stable.ts'), 'export function changedAfterCapture() {}');
+    });
+    const result = await runtime.coordinator.run({ repositoryId: 'recover' });
+    expect(result.status).toBe('ready');
+    expect(await store.getSourceText(result.scope, 'stable.ts')).toContain('function stable');
+    expect((await store.listSearchDocuments(result.scope)).some(document => document.text.includes('function stable'))).toBe(true);
+  });
   it('reuses durable parsing after reopening without rewriting the failed revision', async () => {
     const { store, scanner, scan, runtime } = await setup();
     const progress: AnalysisProgress[] = [];
@@ -66,6 +98,7 @@ describe('failed projection recovery', () => {
     expect(index.symbols.map(symbol => symbol.name).sort()).toEqual(['added', 'changed', 'stable']);
     expect(await store.getSourceText(result.scope, 'main.ts')).toContain('return 42');
   });
+
 
   it('never reuses a partially persisted structural index', async () => {
     const { store, scan, runtime } = await setup();

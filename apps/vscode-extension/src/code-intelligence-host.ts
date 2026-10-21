@@ -29,7 +29,7 @@ import type {
 import { projectAnalysisPresentation } from './project-analysis-presentation';
 import { MAX_RETRIEVAL_SCOPES, MAX_SELECTED_HISTORY_MODULES, type WorkspaceEvidenceScope, type WorkspaceHistoryCandidate, type WorkspaceHistoryView } from '@forexplore/contracts';
 import type { ModuleReranker } from '../../../services/code-intelligence-service/src/module-reranker';
-import { platformLocalPath } from '../../../services/code-intelligence-service/src/platform-path';
+import { platformLocalPath, repositoryPathIdentity } from '../../../services/code-intelligence-service/src/platform-path';
 import { createIndexingProgressReporter, indexingProgressMessage, isIndexingCancellation,
   type IndexingProgress, type RepositoryIndexingProgress } from './indexing-progress';
 
@@ -115,6 +115,9 @@ export function boundHistoryViewFiles(
 
 /** Local-only SeekDB configuration; credentials never cross a UI boundary. */
 export interface SeekDbRuntimeConfig {
+  initialization?: { onProgress?: (progress: {
+    stage: 'waiting' | 'initializing' | 'migrating' | 'ready'; message: string; migration?: number;
+  }) => void; timeoutMs?: number };
   host: string;
   port: number;
   user: string;
@@ -316,6 +319,8 @@ export interface SynchronizeCodeIntelligenceRequest {
   forceFull?: boolean;
   /** Registration-only requests are useful for a lightweight status refresh. */
   scan?: boolean;
+  /** Resume project modelling from existing indexes, even when scanning is disabled or restricted by role. */
+  resumeProjectAnalysis?: boolean;
   /**
    * A prebuilt corpus can contain a stale registry "indexing" flag while its
    * active immutable revision is already ready. Repair that presentation-only
@@ -372,9 +377,7 @@ function defaultRuntimeFactory(
 }
 
 function stableIdentityKey(localPath: string): string {
-  const normalized = process.platform === 'win32'
-    ? path.resolve(localPath).toLowerCase()
-    : path.resolve(localPath);
+  const normalized = repositoryPathIdentity(path.resolve(platformLocalPath(localPath)));
   const digest = createHash('sha256').update(normalized).digest('hex');
   return `${identityKeyPrefix}:${digest}`;
 }
@@ -557,6 +560,9 @@ export class CodeIntelligenceHost {
   #ephemeralRepositoryIds = new Map<string, RepositoryId>();
   /** Repository visibility belongs to one VS Code window, not the shared persistent registry. */
   #visibleRepositoryIds = new Set<RepositoryId>();
+  #indexingProgress = new Map<RepositoryId, NonNullable<CodeIntelligenceRepositoryPresentation['indexing']>>();
+  #projectTasks = new Set<Promise<void>>();
+  #lastPresentation: CodeIntelligencePresentation | undefined;
   /** Per-panel-host display choice only; never persisted as repository state. */
   #selectedRevisions = new Map<RepositoryId, string>();
   /**
@@ -928,7 +934,7 @@ export class CodeIntelligenceHost {
       return await this.presentationFor(runtime);
     } catch (error) {
       this.logFailure('read code intelligence status', error);
-      return this.emptyPresentation('error', genericRuntimeFailure());
+      return this.unavailablePresentation();
     }
   }
 
@@ -1183,14 +1189,21 @@ export class CodeIntelligenceHost {
 
     const scannedRepositoryIds: RepositoryId[] = [];
     if (request.scan !== false) {
-      for (const repository of registered.values()) {
-        request.signal?.throwIfAborted();
-        if (request.scanRepositoryIds && !request.scanRepositoryIds.includes(repository.repositoryId)) continue;
+      const pending = [...registered.values()].filter(repository => {
+        if (request.scanRepositoryIds && !request.scanRepositoryIds.includes(repository.repositoryId)) return false;
         // A path explicitly configured as history can also be a workspace
         // target. Role precedence must not suppress that requested scan.
-        if (requestedScanPaths && !requestedScanPaths.has(repositoryInputKey(repository))) continue;
+        if (requestedScanPaths && !requestedScanPaths.has(repositoryInputKey(repository))) return false;
         if (request.scanNewOnly && previouslyVisible.has(repository.repositoryId) && repository.activeRevision &&
-          repository.analysisStatus !== 'failed') continue;
+          repository.analysisStatus !== 'failed') return false;
+        return true;
+      });
+      pending.forEach((repository, index) => this.#indexingProgress.set(repository.repositoryId,
+        { stage: 'queued', position: index + 1, count: pending.length }));
+      this.#onChange?.();
+      try {
+      for (const [index, repository] of pending.entries()) {
+        request.signal?.throwIfAborted();
         try {
           this.#output?.appendLine(`[forexplore] indexing ${repository.role} repository: ${repository.displayName}.`);
           // The coordinator flips the registry to 'indexing' inside its own
@@ -1200,8 +1213,9 @@ export class CodeIntelligenceHost {
           await runtime.registry.setAnalysisStatus?.(repository.repositoryId, 'indexing');
           this.#onChange?.();
           const onProgress = createIndexingProgressReporter(progress => {
+            this.#indexingProgress.set(repository.repositoryId, { ...progress, position: index + 1, count: pending.length });
             this.#output?.appendLine(`[RECAST] ${indexingProgressMessage(progress)}`);
-            request.onProgress?.(progress);
+            request.onProgress?.({ ...progress, position: index + 1, count: pending.length });
           });
           await runtime.coordinator.run({
             repositoryId: repository.repositoryId,
@@ -1217,16 +1231,7 @@ export class CodeIntelligenceHost {
           // cancellation must not relabel that success or skip its projects.
           scannedRepositoryIds.push(repository.repositoryId);
           const current = await runtime.registry.get(repository.repositoryId);
-          if (current?.activeRevision) {
-            const scope = { repositoryId: current.repositoryId, analysisRevision: current.activeRevision };
-            const projects = runtime.store.listProjects
-              ? await runtime.store.listProjects(scope)
-              : (await runtime.queryPort.listProjects(scope)).projects.map((project) => project.value);
-            const chosen = this.resolveProjectChoice(repository, projects).projectId;
-            for (const project of projects) {
-              if (repository.role === 'history' || project.projectId === chosen) this.scheduleProject(project);
-            }
-          }
+          if (current?.activeRevision) await this.scheduleRepositoryProjects(runtime, current);
         } catch (error) {
           failedRepositoryIds.push(repository.repositoryId);
           await this.markIndexFailure(runtime, repository.repositoryId);
@@ -1238,8 +1243,29 @@ export class CodeIntelligenceHost {
           }
           this.logFailure(`index repository ${repository.repositoryId}`, error);
         } finally {
+          this.#indexingProgress.delete(repository.repositoryId);
           this.#onChange?.();
         }
+      }
+      } finally {
+        this.#indexingProgress.clear();
+        this.#onChange?.();
+      }
+    }
+
+    // Startup and credential saves can resume modelling without rescanning source.
+    // Ordinary registration-only refreshes remain read-only. A target models only
+    // its selected project; completed artifacts are reused by ensureProjectAnalysis.
+    for (const repository of registered.values()) {
+      if (!repository.activeRevision || scannedRepositoryIds.includes(repository.repositoryId) ||
+          failedRepositoryIds.includes(repository.repositoryId) ||
+          !['ready', 'degraded'].includes(this.presentationAnalysisStatus(repository))) continue;
+      const scanRequested = request.scan !== false &&
+        (!request.scanRepositoryIds || request.scanRepositoryIds.includes(repository.repositoryId)) &&
+        (!requestedScanPaths || requestedScanPaths.has(repositoryInputKey(repository)));
+      if (request.resumeProjectAnalysis || scanRequested) {
+        request.signal?.throwIfAborted();
+        await this.scheduleRepositoryProjects(runtime, repository);
       }
     }
 
@@ -1248,9 +1274,8 @@ export class CodeIntelligenceHost {
     try {
       presentation = await this.presentationFor(runtime);
     } catch (error) {
-      this.#lastFailure = true;
       this.logFailure('read synchronized code intelligence status', error);
-      presentation = this.emptyPresentation('error', genericRuntimeFailure());
+      presentation = this.unavailablePresentation();
     }
     this.#output?.appendLine(
       `[forexplore] code intelligence synchronization complete: ${scannedRepositoryIds.length} scanned, ${failedRepositoryIds.length} failed.`,
@@ -1288,6 +1313,17 @@ export class CodeIntelligenceHost {
       onChange: this.#onChange,
     });
     return this.#projectAnalysis;
+  }
+
+  private async scheduleRepositoryProjects(runtime: CodeIntelligenceRuntime, repository: RepositoryRecord): Promise<void> {
+    if (!repository.activeRevision) return;
+    const scope = { repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision };
+    const projects = runtime.store.listProjects ? await runtime.store.listProjects(scope)
+      : (await runtime.queryPort.listProjects(scope)).projects.map(project => project.value);
+    const chosen = this.resolveProjectChoice(repository, projects).projectId;
+    for (const project of projects) {
+      if (repository.role === 'history' || project.projectId === chosen) this.scheduleProject(project);
+    }
   }
 
   /**
@@ -1328,8 +1364,10 @@ export class CodeIntelligenceHost {
 
   private scheduleProject(scope: ProjectAnalysisScope, force = false): void {
     if (this.#disposed) return;
-    void this.ensureProjectAnalysis(scope, force)
-      .catch((error) => this.logFailure('project module analysis', error));
+    const task = this.ensureProjectAnalysis(scope, force)
+      .catch((error) => this.logFailure('project module analysis', error))
+      .finally(() => this.#projectTasks.delete(task));
+    this.#projectTasks.add(task);
   }
 
   async retryProject(scope: ProjectAnalysisScope, force = false): Promise<void> {
@@ -1344,7 +1382,42 @@ export class CodeIntelligenceHost {
     this.scheduleProject(scope, force);
   }
 
-  async waitForProjects(): Promise<void> { await this.#projectAnalysis?.idle(); }
+  /** A pipeline start owns this wait, but shares the existing modelling job. */
+  async ensureProjectModel(scope: ProjectAnalysisScope, signal?: AbortSignal): Promise<ProjectAnalysisRecord> {
+    signal?.throwIfAborted();
+    const runtime = await this.runtime();
+    const repository = await runtime.registry.get(scope.repositoryId);
+    if (repository?.activeRevision !== scope.analysisRevision) throw new Error('目标项目版本已更新，请重新选择目标项目。');
+    const index = await runtime.store.getStructuralIndex(scope);
+    if (!index?.projects.some(project => project.projectId === scope.projectId)) throw new Error('项目不存在。');
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => reject(signal!.reason);
+      signal?.addEventListener('abort', abort, { once: true });
+      // Cancelling one pipeline must not cancel shared repository modelling.
+      void this.ensureProjectAnalysis(scope, false).then(() => {
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      }, error => {
+        signal?.removeEventListener('abort', abort);
+        reject(error);
+      });
+    });
+    signal?.throwIfAborted();
+    if ((await runtime.registry.get(scope.repositoryId))?.activeRevision !== scope.analysisRevision) {
+      throw new Error('建模期间目标项目版本已更新，请重新选择目标项目。');
+    }
+    const record = await (await this.projectAnalysis()).read(scope);
+    if (record.state !== 'ready' || record.projection !== 'ready' || !record.proposal) {
+      throw new Error(record.error || record.modelingSkippedReason || '目标项目建模未完成，请重试模块建模。');
+    }
+    return record;
+  }
+
+  async waitForProjects(): Promise<void> {
+    while (this.#projectTasks.size) await Promise.all([...this.#projectTasks]);
+    await this.#projectAnalysis?.idle();
+  }
 
   /** Trusted presentation bridge: no filesystem fallback and no local JSON summaries. */
   async explorerData(): Promise<Array<{
@@ -1499,6 +1572,7 @@ export class CodeIntelligenceHost {
           displayName: safeRepositoryDisplayName(repository.displayName),
           role: repository.role,
           analysisStatus: this.presentationAnalysisStatus(repository),
+          ...(this.#indexingProgress.has(repository.repositoryId) ? { indexing: this.#indexingProgress.get(repository.repositoryId)! } : {}),
           activeRevision,
           selectedRevision: null,
           revisions,
@@ -1535,13 +1609,14 @@ export class CodeIntelligenceHost {
         displayName: safeRepositoryDisplayName(repository.displayName),
         role: repository.role,
         analysisStatus: this.presentationAnalysisStatus(repository),
+        ...(this.#indexingProgress.has(repository.repositoryId) ? { indexing: this.#indexingProgress.get(repository.repositoryId)! } : {}),
         activeRevision,
         selectedRevision: selectedRevision.analysisRevision,
         revisions,
         languages: overview.overview.value.languages.map((language) => ({ ...language })),
         projects,
         selectedProjectId,
-        summary: projectAnalysis?.proposal || projectAnalysis?.state === 'stale' ? {
+        summary: projectAnalysis?.modelingSkippedReason ? { status: 'missing' } : projectAnalysis?.proposal || projectAnalysis?.state === 'stale' ? {
           status: projectAnalysis?.state === 'stale' ? 'stale' : projectAnalysis?.proposal ? 'current' : 'missing',
           analysisRevision: selectedRevision.analysisRevision,
           ...(projectAnalysis?.planHash ? { planHash: projectAnalysis.planHash } : {}),
@@ -1559,12 +1634,14 @@ export class CodeIntelligenceHost {
       : this.#storageKind === 'memory'
         ? memoryStorageNotice()
         : undefined;
-    return {
-      status: this.#lastFailure ? 'error' : 'ready',
+    const presentation: CodeIntelligencePresentation = {
+      status: this.#lastFailure ? 'error' : 'ready', runtimeStatus: 'ready',
       storage: this.#storageKind,
       repositories: repositories.sort((left, right) => left.repositoryId.localeCompare(right.repositoryId)),
       ...(message ? { message } : {}),
     };
+    this.#lastPresentation = structuredClone(presentation);
+    return presentation;
   }
 
   private async revisionPresentations(
@@ -1659,6 +1736,20 @@ export class CodeIntelligenceHost {
       }
     }
     return { status: 'missing' };
+  }
+
+  private unavailablePresentation(): CodeIntelligencePresentation {
+    if (!this.#lastPresentation) return this.emptyPresentation('error', genericRuntimeFailure());
+    const previous = structuredClone(this.#lastPresentation);
+    return {
+      ...previous, status: 'error', runtimeStatus: 'error',
+      message: '状态更新暂时失败，显示上次读取的结果；请稍后刷新或查看扩展输出。',
+      repositories: previous.repositories.filter(repository => this.#visibleRepositoryIds.has(repository.repositoryId)).map(repository => {
+        const { indexing: _previousProgress, ...snapshot } = repository;
+        const indexing = this.#indexingProgress.get(repository.repositoryId);
+        return { ...snapshot, ...(indexing ? { analysisStatus: 'indexing' as const, indexing: { ...indexing } } : {}) };
+      }),
+    };
   }
 
   private emptyPresentation(

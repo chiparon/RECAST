@@ -166,11 +166,122 @@ describe("Host test failure evidence", () => {
     let called = false;
     f.context.reviewTestCorrection = async () => { called = true; return { confirmed: true, note: "confirmed" }; };
     await f.write("failed"); await f.execute();
-    await f.write("fixed", [{ failureId: testEvidence(f.context).failures[0]!.id, reason: "Wrong expectation", requirementEvidence: "Invalid inputs must be accepted." }]);
+    await expect(f.write("fixed", [{ failureId: testEvidence(f.context).failures[0]!.id, reason: "Wrong expectation", requirementEvidence: "Invalid inputs must be accepted." }])).rejects.toThrow("exact public requirement excerpt");
+    expect(await readFile(join(f.root, "tests/thing.test.ts"), "utf8")).toBe("failed");
+    await f.write("fixed");
     await f.execute();
     expect(called).toBe(false);
     expect((await f.finish()).translationStatus).toBe("failure");
+  });
+
+  it("rejects a mistyped failure id before writing and permits retry with the actual Host id", async () => {
+    const f = await fixture([run("failed"), run("passed")]);
+    f.context.reviewTestCorrection = async () => ({ confirmed: true, note: "The corrected fixture preserves the requirement." });
+    await f.write("failed fixture"); await f.execute();
+    const failure = testEvidence(f.context).failures[0]!;
+    await expect(f.write("corrected fixture", [{ failureId: "CS0103", reason: "Wrong fixture", requirementEvidence: "Reject invalid input." }])).rejects.toThrow(failure.id);
+    expect(await readFile(join(f.root, "tests/thing.test.ts"), "utf8")).toBe("failed fixture");
+    expect(testEvidence(f.context).revisions).toHaveLength(1);
+    await f.write("corrected fixture", [{ failureId: failure.id, reason: "Wrong fixture", requirementEvidence: "Reject invalid input." }]);
+    await f.execute();
+    expect((await f.finish()).translationStatus).toBe("success");
+  });
+
+  it("reviews the immutable failing version after intermediate edits, only once the replacement executes", async () => {
+    const f = await fixture([run("failed"), run("passed")]);
+    const reviewed: string[] = [];
+    f.context.reviewTestCorrection = async input => {
+      reviewed.push(input.beforeContent);
+      expect(input.afterContent).toBe("corrected fixture");
+      expect(input.testCases[0]?.status).toBe("passed");
+      return { confirmed: true, note: "Original fixture, not an intermediate edit, was reviewed." };
+    };
+    await f.write("original failed fixture"); await f.execute();
+    await f.write("intermediate edit");
+    await f.write("corrected fixture", [{ failureId: testEvidence(f.context).failures[0]!.id, reason: "Wrong fixture", requirementEvidence: "Reject invalid input." }]);
+    expect(reviewed).toEqual([]);
+    expect(hasUnresolvedTestFailures(testEvidence(f.context))).toBe(true);
+    await f.execute();
+    expect(reviewed).toEqual(["original failed fixture"]);
+    expect((await f.finish()).translationStatus).toBe("success");
+  });
+
+  it("resolves a renamed replacement in a fresh harness only with explicit review and a passing Host identity", async () => {
+    const f = await fixture([run("failed"), run("passed", "Suite#correctedRejectionScenario")]);
+    await f.write("original failing scenario"); await f.execute();
+    const failure = testEvidence(f.context).failures[0]!;
+    f.context.runtime.functionGroup!.testEvidence = structuredClone(testEvidence(f.context));
+    f.context.state = {};
+    f.context.runtime.testRoots = ["fresh-tests"];
+    f.context.reviewTestCorrection = async input => {
+      expect(input.beforeContent).toBe("original failing scenario");
+      return { confirmed: true, note: "The renamed case retains the invalid-input scenario and assertion.", replacementTestIds: ["Suite#correctedRejectionScenario"] };
+    };
+    const writer = createWriteTargetTestTool()(f.context), runner = createRunFunctionGroupTestsTool()(f.context);
+    await writer.execute({ path: "fresh-tests/renamed.test.ts", content: "same scenario with corrected fixture", corrections: [{ failureId: failure.id, reason: "Wrong fixture", requirementEvidence: "Reject invalid input." }] });
+    await runner.execute({ paths: ["fresh-tests/renamed.test.ts"] });
+    expect(hasUnresolvedTestFailures(testEvidence(f.context))).toBe(false);
+    expect(testEvidence(f.context).failures[0]?.resolution).toMatchObject({ kind: "reviewed-test-correction", replacementTestIds: ["Suite#correctedRejectionScenario"] });
+  });
+
+  it.each(["missing", "skipped"])("does not close a failure when a review references a %s replacement", async status => {
+    const passing = run("passed", "Suite#otherCase");
+    if (status === "skipped") passing.testCases!.push({ id: "Suite#replacement", status: "skipped" });
+    const f = await fixture([run("failed"), passing]);
+    f.context.reviewTestCorrection = async () => ({ confirmed: true, note: "Proposed replacement.", replacementTestIds: ["Suite#replacement"] });
+    await f.write("original"); await f.execute();
+    await f.write("replacement", [{ failureId: testEvidence(f.context).failures[0]!.id, reason: "Wrong fixture", requirementEvidence: "Reject invalid input." }]);
+    await f.execute();
+    expect((await f.finish()).translationStatus).toBe("failure");
+    expect(testEvidence(f.context).revisions.at(-1)?.corrections?.[0].reviewNote).toContain("No approved replacement case actually passed");
+  });
+
+  it("retains a valid requirement failure when the independent review rejects a weakened assertion", async () => {
+    const f = await fixture([run("failed"), run("passed")]);
+    f.context.reviewTestCorrection = async () => ({ confirmed: false, note: "Accepting invalid inputs contradicts the requirement.", replacementTestIds: [] });
+    await f.write("assertRejectsInvalidInput();"); await f.execute();
+    await f.write("assertAcceptsInvalidInput();", [{ failureId: testEvidence(f.context).failures[0]!.id, reason: "Implementation accepts it", requirementEvidence: "Reject invalid input." }]);
+    await f.execute();
+    expect((await f.finish()).translationStatus).toBe("failure");
     expect(testEvidence(f.context).revisions.at(-1)?.corrections?.[0].status).toBe("unconfirmed");
+  });
+
+  it("uses the default Host reviewer in an isolated conversation and closes a corrected failure through the verifier entry point", async () => {
+    const f = await fixture([run("failed"), run("passed")]);
+    let step = 0, reviews = 0;
+    const host = createAgentHost({ resolveToolContext: async () => f.context.runtime, modelClient: { complete: async (messages, tools, signal) => {
+      expect(signal?.aborted).toBe(false);
+      if (!tools.length) {
+        reviews++;
+        expect(messages.map(item => item.role)).toEqual(["system", "user"]);
+        const evidence = JSON.parse(messages[1]!.content);
+        expect(evidence.originalFailingTest).toBe("assertCount(3);");
+        expect(evidence.executedCurrentTest).toBe("assertCount(2);");
+        expect(evidence.observedTestCases[0].status).toBe("passed");
+        return { content: JSON.stringify({ confirmed: true, note: "The fixture has two accepted records; the same meaningful count assertion remains.", replacementTestIds: ["Suite#rejectsInvalidInput"] }) };
+      }
+      const call = (name: string, args: unknown) => ({ toolCalls: [{ id: `call-${step}`, name, arguments: JSON.stringify(args) }] });
+      switch (step++) {
+        case 0: return call("write_target_test", { path: "tests/thing.test.ts", content: "assertCount(3);" });
+        case 1: return call("run_function_group_tests", { paths: ["tests/thing.test.ts"] });
+        case 2: {
+          const observed = JSON.parse(messages.findLast(item => item.role === "tool")!.content);
+          return call("write_target_test", { path: "tests/thing.test.ts", content: "assertCount(2);", corrections: [{ failureId: observed.testEvidence.unresolvedFailures[0].id, reason: "The fixture contains two accepted records.", requirementEvidence: "Return the count of accepted records." }] });
+        }
+        case 3: return call("run_function_group_tests", { paths: ["tests/thing.test.ts"] });
+        default: return call("finish_function_group", { testExecutionStatus: "success", translationStatus: "success" });
+      }
+    } } });
+    // Exercise real Host write/run/finish tools while controlling only the test process observations.
+    const entry = createRequirementFunctionGroupTask(f.group);
+    const result = await createFunctionGroupVerifier({ run: () => host.run({ ...entry, tools: entry.tools.map(factory => context => {
+      context.functionGroupRunner = f.context.functionGroupRunner;
+      return factory(context);
+    }) }) as any })(f.group, "requirement-function-group", "verify");
+    expect(result.status).toBe("success");
+    expect(result.testEvidence?.failures[0]?.status).toBe("resolved");
+    expect(reviews).toBe(1);
+    expect(step).toBe(5);
   });
 
   it("retains the failure when independent correction review is unavailable", async () => {

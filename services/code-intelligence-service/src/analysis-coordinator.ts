@@ -8,6 +8,7 @@ import {
 } from '@forexplore/contracts';
 import type { IndexStore, SourceTextReader } from './index-store.js';
 import type { RepositoryRegistry } from './repository-registry.js';
+import { platformLocalPath } from './platform-path.js';
 
 export type AnalysisMode = 'full' | 'incremental';
 
@@ -15,6 +16,8 @@ export interface AnalysisProgress {
   stage: StructuralScanProgress['stage'] | 'recover' | 'structural-write' | 'search-projection' | 'activation';
   completed?: number;
   total?: number;
+  filesCompleted?: number;
+  filesTotal?: number;
 }
 
 export interface StructuralScanRequest extends RepositoryRevisionScope {
@@ -195,7 +198,7 @@ export class AnalysisCoordinator {
       const scanStarted = performance.now();
       const result = await this.scanner.scan({
         ...scope,
-        root: repository.localPath,
+        root: platformLocalPath(repository.localPath),
         mode: scanMode,
         ...(scanMode === 'incremental' && previousIndex ? { previousIndex } : {}),
         ...(scanMode === 'incremental' && changedPaths.length > 0 ? { changedPaths } : {}),
@@ -257,7 +260,15 @@ export class AnalysisCoordinator {
       failureStage = 'search-projection';
       request.onProgress?.({ stage: 'search-projection', completed: 0 });
       if (sourceReader && this.projection.projectFromSource) {
-        await this.projection.projectFromSource(result.index, sourceReader, request.signal, request.onProgress);
+        // Source bytes have been hash-checked and committed above. Long model
+        // projections read that immutable revision, never an OS temp spool.
+        const persistedSource: SourceTextReader = {
+          read: relativePath => {
+            request.signal?.throwIfAborted();
+            return this.store.getSourceText(scope, relativePath);
+          },
+        };
+        await this.projection.projectFromSource(result.index, persistedSource, request.signal, request.onProgress);
       } else {
         await this.projection.project(result.index, result.sourceTexts, request.signal, request.onProgress);
       }

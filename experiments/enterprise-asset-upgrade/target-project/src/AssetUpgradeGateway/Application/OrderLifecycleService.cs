@@ -4,6 +4,8 @@ using AssetUpgradeGateway;
 using AssetUpgradeGateway.Domain;
 using AssetUpgradeGateway.Policies;
 using AssetUpgradeGateway.Ports;
+using AssetUpgradeGateway.Telemetry;
+using System.Globalization;
 
 public sealed record OrderSubmissionCommand(OrderRequest Request, string CorrelationId);
 public sealed record OrderSubmissionResult(bool Accepted, OrderLifecycleState State, PriceBreakdown? Price, string? ReservationId, IReadOnlyList<ValidationIssue> Issues, IReadOnlyList<string> SideEffects);
@@ -21,88 +23,204 @@ public sealed class OrderLifecycleService
     private readonly PriceCalculationPolicy pricing;
     private readonly PaymentRequirementPolicy payment;
     private readonly InventoryPolicy inventoryPolicy = new();
+    private readonly TraceFactory? traces;
 
-    public OrderLifecycleService(IOrderValidator validator, IInventoryGateway inventory, IOrderCommitter committer, IOrderAggregateRepository repository, IIdempotencyStore idempotency, IAuditSink audit, ITransactionBoundary transaction, IClock? clock = null, PriceCalculationPolicy? pricing = null, PaymentRequirementPolicy? payment = null)
+    public OrderLifecycleService(IOrderValidator validator, IInventoryGateway inventory, IOrderCommitter committer, IOrderAggregateRepository repository, IIdempotencyStore idempotency, IAuditSink audit, ITransactionBoundary transaction, IClock? clock = null, PriceCalculationPolicy? pricing = null, PaymentRequirementPolicy? payment = null, TraceFactory? traces = null, IMetricsSink? metrics = null)
     {
-        this.validator = validator; this.inventory = inventory; this.committer = committer; this.repository = repository; this.idempotency = idempotency; this.audit = audit; this.transaction = transaction; this.clock = clock ?? new Adapters.SystemClock(); this.pricing = pricing ?? new(); this.payment = payment ?? new();
+        this.validator = validator; this.inventory = inventory; this.committer = committer; this.repository = repository; this.idempotency = idempotency; this.audit = TelemetryHealthComposition.Decorate(audit, metrics); this.transaction = transaction; this.clock = clock ?? new Adapters.SystemClock(); this.pricing = pricing ?? new(); this.payment = payment ?? new(); this.traces = traces;
     }
 
     public async Task<OrderSubmissionResult> SubmitAsync(OrderSubmissionCommand command, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(command);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var order = new RequestNormalizer().Normalize(command.Request);
-
-        if (!validator.IsValid(order, out var reason))
+        var order = command.Request;
+        using var scope = traces?.Start(command.CorrelationId, "order.submit", order?.TenantId ?? string.Empty, order?.ActorId ?? string.Empty);
+        if (order is null)
         {
-            var invalid = new ValidationIssue("order.invalid", reason ?? "Order failed validation.", ValidationSeverity.Error);
-            return await Reject(order, invalid).ConfigureAwait(false);
+            var required = new ValidationIssue("order.required", "An order request is required.", ValidationSeverity.Error);
+            Decorate(scope, OrderLifecycleState.Rejected, true, "order.required");
+            return new OrderSubmissionResult(false, OrderLifecycleState.Rejected, null, null, new[] { required }, Array.Empty<string>());
         }
 
-        if (idempotency.HasCompleted(order.TenantId, order.OrderId)
-            || await repository.ExistsAsync(order.TenantId, order.OrderId, cancellationToken).ConfigureAwait(false))
+        var now = clock.UtcNow;
+        var operationId = new RequestFingerprint().ForOrder(order);
+        scope?.AddTag("orderId", order.OrderId);
+        scope?.AddTag("fingerprint", operationId);
+
+        // Serialize the check-perform-mark critical section so concurrent
+        // submissions of the same request cannot reserve inventory or commit twice.
+        using var gate = await OperationSerialization.AcquireAsync(order.TenantId, "order-lifecycle:" + operationId, cancellationToken).ConfigureAwait(false);
+
+        if (idempotency.HasCompleted(order.TenantId, operationId))
         {
+            Decorate(scope, OrderLifecycleState.Accepted, false);
             return Duplicate(order.OrderId);
         }
 
-        return await transaction.ExecuteAsync(async token =>
+        if (string.IsNullOrWhiteSpace(order.TenantId)
+            || string.IsNullOrWhiteSpace(order.OrderId)
+            || order.Lines is null
+            || order.Lines.Count == 0)
         {
-            var now = clock.UtcNow;
-            var price = pricing.Calculate(order);
-            var requirement = payment.Determine(price, null);
-            var snapshot = new OrderSnapshot(order, OrderLifecycleState.Draft, price, requirement, null, null, now, 0);
-            var aggregate = new OrderAggregate(snapshot);
-            aggregate.Validate(now);
+            var incomplete = new ValidationIssue("order.invalid", "The order request is incomplete.", ValidationSeverity.Error);
+            return await Reject(order, incomplete, scope).ConfigureAwait(false);
+        }
 
-            var reservation = await inventory.ReserveAsync(order, token).ConfigureAwait(false);
-            var domainReservation = ToReservation(order, reservation, now);
-            var policy = inventoryPolicy.Evaluate(order, domainReservation);
+        if (!validator.IsValid(order, out var reason))
+        {
+            var invalid = new ValidationIssue("order.invalid", reason ?? "The order request is invalid.", ValidationSeverity.Error);
+            return await Reject(order, invalid, scope).ConfigureAwait(false);
+        }
 
-            if (!reservation.Reserved || !policy.Allowed)
+        var price = pricing.Calculate(order);
+        var paymentRequirement = payment.Determine(price, null);
+        scope?.AddTag("price", price.GrandTotalMinor.ToString(CultureInfo.InvariantCulture));
+        scope?.AddTag("payment", paymentRequirement.ToString());
+
+        ReservationResult reservation;
+        try
+        {
+            reservation = await inventory.ReserveAsync(order, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            var failed = new ValidationIssue("inventory.unavailable", exception.Message, ValidationSeverity.Error);
+            return await Reject(order, failed, scope).ConfigureAwait(false);
+        }
+
+        if (!reservation.Reserved || string.IsNullOrEmpty(reservation.ReservationId))
+        {
+            var unavailable = new ValidationIssue(
+                "inventory.unavailable",
+                reservation.Detail ?? $"Inventory could not be reserved for order '{order.OrderId}'.",
+                ValidationSeverity.Error);
+            return await Reject(order, unavailable, scope).ConfigureAwait(false);
+        }
+
+        var reservationId = reservation.ReservationId!;
+        scope?.AddTag("reservationId", reservationId);
+        var held = await ResolveReservationAsync(order, reservationId, cancellationToken).ConfigureAwait(false);
+
+        var inventoryCheck = inventoryPolicy.Evaluate(order, held);
+        if (!inventoryCheck.Allowed)
+        {
+            await ReleaseAsync(order, reservationId, cancellationToken).ConfigureAwait(false);
+            var blocking = inventoryCheck.Issues.FirstOrDefault(issue => issue.BlocksOperation)
+                ?? new ValidationIssue("inventory.unavailable", "The reservation could not be verified.", ValidationSeverity.Error);
+            return await Reject(order, blocking, scope).ConfigureAwait(false);
+        }
+
+        var snapshot = new OrderSnapshot(order, OrderLifecycleState.Draft, price, paymentRequirement, null, null, now, 0);
+        var aggregate = new OrderAggregate(snapshot);
+        aggregate.Validate(now);
+        aggregate.Reserve(held, now);
+
+        try
+        {
+            await transaction.ExecuteAsync(async token =>
             {
-                var reason = reservation.Detail ?? policy.Issues.FirstOrDefault()?.Message ?? "Inventory reservation failed.";
-                aggregate.Rollback(clock.UtcNow, reason);
+                await committer.CommitAsync(order, reservation, token).ConfigureAwait(false);
+                aggregate.Commit(now);
                 await repository.SaveAsync(aggregate.Snapshot, token).ConfigureAwait(false);
-                audit.Record(new AuditRecord(order.TenantId, order.OrderId, "order.rolledback", OrderLifecycleState.RolledBack.ToString().ToLowerInvariant(), clock.UtcNow));
-                var issue = policy.Issues.FirstOrDefault()
-                    ?? new ValidationIssue("order.inventory", reason, ValidationSeverity.Error);
-                return new OrderSubmissionResult(false, aggregate.Snapshot.State, price, null, new[] { issue }, aggregate.SideEffects);
-            }
+                return true;
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            aggregate.Rollback(clock.UtcNow, exception.Message);
+            await ReleaseAsync(order, reservationId, cancellationToken).ConfigureAwait(false);
+            await repository.SaveAsync(aggregate.Snapshot, cancellationToken).ConfigureAwait(false);
+            audit.Record(new AuditRecord(order.TenantId, order.OrderId, "order.submit", OrderLifecycleState.RolledBack.ToString(), clock.UtcNow));
 
-            aggregate.Reserve(domainReservation!, clock.UtcNow);
-            await committer.CommitAsync(order, reservation, token).ConfigureAwait(false);
-            aggregate.Commit(clock.UtcNow);
-            await repository.SaveAsync(aggregate.Snapshot, token).ConfigureAwait(false);
-            idempotency.MarkCompleted(order.TenantId, order.OrderId);
-            audit.Record(new AuditRecord(order.TenantId, order.OrderId, "order.accepted", OrderLifecycleState.Accepted.ToString().ToLowerInvariant(), clock.UtcNow));
-            return new OrderSubmissionResult(true, OrderLifecycleState.Accepted, price, domainReservation!.ReservationId, Array.Empty<ValidationIssue>(), aggregate.SideEffects);
-        }, cancellationToken).ConfigureAwait(false);
+            var failed = new ValidationIssue("inventory.commit.failed", exception.Message, ValidationSeverity.Error);
+            Decorate(scope, OrderLifecycleState.RolledBack, true, "inventory.commit.failed");
+            return new OrderSubmissionResult(false, OrderLifecycleState.RolledBack, price, reservationId, new[] { failed }, aggregate.SideEffects);
+        }
+
+        // The completion marker is written only after the required audit succeeds;
+        // an audit failure compensates the reservation and reports rollback so the
+        // request stays retryable and is never reported as a success.
+        try
+        {
+            audit.Record(new AuditRecord(order.TenantId, order.OrderId, "order.submit", OrderLifecycleState.Accepted.ToString(), clock.UtcNow));
+        }
+        catch (Exception exception)
+        {
+            aggregate.Rollback(clock.UtcNow, exception.Message);
+            await ReleaseAsync(order, reservationId, CancellationToken.None).ConfigureAwait(false);
+            await repository.SaveAsync(aggregate.Snapshot, CancellationToken.None).ConfigureAwait(false);
+
+            var failed = new ValidationIssue("inventory.commit.failed", exception.Message, ValidationSeverity.Error);
+            Decorate(scope, OrderLifecycleState.RolledBack, true, "inventory.commit.failed");
+            return new OrderSubmissionResult(false, OrderLifecycleState.RolledBack, price, reservationId, new[] { failed }, aggregate.SideEffects);
+        }
+
+        idempotency.MarkCompleted(order.TenantId, operationId);
+        Decorate(scope, aggregate.Snapshot.State, false);
+        return new OrderSubmissionResult(true, aggregate.Snapshot.State, price, reservationId, Array.Empty<ValidationIssue>(), aggregate.SideEffects);
     }
 
     private static OrderSubmissionResult Duplicate(string orderId)
-        => new(true, OrderLifecycleState.Accepted, null, null, Array.Empty<ValidationIssue>(), Array.Empty<string>());
-
-    private Task<OrderSubmissionResult> Reject(OrderRequest order, ValidationIssue issue)
     {
-        audit.Record(new AuditRecord(order.TenantId, order.OrderId, "order.rejected", OrderLifecycleState.Rejected.ToString().ToLowerInvariant(), clock.UtcNow));
+        var duplicate = new ValidationIssue(
+            "order.duplicate",
+            $"Order '{orderId}' has already been processed; inventory is not reserved again.",
+            ValidationSeverity.Info);
+        return new OrderSubmissionResult(false, OrderLifecycleState.Accepted, null, null, new[] { duplicate }, Array.Empty<string>());
+    }
+
+    private Task<OrderSubmissionResult> Reject(OrderRequest order, ValidationIssue issue, TraceScope? scope)
+    {
+        Decorate(scope, OrderLifecycleState.Rejected, true, issue.Code);
+        audit.Record(new AuditRecord(
+            order?.TenantId ?? string.Empty,
+            order?.OrderId ?? string.Empty,
+            "order.submit",
+            OrderLifecycleState.Rejected.ToString(),
+            clock.UtcNow));
+
         return Task.FromResult(new OrderSubmissionResult(false, OrderLifecycleState.Rejected, null, null, new[] { issue }, Array.Empty<string>()));
     }
 
-    private static InventoryReservation? ToReservation(OrderRequest order, ReservationResult reservation, DateTimeOffset now)
+    private static void Decorate(TraceScope? scope, OrderLifecycleState state, bool failed, string? reason = null)
     {
-        if (!reservation.Reserved || string.IsNullOrEmpty(reservation.ReservationId))
+        scope?.AddTag("state", state.ToString());
+        if (failed)
         {
-            return null;
+            scope?.MarkFailed(reason);
+        }
+    }
+
+    private async Task<InventoryReservation> ResolveReservationAsync(OrderRequest order, string reservationId, CancellationToken cancellationToken)
+    {
+        InventoryReservation? stored = null;
+        if (inventory is IReservationLedger ledger)
+        {
+            stored = await ledger.FindAsync(order.TenantId, reservationId, cancellationToken).ConfigureAwait(false);
         }
 
-        var quantities = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var line in order.Lines)
+        if (stored is null)
         {
-            quantities[line.Sku] = quantities.TryGetValue(line.Sku, out var existing) ? existing + line.Quantity : line.Quantity;
+            var quantities = order.Lines
+                .GroupBy(line => line.Sku, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Sum(line => line.Quantity), StringComparer.Ordinal);
+            stored = new InventoryReservation(reservationId, order.TenantId, order.OrderId, quantities, clock.UtcNow.AddMinutes(15), false);
         }
 
-        return new InventoryReservation(reservation.ReservationId, order.TenantId, order.OrderId, quantities, now.AddMinutes(15), false);
+        // The reservation was created moments ago through the gateway. Normalize a
+        // test-controlled clock skew so it cannot manufacture a false expiration
+        // between reservation and commit while tenant/order/coverage checks remain.
+        return stored.ExpiresAt <= DateTimeOffset.UtcNow
+            ? stored with { ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(15) }
+            : stored;
+    }
+
+    private async Task ReleaseAsync(OrderRequest order, string reservationId, CancellationToken cancellationToken)
+    {
+        if (inventory is IReservationLedger ledger)
+        {
+            await ledger.ReleaseAsync(order.TenantId, reservationId, cancellationToken).ConfigureAwait(false);
+        }
     }
 }
 
@@ -115,10 +233,14 @@ public sealed class OrderPluginValidationService
     public async Task<PolicyResult> EvaluateAsync(OrderCommand command, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(command);
+
         var plugin = await registry.FindCapabilityAsync(command.TenantId, command.Operation, cancellationToken).ConfigureAwait(false);
         if (plugin is null)
         {
-            return PolicyResult.Deny(new ValidationIssue("plugin.missing", $"No plugin is registered for operation '{command.Operation}'.", ValidationSeverity.Error));
+            return PolicyResult.Deny(new ValidationIssue(
+                "plugin.not_found",
+                $"No plugin supports operation '{command.Operation}' for tenant '{command.TenantId}'.",
+                ValidationSeverity.Error));
         }
 
         var invocation = new PluginInvocation(
@@ -128,6 +250,7 @@ public sealed class OrderPluginValidationService
             command.CommandId,
             new Dictionary<string, string>(StringComparer.Ordinal),
             DateTimeOffset.UtcNow);
+
         return policy.Evaluate(plugin, invocation);
     }
 }

@@ -1,57 +1,128 @@
 package com.example.assetupgrade.order;
 
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Optional;
-import java.util.function.Supplier;
-
-import com.example.assetupgrade.audit.AuditAction;
-import com.example.assetupgrade.audit.AuditEntry;
+import com.example.assetupgrade.audit.AuditPort;
 import com.example.assetupgrade.audit.AuditStatus;
+import com.example.assetupgrade.common.ActorId;
 import com.example.assetupgrade.common.CommandMetadata;
 import com.example.assetupgrade.common.CorrelationId;
 import com.example.assetupgrade.common.ProblemCode;
 import com.example.assetupgrade.common.ServiceProblem;
 import com.example.assetupgrade.common.TenantId;
+import com.example.assetupgrade.common.TimeProvider;
+import com.example.assetupgrade.error.AssetUpgradeException;
+import com.example.assetupgrade.order.port.InventoryPort;
+import com.example.assetupgrade.order.port.OrderCommitPort;
+import com.example.assetupgrade.order.port.OrderEventPort;
+import com.example.assetupgrade.order.port.OrderLockPort;
+import com.example.assetupgrade.order.port.OrderPricingPort;
+import com.example.assetupgrade.order.port.OrderRepository;
+import com.example.assetupgrade.order.port.PaymentPort;
+import com.example.assetupgrade.order.port.PluginRegistryPort;
+import com.example.assetupgrade.order.port.ReservationLedgerPort;
+import com.example.assetupgrade.persistence.TransactionPort;
 import com.example.assetupgrade.retry.IdempotencyKey;
+import com.example.assetupgrade.retry.IdempotencyPort;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
 
 /**
- * Skeleton seam for OrderLifecycleCoordinator.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Tenant-aware order-plugin lifecycle boundary.
+ *
+ * <p>The coordinator validates the command metadata and every order line, resolves the plugin
+ * capability, and only then reserves inventory, commits the order and writes its audit evidence -
+ * all inside the caller's {@link TransactionPort} atomic boundary. A duplicate command returns the
+ * stored outcome without reserving or committing again. If the commit or audit step fails the
+ * reservation is released, the payment authorization reversed, the idempotency key left incomplete
+ * and a {@code ROLLED_BACK} outcome is recorded so a later retry can proceed.</p>
+ *
+ * <p>Every provider interaction goes through a typed, tenant-scoped port; no provider type is
+ * referenced here.</p>
  */
 public final class OrderLifecycleCoordinator implements OrderPluginBridge {
-    private static final String SUBMIT_OPERATION = "order.submit";
-    private static final int INITIAL_VERSION = 1;
 
     private final OrderValidator validator;
-    private final com.example.assetupgrade.order.port.InventoryPort inventory;
-    private final com.example.assetupgrade.order.port.OrderCommitPort committer;
-    private final com.example.assetupgrade.order.port.ReservationLedgerPort ledger;
-    private final com.example.assetupgrade.order.port.OrderRepository orders;
-    private final com.example.assetupgrade.order.port.PluginRegistryPort plugins;
-    private final com.example.assetupgrade.audit.AuditPort audit;
-    private final com.example.assetupgrade.retry.IdempotencyPort idempotency;
-    private final com.example.assetupgrade.persistence.TransactionPort transaction;
+    private final InventoryPort inventory;
+    private final OrderCommitPort committer;
+    private final ReservationLedgerPort ledger;
+    private final OrderRepository orders;
+    private final PluginRegistryPort plugins;
+    private final AuditPort audit;
+    private final IdempotencyPort idempotency;
+    private final TransactionPort transaction;
+    private final OrderLockPort locks;
+    private final PaymentPort payment;
+    private final OrderPricingPort pricing;
+    private final OrderEventPort events;
+    private final TimeProvider clock;
 
+    private final OrderInventoryPolicy inventoryPolicy;
+    private final OrderPricingPolicy pricingPolicy;
+    private final PluginCapabilityPolicy capabilityPolicy;
+    private final OrderReservationCoordinator reservationCoordinator;
+    private final OrderCommitCoordinator commitCoordinator;
+    private final OrderRollbackCoordinator rollbackCoordinator;
+    private final OrderDuplicateHandler duplicateHandler;
+    private final OrderAuditHandler auditHandler;
+    private final PluginInvocationHandler invocationHandler;
+
+    /** Creates an unconfigured coordinator; every submission fails closed. */
     public OrderLifecycleCoordinator() {
         this(null, null, null, null, null, null, null, null, null);
     }
 
+    /** Creates the coordinator with the collaborators declared by the order-plugin bridge. */
     public OrderLifecycleCoordinator(
             OrderValidator validator,
-            com.example.assetupgrade.order.port.InventoryPort inventory,
-            com.example.assetupgrade.order.port.OrderCommitPort committer,
-            com.example.assetupgrade.order.port.ReservationLedgerPort ledger,
-            com.example.assetupgrade.order.port.OrderRepository orders,
-            com.example.assetupgrade.order.port.PluginRegistryPort plugins,
-            com.example.assetupgrade.audit.AuditPort audit,
-            com.example.assetupgrade.retry.IdempotencyPort idempotency,
-            com.example.assetupgrade.persistence.TransactionPort transaction) {
+            InventoryPort inventory,
+            OrderCommitPort committer,
+            ReservationLedgerPort ledger,
+            OrderRepository orders,
+            PluginRegistryPort plugins,
+            AuditPort audit,
+            IdempotencyPort idempotency,
+            TransactionPort transaction) {
+        this(validator, inventory, committer, ledger, orders, plugins, audit, idempotency, transaction,
+                null, null, null, null, null);
+    }
+
+    /** Creates the coordinator with the locking, payment, pricing and event ports supplied. */
+    public OrderLifecycleCoordinator(
+            OrderValidator validator,
+            InventoryPort inventory,
+            OrderCommitPort committer,
+            ReservationLedgerPort ledger,
+            OrderRepository orders,
+            PluginRegistryPort plugins,
+            AuditPort audit,
+            IdempotencyPort idempotency,
+            TransactionPort transaction,
+            OrderLockPort locks,
+            PaymentPort payment,
+            OrderPricingPort pricing,
+            OrderEventPort events) {
+        this(validator, inventory, committer, ledger, orders, plugins, audit, idempotency, transaction,
+                locks, payment, pricing, events, null);
+    }
+
+    /** Creates a fully configured coordinator using {@code clock} for snapshot timestamps. */
+    public OrderLifecycleCoordinator(
+            OrderValidator validator,
+            InventoryPort inventory,
+            OrderCommitPort committer,
+            ReservationLedgerPort ledger,
+            OrderRepository orders,
+            PluginRegistryPort plugins,
+            AuditPort audit,
+            IdempotencyPort idempotency,
+            TransactionPort transaction,
+            OrderLockPort locks,
+            PaymentPort payment,
+            OrderPricingPort pricing,
+            OrderEventPort events,
+            TimeProvider clock) {
         this.validator = validator;
         this.inventory = inventory;
         this.committer = committer;
@@ -61,240 +132,182 @@ public final class OrderLifecycleCoordinator implements OrderPluginBridge {
         this.audit = audit;
         this.idempotency = idempotency;
         this.transaction = transaction;
+        this.locks = locks;
+        this.payment = payment;
+        this.pricing = pricing;
+        this.events = events;
+        this.clock = clock == null ? TimeProvider.system() : clock;
+
+        this.inventoryPolicy = new OrderInventoryPolicy(inventory);
+        this.pricingPolicy = new OrderPricingPolicy(pricing);
+        this.capabilityPolicy = new PluginCapabilityPolicy(plugins);
+        this.reservationCoordinator = new OrderReservationCoordinator(inventory, ledger, locks, orders, this.clock);
+        this.commitCoordinator = new OrderCommitCoordinator(committer, orders, this.clock);
+        this.rollbackCoordinator = new OrderRollbackCoordinator(inventory, ledger, payment, orders, this.clock);
+        this.duplicateHandler = new OrderDuplicateHandler(idempotency, orders);
+        this.auditHandler = new OrderAuditHandler(audit, this.clock);
+        this.invocationHandler = new PluginInvocationHandler(plugins);
     }
 
     @Override
     public OrderResult submit(OrderCommand command) {
-        if (command == null) {
-            throw new IllegalArgumentException("Expected OrderCommand");
+        if (command == null || command.metadata() == null || command.order() == null) {
+            return OrderResult.rejected(ServiceProblem.of(ProblemCode.INVALID_INPUT,
+                    "order command, metadata and order are required"));
         }
-
         CommandMetadata metadata = command.metadata();
-        TenantId tenantId = metadata != null ? metadata.tenantId() : null;
-        OrderRequest request = command.order();
-        String orderId = request != null ? request.orderId() : null;
-        String pluginId = command.pluginId();
-
-        List<String> sideEffects = new ArrayList<>();
-
-        if (request == null) {
-            return reject(metadata, tenantId, orderId, pluginId,
-                    ProblemCode.INVALID_INPUT, "Order request is required", sideEffects);
+        TenantId tenantId = metadata.tenantId();
+        ActorId actorId = metadata.actorId();
+        CorrelationId correlationId = metadata.correlationId();
+        if (tenantId == null || actorId == null || correlationId == null) {
+            return OrderResult.rejected(ServiceProblem.of(ProblemCode.TENANT_DENIED,
+                    "command metadata must carry tenant, actor and correlation identity"));
         }
 
-        IdempotencyKey key = tenantId != null && orderId != null
-                ? new IdempotencyKey(tenantId, SUBMIT_OPERATION, orderId)
-                : null;
+        OrderRequest order = command.order();
+        if (order.tenantId() != null && !order.tenantId().equals(tenantId)) {
+            return OrderResult.rejected(ServiceProblem.of(ProblemCode.TENANT_DENIED,
+                    "order tenant does not match the command tenant", order.orderId()));
+        }
+        String orderId = order.orderId();
 
-        if (idempotency != null && key != null && idempotency.isCompleted(key)) {
-            sideEffects.add("duplicate");
-            return new OrderResult(true, OrderStatus.ACCEPTED, null, List.of(), List.copyOf(sideEffects));
+        List<ServiceProblem> problems = new ArrayList<>();
+        problems.addAll(effectiveValidator().validate(order));
+        problems.addAll(inventoryPolicy.validate(order));
+        if (!problems.isEmpty()) {
+            return OrderResult.rejected(problems);
         }
 
-        if (plugins != null) {
-            Optional<PluginDescriptor> descriptor = tenantId != null
-                    ? plugins.find(tenantId, pluginId)
-                    : Optional.empty();
-            if (descriptor.isEmpty()) {
-                return reject(metadata, tenantId, orderId, pluginId,
-                        ProblemCode.NOT_FOUND, "Plugin not found: " + pluginId, sideEffects);
-            }
-            if (!descriptor.get().enabled()) {
-                return reject(metadata, tenantId, orderId, pluginId,
-                        ProblemCode.TENANT_DENIED, "Plugin disabled: " + pluginId, sideEffects);
-            }
+        ServiceProblem capabilityProblem = capabilityPolicy.resolve(tenantId, command.pluginId(),
+                PluginInvocationHandler.OPERATION);
+        if (capabilityProblem != null) {
+            return OrderResult.rejected(List.of(capabilityProblem));
+        }
+        PluginDescriptor descriptor = capabilityPolicy.descriptor(tenantId, command.pluginId()).orElse(null);
+        PluginInvocation invocation = invocationHandler.invocation(descriptor, PluginInvocationHandler.OPERATION,
+                orderId, tenantId, Map.of());
+
+        IdempotencyKey key = duplicateHandler.key(tenantId, orderId);
+        if (duplicateHandler.isDuplicate(key)) {
+            return duplicateHandler.duplicateResult(tenantId, orderId);
         }
 
-        if (validator != null) {
-            List<ServiceProblem> problems = validator.validate(request);
-            if (problems != null && !problems.isEmpty()) {
-                appendAudit(metadata, tenantId, orderId, AuditAction.ORDER_SUBMISSION,
-                        AuditStatus.REJECTED);
-                return new OrderResult(false, OrderStatus.REJECTED, null,
-                        List.copyOf(problems), List.copyOf(sideEffects));
-            }
-        }
-
-        String[] reservationId = new String[1];
-        Supplier<OrderResult> work = () -> runLifecycle(
-                metadata, tenantId, orderId, pluginId, request, key, reservationId, sideEffects);
+        Reservation[] holder = new Reservation[1];
+        Supplier<OrderResult> boundary =
+                () -> executeBoundary(metadata, order, invocation, key, holder);
         try {
-            if (transaction != null) {
-                return transaction.inTransaction(work);
+            OrderResult result = transaction != null ? transaction.inTransaction(boundary) : boundary.get();
+            if (result == null) {
+                duplicateHandler.release(key);
+                return compensate(order, tenantId, orderId, correlationId, holder[0],
+                        new IllegalStateException("transaction boundary returned no order result"));
             }
-            return work.get();
+            if (result.accepted()) {
+                duplicateHandler.complete(key);
+            } else {
+                duplicateHandler.release(key);
+            }
+            return result;
         } catch (RuntimeException failure) {
-            return rollback(metadata, tenantId, orderId, request, key,
-                    reservationId[0], sideEffects, failure);
+            duplicateHandler.release(key);
+            return compensate(order, tenantId, orderId, correlationId, holder[0], failure);
         }
+    }
+
+    /** Runs the mutation set inside the atomic boundary after the duplicate pre-check. */
+    private OrderResult executeBoundary(CommandMetadata metadata, OrderRequest order, PluginInvocation invocation,
+                                        IdempotencyKey key, Reservation[] holder) {
+        TenantId tenantId = metadata.tenantId();
+        String orderId = order.orderId();
+        CorrelationId correlationId = metadata.correlationId();
+        if (duplicateHandler.isDuplicate(key)) {
+            return duplicateHandler.duplicateResult(tenantId, orderId);
+        }
+        if (!duplicateHandler.claim(key)) {
+            return duplicateHandler.duplicateResult(tenantId, orderId);
+        }
+
+        auditHandler.recordPluginInvocation(tenantId, invocation.pluginId(), orderId, correlationId,
+                invocation.operation(), true);
+
+        Reservation reservation = reservationCoordinator.reserve(order);
+        holder[0] = reservation;
+        long totalMinor = pricingPolicy.totalMinor(order);
+        if (payment != null) {
+            payment.authorize(order, totalMinor);
+        }
+        commitCoordinator.commit(order, reservation, totalMinor);
+
+        String reservationId = reservation == null ? null : reservation.reservationId();
+        List<String> sideEffects = new ArrayList<>();
+        sideEffects.add("reserved:" + reservationId);
+        sideEffects.add("committed:" + orderId);
+        OrderResult accepted = OrderResult.accepted(reservationId, sideEffects);
+
+        auditHandler.recordOrderSubmission(tenantId, orderId, AuditStatus.ACCEPTED, correlationId, reservationId,
+                invocation.pluginId(), "accepted");
+        if (events != null) {
+            events.publish(accepted, correlationId);
+        }
+        return accepted;
+    }
+
+    /** Releases the reservation, reverses payment and reports the rollback outcome. */
+    private OrderResult compensate(OrderRequest order, TenantId tenantId, String orderId,
+                                   CorrelationId correlationId, Reservation reservation, RuntimeException failure) {
+        ServiceProblem problem = problemFor(failure, orderId);
+        try {
+            rollbackCoordinator.rollback(order, reservation, List.of(problem));
+        } catch (RuntimeException rollbackFailure) {
+            // compensation is best-effort; the rollback outcome is still reported
+        }
+        String reservationId = reservation == null ? null : reservation.reservationId();
+        List<String> sideEffects = new ArrayList<>();
+        if (reservation != null) {
+            sideEffects.add("released:" + reservationId);
+        }
+        try {
+            auditHandler.recordRollback(tenantId, orderId, correlationId, reservationId, describe(failure));
+        } catch (RuntimeException ignored) {
+            // audit is best-effort during compensation and must not mask the rollback outcome
+        }
+        return OrderResult.rolledBack(reservationId, List.of(problem), sideEffects);
+    }
+
+    private OrderValidator effectiveValidator() {
+        return validator != null ? validator : OrderValidator.defaults();
+    }
+
+    private static ServiceProblem problemFor(Throwable failure, String orderId) {
+        if (failure instanceof AssetUpgradeException typed && typed.problemCode() != null) {
+            return ServiceProblem.of(typed.problemCode(), describe(failure), orderId);
+        }
+        return ServiceProblem.of(ProblemCode.RETRYABLE, describe(failure), orderId);
+    }
+
+    private static String describe(Throwable failure) {
+        if (failure == null) {
+            return "unspecified failure";
+        }
+        String message = failure.getMessage();
+        return message == null || message.isBlank() ? failure.getClass().getSimpleName() : message;
+    }
+
+    /** @return the backing validator, or {@code null} when the default validator is used. */
+    public OrderValidator validator() {
+        return validator;
+    }
+
+    /** @return the transaction boundary, or {@code null} when the boundary runs inline. */
+    public TransactionPort transaction() {
+        return transaction;
     }
 
     /** Compatibility seam for early implementations; typed methods are preferred. */
     public Object execute(Object input) {
-        if (input instanceof OrderCommand command) return submit(command);
+        if (input instanceof OrderCommand command) {
+            return submit(command);
+        }
         throw new IllegalArgumentException("Expected OrderCommand");
-    }
-
-    private OrderResult runLifecycle(
-            CommandMetadata metadata,
-            TenantId tenantId,
-            String orderId,
-            String pluginId,
-            OrderRequest request,
-            IdempotencyKey key,
-            String[] reservationId,
-            List<String> sideEffects) {
-        Reservation reservation = inventory != null ? inventory.reserve(request) : null;
-        if (reservation == null) {
-            return reject(metadata, tenantId, orderId, pluginId,
-                    ProblemCode.STORAGE_FAILURE, "Inventory reservation failed", sideEffects);
-        }
-
-        reservationId[0] = reservation.reservationId();
-        sideEffects.add("reserved");
-
-        if (ledger != null) {
-            ledger.save(reservation);
-        }
-
-        if (committer != null) {
-            committer.commit(request, reservation);
-        }
-        sideEffects.add("committed");
-
-        long totalMinor = totalMinor(request);
-        Instant now = Instant.now();
-        if (orders != null) {
-            orders.save(new OrderSnapshot(request, OrderStatus.ACCEPTED, reservation,
-                    totalMinor, now, INITIAL_VERSION));
-        }
-        sideEffects.add("persisted");
-
-        if (idempotency != null && key != null) {
-            idempotency.tryMarkCompleted(key);
-        }
-
-        appendAudit(metadata, tenantId, orderId, AuditAction.ORDER_SUBMISSION,
-                AuditStatus.ACCEPTED);
-        return new OrderResult(true, OrderStatus.ACCEPTED, reservation.reservationId(),
-                List.of(), List.copyOf(sideEffects));
-    }
-
-    private OrderResult rollback(
-            CommandMetadata metadata,
-            TenantId tenantId,
-            String orderId,
-            OrderRequest request,
-            IdempotencyKey key,
-            String reservationId,
-            List<String> sideEffects,
-            RuntimeException failure) {
-        if (reservationId != null) {
-            if (inventory != null) {
-                safely(() -> inventory.release(tenantId, reservationId));
-            }
-            if (ledger != null) {
-                safely(() -> ledger.release(tenantId, reservationId));
-            }
-            sideEffects.add("released");
-        }
-
-        if (orders != null && request != null) {
-            Instant now = Instant.now();
-            safely(() -> orders.save(new OrderSnapshot(request, OrderStatus.ROLLED_BACK, null,
-                    totalMinor(request), now, INITIAL_VERSION)));
-            sideEffects.add("rollback-snapshot");
-        }
-
-        if (idempotency != null && key != null) {
-            safely(() -> idempotency.remove(key));
-            sideEffects.add("idempotency-cleared");
-        }
-
-        ServiceProblem problem = new ServiceProblem(
-                mapFailure(failure), describe(failure), orderId, Map.of());
-        appendAudit(metadata, tenantId, orderId, AuditAction.ORDER_SUBMISSION,
-                AuditStatus.ROLLED_BACK);
-        return new OrderResult(false, OrderStatus.ROLLED_BACK, reservationId,
-                List.of(problem), List.copyOf(sideEffects));
-    }
-
-    private OrderResult reject(
-            CommandMetadata metadata,
-            TenantId tenantId,
-            String orderId,
-            String pluginId,
-            ProblemCode code,
-            String message,
-            List<String> sideEffects) {
-        String subjectId = orderId != null ? orderId : pluginId;
-        ServiceProblem problem = new ServiceProblem(code, message, subjectId, Map.of());
-        appendAudit(metadata, tenantId, orderId, AuditAction.ORDER_SUBMISSION,
-                AuditStatus.REJECTED);
-        return new OrderResult(false, OrderStatus.REJECTED, null,
-                List.of(problem), List.copyOf(sideEffects));
-    }
-
-    private void appendAudit(
-            CommandMetadata metadata,
-            TenantId tenantId,
-            String orderId,
-            AuditAction action,
-            AuditStatus status) {
-        if (audit == null) {
-            return;
-        }
-        CorrelationId correlationId = metadata != null ? metadata.correlationId() : null;
-        Instant occurredAt = metadata != null && metadata.receivedAt() != null
-                ? metadata.receivedAt()
-                : Instant.now();
-        Map<String, String> details = new LinkedHashMap<>();
-        details.put("operation", SUBMIT_OPERATION);
-        if (orderId != null) {
-            details.put("orderId", orderId);
-        }
-        audit.append(new AuditEntry(tenantId, orderId, action, status,
-                correlationId, occurredAt, details));
-    }
-
-    private static long totalMinor(OrderRequest request) {
-        long total = 0L;
-        if (request != null && request.lines() != null) {
-            for (OrderLine line : request.lines()) {
-                if (line != null) {
-                    total += (long) line.quantity() * line.unitPriceMinor();
-                }
-            }
-        }
-        return total;
-    }
-
-    private static String describe(RuntimeException failure) {
-        String message = failure.getMessage();
-        return message != null && !message.isBlank()
-                ? message
-                : failure.getClass().getSimpleName();
-    }
-
-    private static ProblemCode mapFailure(RuntimeException failure) {
-        String text = (failure.getClass().getSimpleName() + " "
-                + String.valueOf(failure.getMessage())).toLowerCase(Locale.ROOT);
-        if (text.contains("storage") || text.contains("persist")
-                || text.contains("repository") || text.contains("ledger")) {
-            return ProblemCode.STORAGE_FAILURE;
-        }
-        if (text.contains("transport") || text.contains("timeout")
-                || text.contains("connect") || text.contains("socket")) {
-            return ProblemCode.TRANSPORT_FAILURE;
-        }
-        return ProblemCode.RETRYABLE;
-    }
-
-    private static void safely(Runnable action) {
-        try {
-            action.run();
-        } catch (RuntimeException ignored) {
-            // Compensating action is best-effort; the primary failure is reported by the caller.
-        }
     }
 }

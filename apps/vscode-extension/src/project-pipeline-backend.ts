@@ -12,7 +12,7 @@ export interface CodexRuntime {
 }
 const codexService = () => require('../../../services/adaptation-service/src/codex-workspace-translation-runtime') as {
   CodexWorkspaceTranslationRuntime: new (options: { workspaceRoot: string; compileCommand: WorkspaceCompileCommand; codexHome: string; codexModel: string;
-    codexCommand?: string; maxVerificationRepairs: number; environment: NodeJS.ProcessEnv }) => CodexRuntime;
+    codexCommand?: string; timeoutMs: number; maxVerificationRepairs: number; environment: NodeJS.ProcessEnv }) => CodexRuntime;
 };
 import { prepareDeepSeekCodexHome, type CodexHomeHandle } from '../../../services/adaptation-service/src/codex-experiment-home';
 const plannerService = () => require('../../../services/adaptation-service/src/integration-plan-agent') as {
@@ -129,7 +129,8 @@ export class ProjectPipelineBackend {
     }
     module.authorizedFiles = scope.profile.writeFiles;
     this.runtime = this.drivers.runtime({ workspaceRoot: root, compileCommand: this.options.compileCommand(),
-      codexHome: this.home!.path, codexModel: this.model!.model, codexCommand: this.options.codexCommand, maxVerificationRepairs: 4, environment: { ELECTRON_RUN_AS_NODE: '1' } });
+      codexHome: this.home!.path, codexModel: this.model!.model, codexCommand: this.options.codexCommand, timeoutMs: 7_200_000, maxVerificationRepairs: 4,
+      environment: { ...this.home!.environment, ELECTRON_RUN_AS_NODE: '1' } });
     const runtime = this.runtime;
     let id: string | undefined;
     const abort = () => { if (id) void runtime.cancel(id).catch(() => undefined); };
