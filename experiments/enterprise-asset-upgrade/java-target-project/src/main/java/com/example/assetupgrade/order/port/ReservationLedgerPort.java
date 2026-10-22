@@ -1,17 +1,49 @@
 package com.example.assetupgrade.order.port;
 
+import com.example.assetupgrade.common.TenantId;
+import com.example.assetupgrade.order.Reservation;
+
+import java.util.Optional;
+
 /**
- * Skeleton seam for ReservationLedgerPort.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Tenant-scoped reservation ledger.
+ *
+ * <p>{@link #find(TenantId, String)} and {@link #release(TenantId, String)} are scoped to the
+ * owning tenant; a release must never touch another tenant's reservation. No provider type
+ * appears here.</p>
  */
 public interface ReservationLedgerPort {
-    java.util.Optional<com.example.assetupgrade.order.Reservation> find(
-            com.example.assetupgrade.common.TenantId tenantId, String reservationId);
-    void save(com.example.assetupgrade.order.Reservation reservation);
-    void release(com.example.assetupgrade.common.TenantId tenantId, String reservationId);
-    /** Generic compatibility seam; typed methods define the contract. */
+
+    /** @return the reservation for {@code reservationId} owned by {@code tenantId}, if present. */
+    Optional<Reservation> find(TenantId tenantId, String reservationId);
+
+    /** Persists {@code reservation}. */
+    void save(Reservation reservation);
+
+    /** Idempotently marks the tenant's reservation released. */
+    void release(TenantId tenantId, String reservationId);
+
+    /** Compatibility seam; the typed methods define the contract. */
     default Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
+        if (input instanceof FindRequest request) {
+            return find(request.tenantId(), request.reservationId());
+        }
+        if (input instanceof Reservation reservation) {
+            save(reservation);
+            return null;
+        }
+        if (input instanceof ReleaseRequest request) {
+            release(request.tenantId(), request.reservationId());
+            return null;
+        }
+        throw new IllegalArgumentException("Expected a FindRequest, Reservation or ReleaseRequest");
+    }
+
+    /** Request holder accepted by the compatibility seam. */
+    record FindRequest(TenantId tenantId, String reservationId) {
+    }
+
+    /** Request holder accepted by the compatibility seam. */
+    record ReleaseRequest(TenantId tenantId, String reservationId) {
     }
 }

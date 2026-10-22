@@ -1,0 +1,25 @@
+{
+  "caseId": "case-022",
+  "source": {
+    "repository": "bullmq",
+    "repositoryId": "repo-a700832a-abb4-4179-ba8a-0df644d5310b",
+    "revision": "analysis-2edb0c17-e6e1-4bcb-8684-db05aa8c25cc",
+    "projectId": "project-1133a0288d95fd93d6132ebf",
+    "artifactId": "project-summary:project-1133a0288d95fd93d6132ebf:code-understanding/v1",
+    "planHash": "sha256:d5415c160013bb2f9ec4b3e4fdbafd76d6f2e875e5402e0d1cd4bfa9b8f4f5bd",
+    "analysisHash": "6461d79b90d2cfd34ec19c6408cbe6d756fbc58f1246e02a0cdb4b602039b77b",
+    "moduleId": "module-293fc6a44fa8503aa5a2bd72"
+  },
+  "excerpts": [
+    {
+      "path": "src/postgres/create-postgres-backend.ts",
+      "excerpt": "import { BackendFactory } from '../interfaces';\nimport {\n  PostgresConnection,\n  PostgresConnectionOptions,\n} from './postgres-connection';\nimport { PostgresQueueBackend } from './postgres-queue-backend';\n\n/**\n * {@link BackendFactory} that builds a {@link PostgresQueueBackend}.\n *\n * The returned backend owns its {@link PostgresConnection} (a `pg.Pool` plus a\n * dedicated `LISTEN` client); the high-level classes depend only on\n * `IQueueBackend` and never touch a `pg` client directly.\n *\n * Accepts a connection string, pool config (optionally carrying a `schema`),\n * or an existing `pg.Pool`. The `pg` driver is loaded lazily for config/string\n * connections; Redis-only users do not need it installed.\n *\n * Inject this into the queue classes (or set it as the process-wide default via\n * `setDefaultBackendFactory(createPostgresBackend)`) to back BullMQ with\n * PostgreSQL.\n */\nexport const createPostgresBackend: BackendFactory<\n  PostgresQueueBackend,\n  PostgresConnectionOptions\n> = (name, opts, factoryOpts = {}) => {\n  const connection = new PostgresConnection(opts.connection);\n\n  // Name a backend's dedicated, long-lived connection so it is discoverable via\n  // getWorkers / getQueueEvents (pg_stat_activity) — the PostgreSQL analogue of\n  // the Redis worker/queue-events named connection. Naming happens eagerly at\n  // waitUntilReady (see PostgresQueueBackend) so the name is set as soon as the\n  // backend is ready, exactly like Redis names its connection on creation.\n  //   - Worker (withBlockingConnection): the bare queue name, or `:w:<name>`\n  //     for a named worker — matching the getWorkers matcher.\n  //   - QueueEvents (blocking): the queue name + `:qe` (QUEUE_EVENT_SUFFIX),\n  //     matching the getQueueEvents matcher. (QueueEvents also re-applies this\n  //     via setName when its consume loop starts.)\n  // Producers/FlowProducer get no name (they must not be counted as workers).\n  const workerName = (opts as { name?: string }).name;\n  let listenClientName: string | undefined;\n  if (factoryOpts.withBlockingConnection) {\n    listenClientName = `${name}${workerName ? `:w:${workerName}` : ''}`;\n  } else if (factoryOpts.blocking) {\n    listenClientName = `${name}:qe`;\n  }\n\n  return new PostgresQueueBackend(\n    connection,\n    name,\n    opts,\n    true,\n    listenClientName,\n  );\n};\n",
+      "truncated": false
+    },
+    {
+      "path": "src/postgres/index.ts",
+      "excerpt": "export { createPostgresBackend } from './create-postgres-backend';\nexport {\n  PostgresConnection,\n  PostgresConnectionOptions,\n  PostgresPoolConfig,\n} from './postgres-connection';\nexport { PostgresQueueBackend } from './postgres-queue-backend';\nexport {\n  runMigrations,\n  assertSchemaCompatibility,\n  SchemaMigrationRequiredError,\n  SchemaVersionMismatchError,\n  UnsupportedPostgresVersionError,\n  assertPostgresVersion,\n  MINIMUM_POSTGRES_VERSION,\n  RECOMMENDED_POSTGRES_VERSION,\n  BULLMQ_MAJOR_VERSION,\n  MIGRATION_ADVISORY_LOCK_KEY,\n  DEFAULT_SCHEMA,\n  quoteSchemaName,\n} from './migrator';\nexport { LATEST_SCHEMA_VERSION } from './migrations';\nexport {\n  PgPool,\n  PgPoolClient,\n  PgPoolConfig,\n  PgModule,\n  PgQueryable,\n  PgQueryResult,\n  PgNotification,\n  isPgPool,\n} from './pg-types';\n",
+      "truncated": false
+    }
+  ]
+}

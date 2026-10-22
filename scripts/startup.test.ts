@@ -8,8 +8,17 @@ vi.mock('node:child_process', () => ({ spawn: mocks.spawn, spawnSync: mocks.spaw
 vi.mock('node:net', () => ({ createConnection: mocks.connect }));
 vi.mock('mysql2/promise', () => ({ createConnection: mocks.database }));
 vi.mock('node:http', () => ({ get: mocks.get }));
+// The launcher tests exercise service startup; workspace mapping has its own
+// tests and must not read real platform files through the mocked filesystem.
+vi.mock('./check-platform-workspace.mjs', () => ({ checkPlatformWorkspace: vi.fn() }));
+vi.mock('./extension-startup.mjs', () => ({ waitForExtensionStartup: vi.fn(async () => ({
+  status: 'ready', semanticQueryUrl: 'http://127.0.0.1:12345', adaptationUrl: 'http://127.0.0.1:12346',
+})) }));
+vi.mock('./embedding-identity.mjs', () => ({ inferEmbeddingVariant: vi.fn(async () => 'dml-fp16') }));
+vi.mock('node:fs/promises', () => ({ mkdir: vi.fn(), writeFile: vi.fn(), rename: vi.fn() }));
 vi.mock('node:fs', () => ({
   existsSync: () => true, readdirSync: () => ['cached-model'],
+  readFileSync: () => '"%~dp0..\\Code.exe" "%~dp0..\\resources\\app\\out\\cli.js" %*',
   closeSync: vi.fn(), mkdirSync: vi.fn(), openSync: vi.fn(), renameSync: vi.fn(), statSync: vi.fn(), writeFileSync: vi.fn(),
 }));
 
@@ -78,6 +87,17 @@ it('honors skip-seek-db while waiting for an externally managed local database',
   expect(mocks.spawnSync).not.toHaveBeenCalled();
 });
 
+it('rejects an occupied CPU service when CUDA was explicitly requested', async () => {
+  vi.stubEnv('FOREXPLORE_EMBEDDING_DEVICE', 'cuda');
+  const previousExitCode = process.exitCode;
+  try {
+    await import('./start-recast-services.mjs');
+    expect(process.exitCode).toBe(1);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('expected cuda/automatic'));
+  } finally { process.exitCode = previousExitCode; }
+});
+
 it('forwards skip-seek-db through the launcher npm separator', async () => {
   process.argv.push('--skip-seek-db');
   await import('./run-vscode-extension.mjs');
@@ -92,4 +112,33 @@ it('does not launch local Docker for a configured remote database', async () => 
   await import('./run-vscode-extension.mjs');
   await vi.waitFor(() => expect(mocks.spawn).toHaveBeenCalled());
   expect(mocks.spawnSync.mock.calls.some(([command]) => command === 'docker')).toBe(false);
+});
+
+it('reuses a healthy local database even when Docker control commands are unavailable', async () => {
+  mocks.spawnSync.mockImplementation((command) => command === 'docker'
+    ? { status: 1, error: new Error('Docker control plane unavailable') }
+    : { status: 0, stdout: 'redhat.java\n' });
+  await import('./run-vscode-extension.mjs');
+  await vi.waitFor(() => expect(mocks.spawn).toHaveBeenCalled());
+  expect(mocks.database).toHaveBeenCalledWith(expect.objectContaining({ host: '127.0.0.1', port: 2881 }));
+  expect(mocks.spawnSync.mock.calls.some(([command]) => command === 'docker')).toBe(false);
+});
+
+it('starts the local engine when its SQL endpoint is unavailable', async () => {
+  mocks.database.mockRejectedValueOnce(new Error('Connection refused'));
+  await import('./run-vscode-extension.mjs');
+  await vi.waitFor(() => expect(mocks.spawn).toHaveBeenCalled());
+  expect(mocks.spawnSync.mock.calls.some(([command, args]) => command === 'docker' && args[0] === 'info')).toBe(true);
+});
+
+it('finds Docker Desktop in either Windows installation layout', async () => {
+  const { dockerDesktopCandidates } = await import('./docker-runtime.mjs');
+  expect(dockerDesktopCandidates('win32', { ProgramFiles: 'C:\\Program Files', LOCALAPPDATA: 'C:\\Users\\user\\AppData\\Local' }))
+    .toEqual(['C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe', 'C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\Docker Desktop.exe']);
+});
+
+it('reports readiness even while the Remote WSL launcher stays attached', async () => {
+  mocks.spawn.mockImplementation(() => Object.assign(new EventEmitter(), { unref: vi.fn() }));
+  await import('./run-vscode-extension.mjs');
+  await vi.waitFor(() => expect(console.log).toHaveBeenCalledWith(expect.stringContaining('RECAST services ready:')));
 });

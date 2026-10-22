@@ -43,9 +43,9 @@ export class TranslationVerifierModelError extends Error {
 
 const DEFAULT_API_BASE = "https://api.deepseek.com/v1";
 const DEFAULT_MODEL = "deepseek-v4-flash";
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
-const DEFAULT_MAX_REQUEST_ATTEMPTS = 1;
-const DEFAULT_RETRY_DELAY_MS = 0;
+const DEFAULT_MAX_OUTPUT_TOKENS = 16_384;
+const DEFAULT_MAX_REQUEST_ATTEMPTS = 3;
+const DEFAULT_RETRY_DELAY_MS = 750;
 const MAX_REQUEST_ATTEMPTS = 10;
 const MAX_RETRY_DELAY_MS = 60_000;
 

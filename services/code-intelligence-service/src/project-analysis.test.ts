@@ -65,6 +65,34 @@ function hierarchicalResult(index: StructuralIndex, scope: ProjectAnalysisScope)
 }
 
 describe('project understanding lifecycle', () => {
+  it('completes empty build boundaries without a model call and recovers their older failed jobs', async () => {
+    const { runtime, index, scopes } = await setup();
+    const scope = { ...scopes[0]!, projectId: 'empty-build-boundary' };
+    const empty = { ...index.projects[0]!, projectId: scope.projectId, kind: 'maven', relativePath: 'wrapper', manifestPaths: ['wrapper/pom.xml'] };
+    vi.spyOn(runtime.store, 'getStructuralIndex').mockResolvedValue({ ...index, projects: [...index.projects, empty] });
+    const plan = vi.fn(async () => result(index, scope));
+    const decide = vi.fn(async (request: ModuleHierarchyDecisionRequest) => coherentDecision(request));
+    const project = vi.fn(async () => {});
+    const coordinator = new ProjectAnalysisCoordinator({ store: runtime.store, plan, hierarchyPlanner: { decide }, project });
+    await coordinator.ensure(scope);
+    const record = await coordinator.read(scope);
+    expect(record).toMatchObject({ state: 'ready', projection: 'ready', coverage: { total: 0, assigned: 0 },
+      modelingSkippedReason: expect.stringContaining('没有独立文件') });
+    expect(record.proposal).toBeUndefined();
+    expect(record.modeling).toBeUndefined();
+    const [artifact] = await runtime.store.listModuleArtifacts(scope);
+    const { modelingSkippedReason: _reason, ...old } = record;
+    const payload: ProjectAnalysisRecord = { ...old, state: 'failed', projection: 'pending', error: 'Agent 未能完成有效的功能模块分析' };
+    await runtime.store.putModuleArtifact({ ...artifact!, payload, contentHash: projectPlanHash(payload).slice('sha256:'.length) });
+    const reopened = new ProjectAnalysisCoordinator({ store: runtime.store, plan, hierarchyPlanner: { decide }, project });
+    await reopened.ensure(scope);
+    expect(await reopened.read(scope)).toMatchObject({ state: 'ready', projection: 'ready', modelingSkippedReason: record.modelingSkippedReason });
+    expect((await reopened.read(scope)).error).toBeUndefined();
+    expect(plan).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    expect(project).not.toHaveBeenCalled();
+  });
+
   it('reuses durable validated decisions after recreating the coordinator', async () => {
     const { runtime, scopes } = await setup();
     const scope = scopes[0]!;
@@ -167,6 +195,24 @@ describe('project understanding lifecycle', () => {
     expect(plan).not.toHaveBeenCalled();
     expect(decide).toHaveBeenCalledTimes(1);
     expect(await projects.read(scope)).toMatchObject({ state: 'ready', proposal: { hierarchy: { modelDecisionCount: 1 } } });
+  });
+
+  it('uses an explicit large-project plan when the host marks it as already bounded', async () => {
+    const { runtime, index, scopes } = await setup();
+    const scope = scopes[0]!;
+    const plan = vi.fn(async () => result(index, scope));
+    const decide = vi.fn(async (request: ModuleHierarchyDecisionRequest) => coherentDecision(request));
+    const projects = new ProjectAnalysisCoordinator({
+      store: runtime.store,
+      plan,
+      hierarchyPlanner: { decide },
+      maxAgentProjectFiles: 3,
+      allowLargeAgentPlan: true,
+    });
+    await projects.ensure(scope);
+    expect(plan).toHaveBeenCalledTimes(1);
+    expect(decide).not.toHaveBeenCalled();
+    expect(await projects.read(scope)).toMatchObject({ state: 'ready', modeling: { strategy: 'agent' } });
   });
 
   it.each(['unconfigured', 'failed', 'invalid'] as const)('does not publish a structural tree as an agent result when the model is %s', async (mode) => {
@@ -316,7 +362,7 @@ describe('project understanding lifecycle', () => {
       expect(artifact.planHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     }
     expect(artifacts.filter((a) => a.kind === 'module-summary' && a.status === 'current')).toHaveLength(2);
-    expect((await runtime.store.listSearchDocuments(index)).filter((d) => d.kind === 'summary')).toHaveLength(6);
+    expect((await runtime.store.listSearchDocuments(index)).filter((d) => d.kind === 'summary')).toHaveLength(8);
   });
 
   it('retries a failed projection without making another model request', async () => {

@@ -1,5 +1,5 @@
 import type { RepositoryRevisionScope, SearchDocumentRecord } from '@forexplore/contracts';
-import type { IndexStore } from './index-store.js';
+import type { IndexStore, SearchDocumentQuery, SearchDocumentsByView } from './index-store.js';
 
 /**
  * Shared recall kernel for both retrieval projections.
@@ -25,6 +25,8 @@ export interface RecallPlan {
   query: string;
   /** Relative contribution of this plan's channels to the fused score. */
   weight: number;
+  /** Restrict this question to the views it describes; otherwise use request views. */
+  views?: readonly RecallView[];
 }
 
 export interface RecallChannel {
@@ -65,7 +67,58 @@ export interface RecallRequest {
 }
 
 export class RecallKernel {
-  constructor(private readonly store: Pick<IndexStore, 'searchSearchDocuments' | 'searchSearchDocumentsByViews'>) {}
+  constructor(private readonly store: Pick<IndexStore, 'searchSearchDocuments' | 'searchSearchDocumentsByViews' | 'searchSearchDocumentsBatch'>) {}
+
+  /** Batch only within this request. The regular recall method still owns
+   * validation, channel order and fusion; a scoped router supplies its results. */
+  async recallBatch(requests: readonly RecallRequest[], concurrency = 4): Promise<RecallOutcome[]> {
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error('Recall concurrency must be in 1..32.');
+    const searchBatch = this.store.searchSearchDocumentsBatch;
+    if (!searchBatch) {
+      const result: RecallOutcome[] = new Array(requests.length);
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(concurrency, requests.length) }, async () => {
+        while (next < requests.length) {
+          const index = next++;
+          result[index] = await this.recall(requests[index]!);
+        }
+      }));
+      return result;
+    }
+    const lookups: SearchDocumentQuery[] = [];
+    const indices = new Map<string, number>();
+    const keyFor = (scope: RepositoryRevisionScope, query: string) => JSON.stringify([scope.repositoryId, scope.analysisRevision, query]);
+    // Planning uses the same validation as live recall and performs no I/O.
+    const planner = new RecallKernel({ searchSearchDocumentsByViews: async (scope, query, limits, views) => {
+      const key = keyFor(scope, query);
+      const existing = indices.get(key);
+      if (existing !== undefined) {
+        const lookup = lookups[existing]!;
+        lookup.views = [...new Set([...lookup.views, ...views])];
+        for (const view of views) lookup.limits[view] = Math.max(lookup.limits[view] ?? 0, limits[view] ?? 0);
+      } else {
+        indices.set(key, lookups.length);
+        lookups.push({ scope, query, limits: { ...limits }, views: [...views] });
+      }
+      return {};
+    } });
+    for (const request of requests) {
+      request.signal?.throwIfAborted();
+      await planner.recall(request);
+    }
+    if (!requests.length) return [];
+    const signals = [...new Set(requests.flatMap(request => request.signal ? [request.signal] : []))];
+    const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    signal?.throwIfAborted();
+    const results = await searchBatch.call(this.store, lookups, signal, concurrency);
+    if (results.length !== lookups.length) throw new Error('Batch recall omitted a scoped result.');
+    const router = new RecallKernel({ searchSearchDocumentsByViews: async (scope, query, limits, views) => {
+      const index = indices.get(keyFor(scope, query));
+      if (index === undefined) throw new Error('Batch recall received an unplanned query.');
+      return Object.fromEntries(views.map(view => [view, (results[index]?.[view] ?? []).slice(0, limits[view])]));
+    } });
+    return Promise.all(requests.map(request => router.recall(request)));
+  }
 
   async recall(request: RecallRequest): Promise<RecallOutcome> {
     const search = this.store.searchSearchDocuments;
@@ -90,15 +143,31 @@ export class RecallKernel {
 
     // One channel per (plan, view) pair, merged in a fixed plan-major order so
     // the fused result stays deterministic. A store that can batch the views is
-    // asked once per plan: the same documents come back, with one embedding and
-    // a quarter of the statements.
-    const perPlan = await Promise.all(request.plans.map(async (plan) => {
+    // asked once per plan: it can share one embedding and bounded hydration
+    // while retaining an independent candidate budget for each view.
+    const plannedViews = request.plans.map(plan => {
+      if (plan.views?.some(view => !recallViews.includes(view))) throw new Error('Every recall plan needs valid views.');
+      const selected = plan.views ? [...new Set(plan.views)].filter(view => views.includes(view)) : views;
+      if (!selected.length || selected.some(view => !recallViews.includes(view))) throw new Error('Every recall plan needs valid views.');
+      return selected;
+    });
+    // Plans with the same question can share an embedding and hydration while
+    // keeping separate weights/provenance and an independent budget per view.
+    const groups = new Map<string, number[]>();
+    request.plans.forEach((plan, index) => groups.set(plan.query, [...(groups.get(plan.query) ?? []), index]));
+    const batchedByQuery = new Map<string, Partial<Record<RecallView, SearchDocumentRecord[]>>>();
+    if (searchByViews) await Promise.all([...groups].map(async ([query, indices]) => {
+      const groupViews = [...new Set(indices.flatMap(index => plannedViews[index]!))];
+      batchedByQuery.set(query, await searchByViews.call(this.store, request.scope, query,
+        Object.fromEntries(groupViews.map(view => [view, limits.get(view)!])), groupViews, request.signal));
+    }));
+    const perPlan = await Promise.all(request.plans.map(async (plan, index) => {
+      const planViews = plannedViews[index]!;
       if (searchByViews) {
-        const batched = await searchByViews.call(this.store, request.scope, plan.query,
-          Object.fromEntries([...limits]), views, request.signal);
-        return views.map((view) => ({ plan, view, documents: batched[view] ?? [] }));
+        const batched = batchedByQuery.get(plan.query)!;
+        return planViews.map((view) => ({ plan, view, documents: batched[view] ?? [] }));
       }
-      return Promise.all(views.map(async (view) => ({ plan, view,
+      return Promise.all(planViews.map(async (view) => ({ plan, view,
         documents: await search!.call(this.store, request.scope, plan.query, limits.get(view)!, view, request.signal) })));
     }));
     const channelSets = perPlan.flat();

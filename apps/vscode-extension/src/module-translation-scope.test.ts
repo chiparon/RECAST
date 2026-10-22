@@ -102,6 +102,38 @@ describe('module translation scope', () => {
     expect(scope.context.some((item) => item.kind === 'summary' && item.content.includes('src/elsewhere.cs'))).toBe(true);
   });
 
+  it('adds host-selected target dependencies to read scope without making them writable', () => {
+    const scope = buildModuleTranslationScope({
+      workspaceRoot,
+      targetModule,
+      candidates: [candidate()],
+      requirement: 'read dependencies',
+      readOnlyFiles: ['src/main/java/a/Contracts.java', 'src/main/java/a/Ports.java', 'src/main/java/a/MultipartStream.java'],
+    });
+    expect(scope.profile.workspaceFiles).toEqual([
+      'src/main/java/a/MultipartStream.java',
+      'src/main/java/a/Contracts.java',
+      'src/main/java/a/Ports.java',
+    ]);
+    expect(scope.profile.writeFiles).toEqual(['src/main/java/a/MultipartStream.java']);
+  });
+
+  it('adds only a host-computed dependency closure to the coordinated write scope', () => {
+    const scope = buildModuleTranslationScope({
+      workspaceRoot,
+      targetModule,
+      candidates: [candidate()],
+      requirement: 'repair the call chain',
+      relatedWriteFiles: ['src/main/java/a/Ports.java', '../escape.java', '/absolute.java'],
+    });
+    expect(scope.profile.writeFiles).toEqual([
+      'src/main/java/a/MultipartStream.java',
+      'src/main/java/a/Ports.java',
+    ]);
+    expect(scope.profile.workspaceFiles).toEqual(scope.profile.writeFiles);
+    expect(scope.warnings.some((warning) => warning.includes('受控跨模块写范围'))).toBe(true);
+  });
+
   it('refuses an unusable scope instead of silently translating elsewhere', () => {
     expect(() => buildModuleTranslationScope({ workspaceRoot: 'relative/path', targetModule, candidates: [], requirement: '' }))
       .toThrow(/绝对的目标工程根目录/);

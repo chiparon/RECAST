@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createFunctionGroupVerifier } from "./function-group-verify.js";
-import type { FunctionGroupVerificationInput } from "./types.js";
-import { createSingleAgentFunctionGroupTask } from "./strategies/single-agent-function-group/strategy.js";
+import type { AgentTask } from "./host/agent.js";
+import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput } from "./types.js";
+import { createRequirementFunctionGroupTask, createSingleAgentFunctionGroupTask } from "./strategies/single-agent-function-group/strategy.js";
 
 const input: FunctionGroupVerificationInput = {
   schemaVersion: "3.1",
@@ -23,6 +24,22 @@ const input: FunctionGroupVerificationInput = {
 };
 
 describe("createFunctionGroupVerifier", () => {
+  it("keeps execution evidence without labeling an uncertain requirement verified", async () => {
+    const verify = createFunctionGroupVerifier({ run: async () => ({
+      outcome: "uncertain" as const, testExecutionStatus: "success" as const,
+      issue: { kind: "unknown" as const, description: "A public requirement remains ambiguous." },
+      functionGroupTest: { status: "success" as const, reason: "verified" as const, testPaths: ["tests/group.py"],
+        tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
+        functions: input.functions.map(({ target }) => ({ target, status: "passed" as const,
+          executed: true, lineCoverage: 100, branchCoverage: null })),
+        failures: [], stdout: "", stderr: "", exitCode: 0 },
+    }) });
+    const result = await verify(input, "single-agent-function-group", "verify");
+    expect(result.status).toBe("failure");
+    expect(result.reason).toBeUndefined();
+    expect(result.functions.every(fn => fn.executed)).toBe(true);
+  });
+
   it("dispatches the function-group single-agent strategy", async () => {
     let task: AgentTask | undefined;
     const verify = createFunctionGroupVerifier({
@@ -122,6 +139,56 @@ describe("createFunctionGroupVerifier", () => {
       "run_function_group_tests",
       "finish_function_group",
       "report_uncertain",
+    ]);
+  });
+
+  it("runs requirement-only verification without source tools", async () => {
+    const requirementInput: RequirementFunctionGroupVerificationInput = {
+      schemaVersion: "3.1",
+      mode: "requirement",
+      sourceLanguage: "C#",
+      targetLanguage: "C#",
+      targetProjectPath: "/tmp/target",
+      requirement: "Reject expired tenant scopes.",
+      functions: [{ target: { path: "src/TenantScope.cs", name: "IsExpired" } }],
+    };
+    let task: AgentTask | undefined;
+    const verify = createFunctionGroupVerifier({
+      run: (value) => {
+        task = value;
+        return {
+          testExecutionStatus: "success" as const,
+          translationStatus: "success" as const,
+          functionGroupTest: {
+            status: "success" as const,
+            testPaths: ["tests/TenantScope.test.cs"],
+            tests: { executed: 1, passed: 1, failed: 0, skipped: 0 },
+            functions: [{ target: requirementInput.functions[0]!.target, status: "passed" as const, executed: true, lineCoverage: 100, branchCoverage: null }],
+            failures: [],
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+          },
+        };
+      },
+    });
+    await expect(verify(requirementInput, "requirement-function-group", "verify"))
+      .resolves.toMatchObject({ status: "success" });
+    expect(task?.userPrompt).toContain("Reject expired tenant scopes.");
+    expect(task?.tools.map((factory) => factory({
+      state: {},
+      runtime: {
+        sourceLanguage: "C#", targetLanguage: "C#", sourceProjectPath: "/tmp/target", targetProjectPath: "/tmp/target",
+        sourcePath: "src/TenantScope.cs", targetPath: "src/TenantScope.cs",
+        targetFunction: requirementInput.functions[0]!.target, functionGroup: requirementInput,
+        sourceDirectory: "src", targetDirectory: "src", testRoots: ["tests"], testRunner: "dotnet" as const,
+        targetTest: { executable: "dotnet", args: ["test"] },
+      },
+      runner: { run: async () => { throw new Error("unused"); } },
+      functionGroupRunner: { run: async () => { throw new Error("unused"); } },
+    })).map((tool) => tool.name)).toEqual([
+      "list_target_files", "read_target_file", "write_target_test",
+      "run_function_group_tests", "finish_function_group", "report_uncertain",
     ]);
   });
 });

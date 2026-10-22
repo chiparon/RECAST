@@ -1,12 +1,30 @@
 # ForeXplore VS Code 扩展
 
-ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的目标方法或类上检索候选、由人明确选择候选、生成目标语言补丁，再展示独立验证证据和受保护的回填结果。
+ForeXplore 将企业已有实现作为迁移证据：导入历史仓与目标代码，输入需求文档，通过全自动项目流水线完成检索、代码生成与验证，并展示差异和受保护的回填结果。
 
-当前真实自动迁移能力边界是 **`translate` 策略下的 Java → C#**。它不是通用代码生成器；候选排序分也不是正确率或兼容概率。
+单模块兼容 `translate` 策略的既有验收边界是 Java → C#。整个项目入口使用下述 Codex 流水线，实际目标语言能力取决于模型、编译器和 Verifier；候选排序分不代表正确率。
+
+## 需求驱动流水线
+
+工作台默认执行“整个项目”：导入历史仓和目标骨架，从左侧选择目标项目，再输入完整需求文档即可启动，无需逐个选择模块。需求可直接输入、粘贴，或导入 UTF-8 TXT / Markdown，最多 8000 字；过长文件会报错并保留原文。“单模块调试”保留原有模块、类或方法的独立执行方式。
+
+- **全自动流水线**：固定索引和独立输出副本，执行 Integration Plan、自动选择 1～3 份参考、Codex Analyzer / Translator、模块 Verifier 与修复、主动项目 Integration、最终快照验证和交付报告。
+
+项目任务在扩展全局存储中的独立输出副本执行，不改写源骨架；普通目录和已有 Git 项目均可输入。宿主创建快照基线，在最后一次验证的文件哈希仍一致时，才将产物发布为输出副本中的一个 Git 提交。测试文件、配置文件和范围外文件发生改动会阻止发布。符号链接、超过 30000 文件 / 512 MiB 的骨架，以及单次生成单元超过 128 个生产文件时，会给出明确原因。
+
+运行记录与 Markdown 验收报告持续落盘。输出区可打开生成项目、查看差异、查看报告，或导出 Markdown / JSON。报告包含需求原文、模块追溯、历史版本、生成计划、真实编译与测试输出、审阅决定和运行事件。未采集覆盖率时明确标为未采集；最终模块 Verifier 或已配置固定测试尚未完整通过时，只声明编译通过。扩展重启后运行标为中断，保留输出和报告。点击“继续任务”可复用原运行和独立输出；“重试此模块”会重跑该模块及受影响的后续模块，保留无关的已完成模块，最终联合验证仍会重新执行。恢复前检查文件快照，拒绝复用已被外部修改的输出；重新开始则创建新的独立副本。
+
+项目全自动生成直接调用现有 Codex Runtime；检索与建模沿用本机后端。模型配置和 API Key 使用右上角设置，Codex CLI 及所选模型接口需要在本机可用。可通过 ADAPTATION_CODEX_COMMAND / ADAPTATION_CODEX_HOME 指定运行时。编译与固定验收只取用户级设置。完整链路、验收边界和验证方式见 [项目流水线说明](../../docs/project-pipeline-validation.md)。
+
+固定高度的运行日志窗口显示检索、审阅、生成、修复和验收的实际状态。项目运行由宿主推送进度；单模块调试每 1.5 秒读取运行状态。上翻日志暂停自动跟随，点击“跟随最新”恢复。运行期间锁定输入和工程导航，可取消整个项目任务；失败时输出与报告保留以便检查。打开设置再返回会保留需求正文。
+
+“执行完成”表示该运行已结束，业务验收结论以实际行为测试记录为准；仅编译通过时，输出仍明确显示尚无行为验收通过记录。
 
 ## 版本化代码智能索引
 
-在插件右上角打开 **设置 → AI 服务**，选择服务商并直接填写 API Key（默认为“无”），点击保存设置或按 Ctrl+S，一并保存并启用服务商。密钥以密码形式暂存在表单中，仅保存时传给宿主并写入 VS Code SecretStorage，不写入工作区设置或日志；保存成功后清空输入。已有密钥留空保留，清除操作在保存后生效；后端已有 `.env` 配置仍可作为备用。
+在插件右上角打开 **设置 → AI 服务**，选择服务商并直接填写 API Key（默认为“无”），点击保存设置或按 Ctrl+S，一并保存并启用服务商。密钥以密码形式暂存在表单中，仅保存时传给宿主并写入 VS Code SecretStorage，不写入工作区设置或日志。已配置的 Key 显示固定掩码和“已配置”状态，宿主不会把保存的密钥回传前端；修改其他设置会保留原密钥，输入新 Key 可替换，清除操作在保存后生效。更换服务商或地址会重新显示对应配置状态；后端已有 `.env` 配置仍可作为备用。
+
+目标工程和参考工程共用主工作区顶部的导入任务面板，展示源码解析、索引、模块建模、真实计数、耗时及过程记录。参考仓库串行解析，每个仓库的所有子项目及检索信息均就绪后才完成；建模失败可直接重试，复用已完成的索引。两种任务分别保存最近 30 条历史，每条保留最多 200 条过程记录，关闭 Webview 后宿主仍记录进度。右侧 × 只收起面板，后台任务继续运行；点击“显示…导入任务”重新打开，新任务会自动显示。恢复旧制品而缺少原始计时记录时，明确显示“历史耗时未记录”。
 
 此配置仅用于本机 AI 后端，按 `forexplore.adaptationApiUrl` 配置地址（默认 `http://127.0.0.1:8788`）保存；更换配置地址后需要为新地址配置。自动启动的自有后端使用系统分配的实际端口，宿主只向验证过的实际地址发送凭据，端口变化不要求重新填 Key。后端需更新到支持请求凭据的版本，可在没有 `DEEPSEEK_API_KEY` 的情况下启动。远程后端仍在服务端配置密钥。密钥保存成功不等于模型鉴权成功；保存后可重试项目模块分析。
 
@@ -18,7 +36,7 @@ ForeXplore 将企业已有实现作为迁移证据：在任意受支持语言的
 
 扩展宿主将 `forexplore.repositoryPaths` 中的参考工程和当前本地工作区目标工程注册到同一个版本化索引链路：`RepositoryRegistry → AnalysisCoordinator → Tree-sitter structural index → revision store → SemanticQueryPort`。运行 **ForeXplore: 刷新代码智能索引** 可增量复用未变文件；**ForeXplore: 重新索引参考工程** 会重新检查全部文件；内容和解析器版本未变时保留原 revision。索引构建完成前，读者继续看到上一个 active revision。
 
-设置面板展示仓库、项目、索引状态、active revision、语言能力等级和项目解析状态；不会接收索引数据库连接、源码或 `localPath`。它可切换查看宿主验证过的历史 revision，但此操作严格只读，绝不会改写 `activeRevision`；历史 Summary 会明确标为过期，不能当作当前结果。扩展宿主保留现有 Java/C# `RepositoryStaticAnalysis` 作为模块迁移兼容制品，不能把旧快照 Summary 强行标记为新结构索引 revision 的当前 Summary。新鲜的 Java/C# 编译器探测快照只有在其 Java/C# 文件哈希与 active structural revision 完全相符时，才由宿主绑定为该 revision 的专用语义证据；绑定失败不会影响旧迁移流程。
+设置面板展示仓库、项目、索引状态、语言能力等级和项目解析状态，已移除内部 revision 标识和切换控件；不会接收索引数据库连接、源码或 `localPath`。后台继续用不可变 revision 绑定索引和模型，过期 Summary 不能当作当前结果。扩展宿主保留现有 Java/C# `RepositoryStaticAnalysis` 作为模块迁移兼容制品，不能把旧快照 Summary 强行标记为新结构索引 revision 的当前 Summary。新鲜的 Java/C# 编译器探测快照只有在其 Java/C# 文件哈希与 active structural revision 完全相符时，才由宿主绑定为该 revision 的专用语义证据；绑定失败不会影响旧迁移流程。
 
 生产环境将以下变量设置在启动 VS Code 的本机环境中，以让宿主使用 SeekDB 持久化独立的 `repositories`、`analysis_revisions`、`projects`、`files`、`symbols`、`dependency_edges`、`module_artifacts` 和 `search_documents` 表：
 
@@ -169,6 +187,17 @@ SEMANTIC_QUERY_PORT_URL=http://127.0.0.1:8790 npm run start --workspace @forexpl
 ```bash
 npm run dev:extension
 ```
+
+如果需要直接打开已经写入 SeekDB 的企业资产升级语料，可以使用预置入口：
+
+```bash
+npm run dev:extension:preloaded
+```
+
+它会读取 `experiments/enterprise-asset-upgrade/AssetUpgradeGateway.code-workspace`，将其中的一个目标工程和七个参考工程绑定到当前数据库
+`forexplore_asset_upgrade_20261004`，只加载已有 revision 和模块产物，不重新扫描或建模。预置入口使用被忽略的独立 VS Code 数据目录，因此不会改动普通
+`npm run dev:extension` 的工作区状态；需要换数据库或工作区时分别使用 `--database <name>` 和 `--workspace <file.code-workspace>`。默认 DeepSeek
+模型可以直接使用启动 VS Code 进程继承的 `DEEPSEEK_API_KEY`；其他服务商在预置窗口的设置中保存一次 Key 即可。
 
 插件默认使用以下 VS Code 配置：
 

@@ -21,6 +21,7 @@ export interface WorkflowState {
   topK: number;
   candidates: SearchCandidate[];
   selectedCandidateId: string | null;
+  selectedCandidateIds?: string[];
   decisionNotes: string;
   strategy: AdaptationStrategy;
   adaptation: AdaptationResult | null;
@@ -37,6 +38,7 @@ export type WorkflowEvent =
   | { type: 'SEARCH_SUCCESS'; candidates: SearchCandidate[] }
   | { type: 'SEARCH_FAILURE'; message: string }
   | { type: 'SELECT_CANDIDATE'; candidateId: string }
+  | { type: 'SELECT_CANDIDATES'; candidateIds: string[] }
   | { type: 'SET_DECISION_NOTES'; value: string }
   | { type: 'SET_STRATEGY'; value: AdaptationStrategy }
   | { type: 'ADAPT_START' }
@@ -57,6 +59,7 @@ export const initialWorkflowState: WorkflowState = {
   topK: 4,
   candidates: [],
   selectedCandidateId: null,
+  selectedCandidateIds: [],
   decisionNotes: '',
   strategy: 'translate',
   adaptation: null,
@@ -92,6 +95,7 @@ export function workflowReducer(
         // Retrieval ranking is evidence for review, never an implicit human
         // selection. The caller must dispatch SELECT_CANDIDATE explicitly.
         selectedCandidateId: null,
+        selectedCandidateIds: [],
         adaptation: null,
         applyResult: null,
       };
@@ -101,10 +105,16 @@ export function workflowReducer(
       return {
         ...state,
         selectedCandidateId: event.candidateId,
+        selectedCandidateIds: [event.candidateId],
         stage: 'candidates',
         adaptation: null,
         applyResult: null,
       };
+    case 'SELECT_CANDIDATES':
+      if (event.candidateIds.length > 3 || new Set(event.candidateIds).size !== event.candidateIds.length ||
+          event.candidateIds.some(id => !state.candidates.slice(0, 4).some(candidate => candidate.id === id && candidate.kind === 'module'))) return state;
+      return { ...state, selectedCandidateId: event.candidateIds[0] ?? null, selectedCandidateIds: [...event.candidateIds],
+        stage: 'candidates', adaptation: null, applyResult: null };
     case 'SET_DECISION_NOTES':
       return { ...state, decisionNotes: event.value };
     case 'SET_STRATEGY':

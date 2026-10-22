@@ -8,6 +8,7 @@ import { InMemoryIndexStore, sliceSourceText, validateSearchDocumentsAgainstInde
 import { createCodeIntelligenceRuntime } from './index.js';
 import { seekDbProjectionInternals } from './seekdb-projection.js';
 import { SeekDbIndexStore } from './seekdb-index-store.js';
+import type { AnalysisProgress } from './analysis-coordinator.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true }))); });
@@ -18,14 +19,17 @@ async function fixture(source: string, store = new InMemoryIndexStore()) {
   await writeFile(path.join(root, 'main.ts'), source);
   const runtime = await createCodeIntelligenceRuntime({ store });
   await runtime.registry.register({ repositoryId: 'bounded', localPath: root, role: 'target' });
-  const run = await runtime.coordinator.run({ repositoryId: 'bounded' });
-  return { root, runtime, store, scope: run.scope };
+  const progress: AnalysisProgress[] = [];
+  const run = await runtime.coordinator.run({ repositoryId: 'bounded', onProgress: update => progress.push(update) });
+  return { root, runtime, store, scope: run.scope, progress };
 }
 
 describe('bounded indexing and local reads', () => {
   it('projects a complete long implementation, including searchable tail ranges', async () => {
     const source = 'export function recoverUpload() {\n' + '  // pending upload progress\n'.repeat(1600) + '  return "tailRecoveryMarker";\n}\n';
-    const { store, scope } = await fixture(source);
+    const { store, scope, progress } = await fixture(source);
+    expect(progress.filter(update => update.stage === 'search-projection').at(-1))
+      .toMatchObject({ filesCompleted: 1, filesTotal: 1 });
     const index = (await store.getStructuralIndex(scope))!;
     const fragments = (await store.listSearchDocuments(scope)).filter((document) => document.kind === 'source-fragment')
       .sort((a, b) => a.sourceRange!.startLine - b.sourceRange!.startLine || a.sourceRange!.startColumn - b.sourceRange!.startColumn);
@@ -49,7 +53,11 @@ describe('bounded indexing and local reads', () => {
       await originalAppend(...args);
     });
     await writeFile(path.join(root, 'main.ts'), Array.from({ length: 350 }, (_, index) => `export function changed${index}() { return ${index}; }`).join('\n'));
-    await expect(runtime.coordinator.run({ repositoryId: 'bounded' })).rejects.toThrow('projection batch unavailable');
+    const progress: AnalysisProgress[] = [];
+    await expect(runtime.coordinator.run({ repositoryId: 'bounded', onProgress: update => progress.push(update) })).rejects.toThrow('projection batch unavailable');
+    const projected = progress.filter(update => update.stage === 'search-projection' && update.filesTotal !== undefined);
+    expect(projected.some(update => (update.completed ?? 0) > 0)).toBe(true);
+    expect(projected.every(update => update.filesCompleted! < update.filesTotal!)).toBe(true);
     expect((await store.getRepository('bounded'))?.activeRevision).toBe(scope.analysisRevision);
     expect(await store.searchSearchDocuments(scope, 'stable', 10)).not.toHaveLength(0);
     expect((await store.listRevisions('bounded')).some((revision) => revision.status === 'failed')).toBe(true);
@@ -137,9 +145,165 @@ describe('bounded indexing and local reads', () => {
     const results = await store.searchSearchDocuments({ repositoryId: 'repository', analysisRevision: 'revision', projectId: 'project' }, 'matching implementation', 1, 'source-fragment');
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({ searchDocumentId: 'shared', text: 'actual code', retrievalScore: { lexical: 4, semantic: 0.8 } });
+    expect(query.mock.calls[0]![0].split('FROM')[0]).not.toContain('document_text');
+    expect(query.mock.calls[0]![0]).toContain('implementation_eligible = 1');
     expect(query.mock.calls[0]![0]).not.toContain('document_text');
     expect(query.mock.calls[0]![1]).toEqual(['matching implementation', 'repository', 'revision', 'source-fragment', 'project', 'matching implementation', 24]);
+    expect(query.mock.calls[1]![0].split('FROM')[0]).not.toContain('document_text');
+    expect(query.mock.calls[1]![0]).toContain('implementation_eligible = 1');
     expect(query.mock.calls[1]![0]).not.toContain('document_text');
     expect(query.mock.calls[2]![1]).toEqual(['repository', 'revision', 'shared', 1]);
+  });
+
+  it('preserves each view under a saturated fragment corpus while sharing embedding and hydration', async () => {
+    const kinds = ['symbol', 'source-fragment', 'summary'] as const;
+    const embedding = { dimension: 384, identity: 'test', embed: vi.fn(),
+      embedQuery: vi.fn(async () => [1, ...Array<number>(383).fill(0)]) };
+    const query = vi.fn(async (sql: string, values: unknown[]) => {
+      if (sql.includes('document_text\n') && sql.includes('search_document_id IN')) {
+        return [kinds.flatMap((kind) => [0, 1].map((i) => ({ search_document_id: `${kind}-${i}`, kind,
+          relative_path: kind === 'summary' ? null : `${kind}.ts`, content_hash: 'hash', title: kind,
+          document_text: kind === 'summary' ? '{}' : 'actual code' })))];
+      }
+      const requested = kinds.filter((kind) => values.includes(kind));
+      if (sql.includes('ROW_NUMBER() OVER')) {
+        return [requested.flatMap(kind => [0, 1].map(i => ({ repository_id: 'repository', analysis_revision: 'revision',
+          search_document_id: `${kind}-${i}`, kind, text_score: 4 - i })))];
+      }
+      // Reproduce the failure: a union cut contains only fragments, despite
+      // there being usable symbol and summary results in their own channels.
+      const selected = requested.length === 1 ? requested[0]! : 'source-fragment';
+      return [[0, 1].map((i) => ({ search_document_id: `${selected}-${i}`, kind: selected,
+        ...(sql.includes('text_score') ? { text_score: 4 - i } : { semantic_score: 0.9 - i / 10 }) }))];
+    });
+    const store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'bounded_test',
+      embeddingProvider: embedding }, { query } as unknown as Pool);
+    const results = await store.searchSearchDocumentsByViews({ repositoryId: 'repository', analysisRevision: 'revision' },
+      'implementation', { symbol: 2, 'source-fragment': 2, summary: 2 }, kinds);
+    for (const kind of kinds) expect(results[kind]?.map((doc) => doc.searchDocumentId)).toEqual([`${kind}-0`, `${kind}-1`]);
+    expect(embedding.embedQuery).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(5); // shared text scan, three scoped vector lookups, one hydration
+    const textScans = query.mock.calls.filter(([sql]) => sql.includes('MATCH('));
+    expect(textScans).toHaveLength(1);
+    expect(textScans[0]![0]).toContain('PARTITION BY repository_id, analysis_revision, kind');
+    expect(textScans[0]![0]).toContain('view_rank <= ?');
+    expect(query.mock.calls.filter(([sql]) => sql.includes('search_document_id IN'))).toHaveLength(1);
+  });
+
+  it('shares one lexical scan across repositories while preserving revisions and unequal view budgets', async () => {
+    const scopes = [{ repositoryId: 'a', analysisRevision: 'new-a' }, { repositoryId: 'b', analysisRevision: 'new-b' }];
+    const query = vi.fn(async (sql: string, values: unknown[]) => {
+      if (sql.includes('ROW_NUMBER() OVER')) return [scopes.flatMap(scope => [0, 1, 2].map(i => ({
+        repository_id: scope.repositoryId, analysis_revision: scope.analysisRevision,
+        search_document_id: `${scope.repositoryId}-${i}`, kind: 'symbol', text_score: 5 - i,
+      })))];
+      if (sql.includes('cosine_distance')) return [[]];
+      if (sql.includes('search_document_id IN')) {
+        const scope = scopes.find(scope => values.includes(scope.repositoryId))!;
+        return [[0, 1, 2].map(i => ({ search_document_id: `${scope.repositoryId}-${i}`, kind: 'symbol', relative_path: 'a.ts',
+          content_hash: 'hash', title: 'Symbol', document_text: 'callable body' }))];
+      }
+      return [[]];
+    });
+    const store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'bounded_test' }, { query } as unknown as Pool);
+    const results = await store.searchSearchDocumentsBatch(scopes.map((scope, i) => ({ scope, query: 'same capability',
+      views: ['symbol'], limits: { symbol: i + 1 } })));
+    expect(results[0]!.symbol?.map(doc => doc.searchDocumentId)).toEqual(['a-0']);
+    expect(results[1]!.symbol?.map(doc => doc.searchDocumentId)).toEqual(['b-0', 'b-1']);
+    for (const [i, result] of results.entries()) expect(result.symbol?.every(doc =>
+      doc.repositoryId === scopes[i]!.repositoryId && doc.analysisRevision === scopes[i]!.analysisRevision)).toBe(true);
+    const scans = query.mock.calls.filter(([sql]) => sql.includes('MATCH('));
+    expect(scans).toHaveLength(1);
+    expect(scans[0]![1]).toContain('new-a');
+    expect(scans[0]![1]).toContain('new-b');
+    expect(query.mock.calls.filter(([sql]) => sql.includes('cosine_distance'))).toHaveLength(2);
+  });
+
+  it('rejects leaked lexical rows and cancels batches before acquiring connections', async () => {
+    const query = vi.fn(async () => [[{ repository_id: 'wrong', analysis_revision: 'old', kind: 'symbol', search_document_id: 'bad', text_score: 1 }]]);
+    const store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'bounded_test' }, { query } as unknown as Pool);
+    const requests = ['a', 'b'].map(repositoryId => ({ scope: { repositoryId, analysisRevision: 'current' }, query: 'capability',
+      views: ['symbol'] as const, limits: { symbol: 1 } }));
+    const controller = new AbortController();
+    controller.abort(new Error('cancelled'));
+    await expect(store.searchSearchDocumentsBatch(requests, controller.signal)).rejects.toThrow('cancelled');
+    expect(query).not.toHaveBeenCalled();
+    await expect(store.searchSearchDocumentsBatch(requests)).rejects.toThrow('outside its requested scopes');
+  });
+
+  it('keeps project-scoped lexical scans separate within the same repository revision', async () => {
+    const query = vi.fn(async (sql: string, values: unknown[]) => {
+      if (sql.includes('MATCH(')) return [[{ search_document_id: `project-${values[4]}`, kind: 'symbol', text_score: 5 }]];
+      if (sql.includes('cosine_distance')) return [[]];
+      if (sql.includes('search_document_id IN')) return [[{ search_document_id: values[2], kind: 'symbol',
+        relative_path: 'a.ts', content_hash: 'hash', title: 'Symbol', document_text: 'callable body' }]];
+      return [[]];
+    });
+    const store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'bounded_test' }, { query } as unknown as Pool);
+    const results = await store.searchSearchDocumentsBatch(['a', 'b'].map(projectId => ({
+      scope: { repositoryId: 'repository', analysisRevision: 'revision', projectId },
+      query: 'same capability', views: ['symbol'], limits: { symbol: 1 },
+    })));
+    expect(results.map(result => result.symbol?.map(doc => doc.searchDocumentId))).toEqual([['project-a'], ['project-b']]);
+    const scans = query.mock.calls.filter(([sql]) => sql.includes('MATCH('));
+    expect(scans).toHaveLength(2);
+    for (const [sql, values] of scans) {
+      expect(sql).toContain('AND project_id = ?');
+      expect(['a', 'b']).toContain(values[4]);
+    }
+  });
+
+  it.each([false, true])('resumes the eligibility migration without rebuilding vectors (column already created: %s)', async (columnExists) => {
+    const applied = new Set([1, 2, 3]);
+    const embedding = { dimension: 384, identity: 'unchanged-model', embed: vi.fn() };
+    let store: SeekDbIndexStore;
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql === 'SELECT VERSION() AS version') return [[{ version: 'seekdb-v1.2' }]];
+      if (sql.includes('GET_LOCK')) return [[{ acquired: 1 }]];
+      if (sql.includes('RELEASE_LOCK')) return [[{ released: 1 }]];
+      if (sql.includes('SELECT version FROM')) return [[...applied].map(version => ({ version }))];
+      if (sql.includes("LIKE 'implementation_eligible'")) return [columnExists ? [{ Field: 'implementation_eligible' }] : []];
+      if (sql.includes('SELECT config_hash')) return [[{ config_hash: store.embeddingIdentity }]];
+      if (sql.includes('INSERT IGNORE INTO') && sql.includes('schema_migrations')) applied.add(Number(values![0]));
+      return [[]];
+    });
+    store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'bounded_test',
+      embeddingProvider: embedding }, { query, getConnection: async () => ({ query, release: vi.fn(), destroy: vi.fn() }) } as unknown as Pool);
+    await store.initialize();
+    await store.initialize();
+    const alterations = query.mock.calls.filter(([sql]) => sql.includes('ADD COLUMN implementation_eligible'));
+    expect(alterations).toHaveLength(columnExists ? 0 : 1);
+    if (!columnExists) expect(alterations[0]![0]).toContain('GENERATED ALWAYS AS');
+    expect(applied).toEqual(new Set([1, 2, 3, 4, 5]));
+    expect(embedding.embed).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, 2])('resumes a partially applied statistics-index upgrade (%i indexes already present)', async (existingCount) => {
+    const names = ['idx_files_language_statistics', 'idx_symbols_language_statistics'];
+    const indexes = new Set(names.slice(0, existingCount));
+    const applied = new Set([1, 2, 3, 4]);
+    const embedding = { dimension: 384, identity: 'unchanged-model', embed: vi.fn() };
+    let store: SeekDbIndexStore;
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql === 'SELECT VERSION() AS version') return [[{ version: 'seekdb-v1.2' }]];
+      if (sql.includes('GET_LOCK')) return [[{ acquired: 1 }]];
+      if (sql.includes('RELEASE_LOCK')) return [[{ released: 1 }]];
+      if (sql.includes('SELECT version FROM')) return [[...applied].map(version => ({ version }))];
+      if (sql.includes('SELECT config_hash')) return [[{ config_hash: store.embeddingIdentity }]];
+      if (sql.includes('SHOW INDEX')) return [indexes.has(String(values?.[0])) ? [{ Key_name: values?.[0] }] : []];
+      const addition = sql.match(/ADD INDEX (idx_\w+_language_statistics)/);
+      if (addition) indexes.add(addition[1]!);
+      if (sql.includes('INSERT IGNORE INTO') && sql.includes('schema_migrations')) applied.add(Number(values![0]));
+      return [[]];
+    });
+    store = new SeekDbIndexStore({ host: 'localhost', port: 2881, user: 'root', password: '', database: 'bounded_test',
+      embeddingProvider: embedding }, { query, getConnection: async () => ({ query, release: vi.fn(), destroy: vi.fn() }) } as unknown as Pool);
+    await store.initialize();
+    await store.initialize();
+    expect(indexes).toEqual(new Set(names));
+    const additions = query.mock.calls.filter(([sql]) => /ADD INDEX idx_\w+_language_statistics/.test(sql));
+    expect(additions).toHaveLength(2 - existingCount);
+    expect(applied).toEqual(new Set([1, 2, 3, 4, 5]));
+    expect(embedding.embed).not.toHaveBeenCalled();
   });
 });

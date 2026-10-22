@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RepositoryStaticAnalysis } from '@forexplore/contracts';
 import {
   CodeIntelligenceHost,
+  boundHistoryViewFiles,
+  HISTORY_VIEW_MAX_BYTES,
+  HISTORY_VIEW_MAX_FILES,
   codeIntelligenceRuntimeOptionsFromEnvironment,
   type CodeIntelligenceRuntime,
   type RepositoryIdentityStore,
@@ -201,6 +204,93 @@ function createRuntime(options: { languageId?: 'typescript' | 'java' | 'csharp' 
   };
 }
 
+it('bounds history evidence views while retaining the first source file', () => {
+  const files = ['main.cs', 'large.cs', ...Array.from({ length: 20 }, (_, index) => `small-${index}.cs`)];
+  const sizes = new Map([
+    ['main.cs', 10], ['large.cs', HISTORY_VIEW_MAX_BYTES],
+    ...Array.from({ length: 20 }, (_, index) => [`small-${index}.cs`, 10] as const),
+  ]);
+  const selected = boundHistoryViewFiles(files, sizes);
+  expect(selected[0]).toBe('main.cs');
+  expect(selected).not.toContain('large.cs');
+  expect(selected.length).toBeLessThanOrEqual(HISTORY_VIEW_MAX_FILES);
+  expect(selected.reduce((sum, file) => sum + sizes.get(file)!, 0)).toBeLessThanOrEqual(HISTORY_VIEW_MAX_BYTES);
+});
+
+it('prioritizes target-related history files before applying the byte budget', () => {
+  const files = ['Entry.cs', 'UnrelatedLarge.cs', 'WorkflowDispatcher.cs', 'RetryPolicy.cs', 'UnrelatedSmall.cs'];
+  const sizes = new Map([
+    ['Entry.cs', 10], ['UnrelatedLarge.cs', 90], ['WorkflowDispatcher.cs', 20],
+    ['RetryPolicy.cs', 20], ['UnrelatedSmall.cs', 10],
+  ]);
+  const selected = boundHistoryViewFiles(files, sizes, 3, 50, ['WorkflowDispatcher', 'RetryPolicy']);
+  expect(selected).toEqual(['Entry.cs', 'WorkflowDispatcher.cs', 'RetryPolicy.cs']);
+});
+
+it('keeps the byte limit even when the first historical source is oversized', () => {
+  const files = ['HugeEngine.java', 'DispatchCommand.java', 'RetryPolicy.java'];
+  const sizes = new Map([['HugeEngine.java', HISTORY_VIEW_MAX_BYTES + 1], ['DispatchCommand.java', 30], ['RetryPolicy.java', 30]]);
+  expect(boundHistoryViewFiles(files, sizes)).toEqual(['DispatchCommand.java', 'RetryPolicy.java']);
+});
+
+it('retains a substantial implementation together with its public interface', () => {
+  const files = ['OrderProcessor.cs', 'IOrderProcessor.cs', 'OrderResult.cs'];
+  const sizes = new Map([['OrderProcessor.cs', 159_000], ['IOrderProcessor.cs', 15_000], ['OrderResult.cs', 5_000]]);
+  expect(boundHistoryViewFiles(files, sizes)).toEqual(files);
+});
+
+it('materializes a bounded history view from a module containing more than 256 files', async () => {
+  const target = await temporaryRepository('large-view-target');
+  const history = await temporaryRepository('large-view-history');
+  const files = ['src/example.ts', ...Array.from({ length: 300 }, (_, i) => `src/part-${i}.ts`)];
+  await Promise.all(files.slice(1).map(file => writeFile(path.join(history, file), 'export function dispatch() { return true; }\n')));
+  const runtime = createRuntime();
+  const instance = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const state = await instance.synchronize({ repositories: [{ localPath: history, role: 'history' }] });
+  const repository = state.presentation.repositories[0]!;
+  const view = await instance.createHistoryModuleView({ workspaceRoot: target, repositoryId: repository.repositoryId,
+    analysisRevision: repository.activeRevision!, moduleId: 'large-engine', sourceFiles: files, preferredFiles: [files.at(-1)!] });
+  expect(view.files.length).toBe(HISTORY_VIEW_MAX_FILES);
+  expect(view.files).toContain(files.at(-1));
+  const manifest = JSON.parse(await readFile(path.join(view.root, 'manifest.json'), 'utf8'));
+  expect(manifest.omittedFiles.length).toBe(files.length - HISTORY_VIEW_MAX_FILES);
+  expect(manifest.files[0].path).toBe('src/example.ts');
+  const makeWritable = async (directory: string): Promise<void> => {
+    await chmod(directory, 0o700);
+    for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isDirectory()) await makeWritable(path.join(directory, entry.name));
+  };
+  await makeWritable(view.root);
+  await instance.dispose();
+});
+
+it('merges selected modules with colliding file names and skips an unreadable candidate', async () => {
+  const target = await temporaryRepository('view-target');
+  const histories = await Promise.all(['a', 'b', 'c'].map(name => temporaryRepository(`view-${name}`)));
+  const runtime = createRuntime();
+  const instance = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const state = await instance.synchronize({ repositories: histories.map(localPath => ({ localPath, role: 'history' as const })) });
+  const selections = state.presentation.repositories.map((repository, index) => ({
+    repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision!, moduleId: `module-${index}`,
+    name: `History ${index}`, sourceFiles: index === 1 ? ['missing.ts'] : ['src/example.ts'],
+  }));
+  for (const [index, history] of histories.entries()) await writeFile(path.join(history, 'src/example.ts'), `export const value = ${index};`);
+  const view = await instance.createHistoryModulesView({ workspaceRoot: target, candidates: selections });
+  expect(view.candidates?.map(candidate => candidate.prefix)).toEqual(['candidate-1', 'candidate-3']);
+  expect(view.files).toEqual(['candidate-1/src/example.ts', 'candidate-3/src/example.ts']);
+  expect(await readFile(path.join(view.root, 'source/candidate-1/src/example.ts'), 'utf8')).not.toEqual(await readFile(path.join(view.root, 'source/candidate-3/src/example.ts'), 'utf8'));
+  expect(JSON.parse(await readFile(path.join(view.root, 'manifest.json'), 'utf8')).skippedCandidates).toHaveLength(1);
+  expect(await readdir(path.dirname(view.root))).toEqual([view.runId]);
+  await expect(instance.createHistoryModulesView({ candidates: [selections[0]!, selections[0]!] })).rejects.toThrow('不同的历史模块');
+  await expect(instance.createHistoryModulesView({ candidates: [...selections, { ...selections[0]!, moduleId: 'fourth' }] })).rejects.toThrow('1～3');
+  // Restore directory permissions so the fixture can remove its read-only view.
+  const makeWritable = async (root: string): Promise<void> => {
+    await chmod(root, 0o700);
+    for (const entry of await readdir(root, { withFileTypes: true })) if (entry.isDirectory()) await makeWritable(path.join(root, entry.name));
+  };
+  await makeWritable(view.root);
+  await instance.dispose();
+});
+
 async function temporaryRepository(name: string): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), `forexplore-code-intelligence-${name}-`));
   temporaryRoots.push(root);
@@ -208,6 +298,23 @@ async function temporaryRepository(name: string): Promise<string> {
   await writeFile(path.join(root, 'src', 'example.ts'), 'export const example = 1;\n');
   return root;
 }
+
+it('binds an import to a registered workspace root before indexing and keeps hidden or historical roots out of retries', async () => {
+  const target = await temporaryRepository('target-import'), history = await temporaryRepository('history-import');
+  const runtime = createRuntime(), instance = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const inputs = [{ localPath: target, role: 'target' as const }, { localPath: history, role: 'history' as const }];
+  const registered = await instance.synchronize({ repositories: inputs, scan: false });
+  const id = await instance.registeredRepositoryIdForPath(target);
+  expect(id).toBe(registered.presentation.repositories.find(repository => repository.role === 'target')!.repositoryId);
+  expect((await instance.sourceRootForRepository(id!)).toLowerCase()).toBe(target.toLowerCase());
+  await expect(instance.activeScopeForPath(target)).rejects.toThrow('no active analysis revision');
+  const historyId = await instance.registeredRepositoryIdForPath(history);
+  await expect(instance.sourceRootForRepository(historyId!)).rejects.toThrow('不在当前工作区');
+  await instance.synchronize({ repositories: [inputs[1]!], scan: false });
+  expect(await instance.registeredRepositoryIdForPath(target)).toBeNull();
+  await expect(instance.sourceRootForRepository(id!)).rejects.toThrow('不在当前工作区');
+  instance.dispose();
+});
 
 it('recovers persisted repository identities when a host starts without its identity cache', async () => {
   const root = await temporaryRepository('reopen');
@@ -221,6 +328,11 @@ it('recovers persisted repository identities when a host starts without its iden
     if (request.repositoryId !== repositoryId) throw new Error('Persisted path belongs to another repository ID.');
     return register(request);
   });
+  const persisted = await runtime.registry.list!();
+  vi.spyOn(runtime.registry, 'list').mockResolvedValue(persisted.map(repository => ({ ...repository,
+    localPath: process.platform === 'win32' ? repository.localPath.replace(/^([A-Za-z]):[\\/]/,
+      (_, drive: string) => `/mnt/${drive.toLowerCase()}/`).replaceAll('\\', '/') : repository.localPath,
+  })));
   const reopened = new CodeIntelligenceHost({ runtimeFactory: async () => runtime, identityStore: new MemoryIdentityStore() });
   const result = await reopened.synchronize({ repositories: [{ localPath: root, role: 'target' }], scan: false });
   expect(guarded).toHaveBeenCalledWith(expect.objectContaining({ repositoryId }));
@@ -228,6 +340,40 @@ it('recovers persisted repository identities when a host starts without its iden
   expect(await reopened.activeScopeForPath(root)).toEqual({ repositoryId, analysisRevision: activeRevision });
   initial.dispose();
   reopened.dispose();
+});
+
+it('loads an explicitly bound cross-platform repository without rewriting its shared registry row', async () => {
+  const indexedRoot = await temporaryRepository('preloaded-source-path');
+  const currentPlatformRoot = await temporaryRepository('preloaded-current-path');
+  const runtime = createRuntime();
+  const firstHost = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+  const first = await firstHost.synchronize({ repositories: [{ localPath: indexedRoot, role: 'target' }] });
+  const repositoryId = first.presentation.repositories[0]!.repositoryId;
+  await runtime.registry.setAnalysisStatus!(repositoryId, 'indexing');
+  const persistedBefore = await runtime.registry.get(repositoryId);
+  const scan = vi.spyOn(runtime.coordinator, 'run');
+  const register = vi.spyOn(runtime.registry, 'register');
+  const preloadedHost = new CodeIntelligenceHost({
+    runtimeFactory: async () => runtime,
+    identityStore: new MemoryIdentityStore(),
+  });
+
+  const result = await preloadedHost.synchronize({
+    repositories: [{ repositoryId, localPath: currentPlatformRoot, role: 'target' }],
+    scan: false,
+    repairStaleIndexing: true,
+  });
+
+  expect(result.presentation.repositories).toMatchObject([{ repositoryId, analysisStatus: 'ready' }]);
+  expect(register).not.toHaveBeenCalled();
+  expect(scan).not.toHaveBeenCalled();
+  expect(await runtime.registry.get(repositoryId)).toEqual(persistedBefore);
+  expect(await preloadedHost.activeScopeForPath(currentPlatformRoot)).toEqual({
+    repositoryId,
+    analysisRevision: first.presentation.repositories[0]!.activeRevision,
+  });
+  preloadedHost.dispose();
+  firstHost.dispose();
 });
 
 it('uses lightweight revision metadata for presentation and rejects mismatched hashes', async () => {
@@ -315,6 +461,63 @@ function javaCompilerProbeAnalysis(sha256 = 'sha-1'): RepositoryStaticAnalysis {
 }
 
 describe('CodeIntelligenceHost', () => {
+  it('retains the last repository snapshot during a failed status read and recovers on the next read', async () => {
+    const root = await temporaryRepository('status-timeout');
+    const runtime = createRuntime();
+    const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+    try {
+      const initial = await host.synchronize({ repositories: [{ localPath: root, role: 'history' }] });
+      vi.spyOn(runtime.queryPort, 'getRepositoryOverview').mockRejectedValueOnce(new Error('query timeout'));
+      const unavailable = await host.presentation();
+      expect(unavailable).toMatchObject({ status: 'error', runtimeStatus: 'error', message: expect.stringContaining('上次读取') });
+      expect(unavailable.repositories).toEqual(initial.presentation.repositories);
+      expect(await host.presentation()).toMatchObject({ status: 'ready', runtimeStatus: 'ready', repositories: initial.presentation.repositories });
+    } finally { host.dispose(); }
+  });
+
+  it('does not restore a removed repository or retain a read failure after synchronization recovers', async () => {
+    const roots = await Promise.all(['retained', 'removed'].map(name => temporaryRepository(`status-${name}`)));
+    const runtime = createRuntime();
+    const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+    try {
+      await host.synchronize({ repositories: roots.map(localPath => ({ localPath, role: 'history' as const })) });
+      vi.spyOn(runtime.queryPort, 'listRepositories').mockRejectedValueOnce(new Error('query timeout'));
+      const result = await host.synchronize({ repositories: [{ localPath: roots[0]!, role: 'history' }], scan: false });
+      expect(result.presentation.status).toBe('error');
+      expect(result.presentation.repositories.map(repository => repository.displayName)).toEqual([path.basename(roots[0]!)]);
+      expect(await host.presentation()).toMatchObject({ status: 'ready', runtimeStatus: 'ready' });
+    } finally { host.dispose(); }
+  });
+
+  it('keeps current import progress when a status read falls back to an older snapshot', async () => {
+    const root = await temporaryRepository('live-status-timeout');
+    const runtime = createRuntime();
+    const host = new CodeIntelligenceHost({ runtimeFactory: async () => runtime });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started!: () => void;
+    const scanning = new Promise<void>(resolve => { started = resolve; });
+    try {
+      const repositories = [{ localPath: root, role: 'history' as const }];
+      await host.synchronize({ repositories });
+      const scan = runtime.coordinator.run.bind(runtime.coordinator);
+      vi.spyOn(runtime.coordinator, 'run').mockImplementationOnce(async request => {
+        request.onProgress?.({ stage: 'parse', completed: 2, total: 5 });
+        started();
+        await gate;
+        return scan(request);
+      });
+      const refresh = host.synchronize({ repositories });
+      await scanning;
+      vi.spyOn(runtime.queryPort, 'listRepositories').mockRejectedValueOnce(new Error('query timeout'));
+      expect((await host.presentation()).repositories[0]).toMatchObject({
+        analysisStatus: 'indexing', indexing: { stage: 'parse', completed: 2, total: 5 },
+      });
+      release();
+      expect((await refresh).presentation.repositories[0]?.indexing).toBeUndefined();
+    } finally { release(); host.dispose(); }
+  });
+
   it('retries initialization after a failed index migration on the next refresh', async () => {
     const runtime = createRuntime();
     const runtimeFactory = vi.fn().mockRejectedValueOnce(new Error('index migration failed')).mockResolvedValue(runtime);
@@ -383,11 +586,11 @@ describe('CodeIntelligenceHost', () => {
     try {
       const view = await host.presentation();
       expect(view.repositories.find((repository) => repository.role === 'history')?.analysisStatus).toBe('ready');
-      // One notification per observed transition: registration, the history
-      // scan start, the history scan result, and the target scan start. That
-      // last one is what keeps a still-running target visible to the Webview
-      // instead of only its eventual result.
-      expect(onChange).toHaveBeenCalledTimes(4);
+      // Registration, queue publication, and scan lifecycle transitions remain
+      // visible while the long-running target has not finished.
+      expect(onChange).toHaveBeenCalledTimes(5);
+      expect(view.repositories.find(repository => repository.role === 'target')?.indexing)
+        .toMatchObject({ stage: 'queued', position: 2, count: 2 });
     } finally {
       release();
       await synchronization;
@@ -436,7 +639,9 @@ describe('CodeIntelligenceHost', () => {
       expect(scan).toHaveBeenCalledWith(expect.objectContaining({ signal: controller.signal, reuseFailedProjection: true }));
       expect(onProgress.mock.calls.map(([progress]) => progress.stage)).toEqual(['snapshot', 'parse', 'parse', 'search-projection']);
       expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ displayName: 'progress-target', stage: 'parse', completed: 20, total: 20 }));
-      expect(onChange).toHaveBeenCalledTimes(3);
+      // Queue start and cleanup add two lifecycle events, never one per batch.
+      expect(onChange).toHaveBeenCalledTimes(5);
+      expect((await host.presentation()).repositories[0]?.indexing).toBeUndefined();
       expect(output.appendLine).toHaveBeenCalledWith(expect.stringContaining('正在生成检索向量'));
       await host.synchronize({ repositories });
       expect(scan).toHaveBeenLastCalledWith(expect.objectContaining({ mode: 'incremental', reuseFailedProjection: false }));
@@ -695,6 +900,24 @@ describe('CodeIntelligenceHost', () => {
     });
     expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_RERANK_MODEL: '' })).toThrow('both');
     expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_EMBEDDING_MODEL: '' })).toThrow('both');
+  });
+
+  it('configures database capacity independently of repository fan-out and rejects invalid limits', () => {
+    const environment = { CODE_INTELLIGENCE_SEEKDB_DATABASE: 'code_intelligence',
+      CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT: '12', CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY: '6' };
+    expect(codeIntelligenceRuntimeOptionsFromEnvironment(environment)).toMatchObject({
+      seekdb: { connectionLimit: 12, searchQueryConcurrency: 6 },
+    });
+    expect(codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY: '0' }))
+      .toMatchObject({ seekdb: { searchQueryConcurrency: 0 } });
+    for (const value of ['0', '-1', '1.5', '65', 'invalid']) {
+      expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT: value }))
+        .toThrow('CONNECTION_LIMIT');
+    }
+    for (const value of ['-1', '1.5', '33', 'invalid']) {
+      expect(() => codeIntelligenceRuntimeOptionsFromEnvironment({ ...environment, CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY: value }))
+        .toThrow('SQL_CONCURRENCY');
+    }
   });
 });
 

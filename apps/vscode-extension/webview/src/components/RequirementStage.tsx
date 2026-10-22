@@ -44,7 +44,9 @@ export function RequirementStage({
         <header className="task-composer-header">
           <span>01 · 定义任务</span>
           <h1 id="task-definition-title">选择目标，补充你想完成的需求</h1>
-          <p>从左侧模块树选择类或方法；需求说明可选，留空时将按代码上下文检索。</p>
+          <p>{target.kind === 'module'
+            ? '按模块职责、接口与依赖查找参考实现；需求补充可选。'
+            : '从左侧模块树选择类或方法；需求说明可选，留空时将按代码上下文检索。'}</p>
         </header>
 
         <div className="task-composer-content">
@@ -143,7 +145,7 @@ export function RequirementStage({
         </div>
 
         <footer className="task-composer-footer">
-          <span>目标与需求将一起用于参考模块检索</span>
+          <span>{target.kind === 'module' ? '按模块职责检索，补充需求用于候选排序' : '目标与需求将一起用于参考模块检索'}</span>
           <button type="submit" className="primary-action" disabled={searching}>
             {searching ? <span className="spinner" /> : <Search size={15} />}
             {searching ? '正在检索相似实现…' : `查找 ${state.topK} 个候选方案`}

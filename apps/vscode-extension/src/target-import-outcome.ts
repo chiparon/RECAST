@@ -15,12 +15,13 @@ export function targetImportVerdict(
   failedRepositoryIds: readonly string[],
 ): TargetImportVerdict {
   const targets = presentation.repositories.filter((repository) => repository.role === 'target');
+  if (targets.length === 0) return { status: 'failed', message: presentation.message ?? '所选目标目录未进入当前工作区的有效配置，索引尚未开始。请重新选择目标工程；重复等待不会开始索引。' };
   const failed = targets.some((repository) => (
     repository.analysisStatus === 'failed' || failedRepositoryIds.includes(repository.repositoryId)
   ));
   // The presentation can report an unrelated history repository failure while
   // this target indexed successfully: only the target lifecycle decides.
-  const incomplete = targets.length === 0 || targets.some((repository) => (
+  const incomplete = targets.some((repository) => (
     repository.analysisStatus === 'registered' || repository.analysisStatus === 'indexing' || !repository.activeRevision
   ));
   const projectless = targets.find((repository) => (

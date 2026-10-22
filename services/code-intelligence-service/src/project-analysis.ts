@@ -21,6 +21,12 @@ export interface ProjectAnalysisOptions {
   maxFilesPerModule?: number;
   /** Repository-wide limit because the legacy planner reads repository metadata. */
   maxAgentProjectFiles?: number;
+  /**
+   * The caller supplied a complete, already bounded project plan. Such a plan
+   * must not be replaced by adaptive fallback merely because the indexed
+   * repository is large; the caller owns the plan's context and validation.
+   */
+  allowLargeAgentPlan?: boolean;
   onChange?(): void;
   project?(index: StructuralIndex): Promise<void>;
 }
@@ -208,6 +214,13 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
       this.options.onChange?.();
     };
     try {
+      if (!index.files.some(file => file.projectId === scope.projectId)) {
+        record = { ...scope, analysisProfile: projectAnalysisProfile, state: 'ready', projection: 'ready', updatedAt: '',
+          modelingSkippedReason: '工程没有独立文件，仅保留构建定义，无需功能模块建模。',
+          coverage: { total: 0, assigned: 0, unassigned: [] } };
+        await persist();
+        return;
+      }
       // Projection-only retries do not call the model again.
       if (force || record.state !== 'ready' || !record.proposal) {
         record = { ...scope, analysisProfile: projectAnalysisProfile, state: 'queued', projection: 'pending', updatedAt: '' };
@@ -215,7 +228,8 @@ export class ProjectAnalysisCoordinator implements ProjectAnalysisPort {
         record.state = 'analyzing';
         await persist();
         const planStarted = performance.now();
-        const useAgent = Boolean(this.options.plan) && index.files.length <= (this.options.maxAgentProjectFiles ?? 120);
+        const useAgent = Boolean(this.options.plan) &&
+          (this.options.allowLargeAgentPlan === true || index.files.length <= (this.options.maxAgentProjectFiles ?? 120));
         let result: ProjectAnalysisResult;
         if (useAgent) {
           result = await this.options.plan!({ ...scope, objective: projectAnalysisObjective });

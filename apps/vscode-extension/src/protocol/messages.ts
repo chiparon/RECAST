@@ -1,4 +1,6 @@
 import { validateModelKey } from '../model-credential';
+import { isTargetImportTask, type TargetImportTask } from '../target-import-task-types';
+import type { ProjectPipelineRun, ProjectPipelineStart } from '../project-pipeline-types';
 import { parseLlmSettings, type LlmSettings } from '@forexplore/contracts';
 import type {
   WorkspaceTranslationRun,
@@ -50,6 +52,9 @@ export type TargetWorkspaceOutcome = 'cancelled' | 'added' | 'completed' | 'fail
 
 /** Messages the extension host posts into the Webview. */
 export type HostToWebviewMessage =
+  | { type: 'TARGET_IMPORT_TASKS'; tasks: TargetImportTask[] }
+  | { type: 'HISTORY_IMPORT_TASKS'; tasks: TargetImportTask[] }
+  | { type: 'PROJECT_PIPELINE_STATE'; run: ProjectPipelineRun }
   | { type: 'REQUEST_SETTINGS_SAVE' }
   | { type: 'REFERENCE_FOLDERS_SELECTED'; requestId: string; paths: string[]; error?: string }
   | { type: 'MODEL_KEY_STATUS'; configured: boolean; message?: string }
@@ -58,10 +63,11 @@ export type HostToWebviewMessage =
   | { type: 'INIT'; payload: PanelInitPayload }
   | { type: 'SEARCH_RESULT'; candidates: SearchCandidate[] }
   | { type: 'ADAPT_RESULT'; result: AdaptationResult }
-  | { type: 'MODULE_TRANSLATION_READY'; targetId: string; candidateId: string; moduleScopeId: string }
+  | { type: 'MODULE_TRANSLATION_READY'; targetId: string; candidateId: string; candidateIds?: string[]; moduleScopeId: string }
   | { type: 'APPLY_RESULT'; result: ApplyResult }
   | { type: 'REPOSITORY_STATUS'; statuses: RepositoryStatus[] }
   | { type: 'CODE_INTELLIGENCE_STATUS'; presentation: CodeIntelligencePresentation }
+  | { type: 'REPOSITORY_INDEXING_PROGRESS'; progress: import('../indexing-progress').RepositoryIndexingProgress }
   | { type: 'SERVICE_STATUS'; status: ServiceStatus }
   | { type: 'MODULE_EXPLORER'; explorer: ModuleExplorerPresentation }
   | { type: 'MODULE_CHILDREN'; requestId: string; page: ModuleChildrenPage }
@@ -78,6 +84,10 @@ export type HostToWebviewMessage =
  * candidate objects, validation evidence, or patches to be written.
  */
 export type WebviewToHostMessage =
+  | { type: 'TARGET_IMPORT_ACTION'; taskId: string; action: 'cancel' | 'retry' }
+  | { type: 'START_PROJECT_PIPELINE'; input: ProjectPipelineStart }
+  | { type: 'PROJECT_PIPELINE_ACTION'; runId: string; action: 'read' | 'cancel' | 'resume' | 'open-output' | 'open-report' | 'export-report' | 'open-diff' }
+  | { type: 'PROJECT_PIPELINE_ACTION'; runId: string; action: 'retry-module'; moduleId: string }
   | { type: 'SETTINGS_VISIBILITY_CHANGED'; open: boolean }
   | { type: 'BROWSE_REFERENCE_FOLDERS'; requestId: string }
   | { type: 'CONFIGURE_MODEL_KEY' }
@@ -92,6 +102,7 @@ export type WebviewToHostMessage =
       topK: number;
     }
   | { type: 'SELECT_CANDIDATE'; candidateId: string }
+  | { type: 'SELECT_CANDIDATES'; candidateIds: string[] }
   | { type: 'START_ADAPT'; decisionNotes: string }
   | { type: 'APPLY_CURRENT_RUN' }
   | { type: 'CHECK_REPOSITORIES' }
@@ -111,6 +122,9 @@ export type WebviewToHostMessage =
   | { type: 'OPEN_TARGET' };
 
 const hostMessageTypes = new Set<string>([
+  'TARGET_IMPORT_TASKS',
+  'HISTORY_IMPORT_TASKS',
+  'PROJECT_PIPELINE_STATE',
   'REQUEST_SETTINGS_SAVE',
   'REFERENCE_FOLDERS_SELECTED',
   'MODEL_KEY_STATUS',
@@ -123,6 +137,7 @@ const hostMessageTypes = new Set<string>([
   'APPLY_RESULT',
   'REPOSITORY_STATUS',
   'CODE_INTELLIGENCE_STATUS',
+  'REPOSITORY_INDEXING_PROGRESS',
   'SERVICE_STATUS',
   'MODULE_EXPLORER',
   'MODULE_CHILDREN',
@@ -174,6 +189,21 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as Record<string, unknown>;
   switch (message.type) {
+    case 'TARGET_IMPORT_ACTION':
+      return hasOnlyKeys(message, ['type', 'taskId', 'action']) && typeof message.taskId === 'string'
+        && /^[a-f0-9-]{36}$/.test(message.taskId) && ['cancel', 'retry'].includes(String(message.action));
+    case 'START_PROJECT_PIPELINE': {
+      if (!hasOnlyKeys(message, ['type', 'input']) || !message.input || typeof message.input !== 'object') return false;
+      const input = message.input as Record<string, unknown>;
+      return hasOnlyKeys(input, ['repositoryId', 'projectId', 'requirement', 'topK']) && isOpaqueIdentifier(input.repositoryId) && isOpaqueIdentifier(input.projectId)
+        && typeof input.requirement === 'string' && input.requirement.trim().length > 0 && input.requirement.length <= 8000
+        && Number.isInteger(input.topK) && Number(input.topK) >= 1 && Number(input.topK) <= 10;
+    }
+    case 'PROJECT_PIPELINE_ACTION': {
+      if (typeof message.runId !== 'string' || !/^[a-f0-9-]{36}$/.test(message.runId)) return false;
+      if (message.action === 'retry-module') return hasOnlyKeys(message, ['type', 'runId', 'action', 'moduleId']) && isOpaqueIdentifier(message.moduleId);
+      return hasOnlyKeys(message, ['type', 'runId', 'action']) && ['read', 'cancel', 'resume', 'open-output', 'open-report', 'export-report', 'open-diff'].includes(String(message.action));
+    }
     case 'SETTINGS_VISIBILITY_CHANGED':
       return hasOnlyKeys(message, ['type', 'open']) && typeof message.open === 'boolean';
     case 'WORKSPACE_TRANSLATION': {
@@ -231,6 +261,10 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
         message.topK >= 1 &&
         message.topK <= 10
       );
+    case 'SELECT_CANDIDATES':
+      return hasOnlyKeys(message, ['type', 'candidateIds']) && Array.isArray(message.candidateIds) &&
+        message.candidateIds.length <= 3 && new Set(message.candidateIds).size === message.candidateIds.length &&
+        message.candidateIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 256);
     case 'SELECT_CANDIDATE':
       return (
         hasOnlyKeys(message, ['type', 'candidateId']) &&
@@ -325,14 +359,26 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (typeof value !== 'object' || value === null) return false;
   const message = value as { type?: unknown; phase?: unknown; outcome?: unknown; mode?: unknown; message?: unknown };
   if (typeof message.type !== 'string' || !hostMessageTypes.has(message.type)) return false;
+  if (message.type === 'TARGET_IMPORT_TASKS' || message.type === 'HISTORY_IMPORT_TASKS') {
+    const tasks = (value as { tasks?: unknown }).tasks;
+    return Array.isArray(tasks) && tasks.length <= 30 && tasks.every(isTargetImportTask);
+  }
   if (message.type === 'MODULE_TRANSLATION_READY') {
     const ready = value as Record<string, unknown>;
     return isCorrelationIdentifier(ready.targetId) && isCorrelationIdentifier(ready.candidateId) &&
+      (ready.candidateIds === undefined || Array.isArray(ready.candidateIds) && ready.candidateIds.length <= 3 &&
+        new Set(ready.candidateIds).size === ready.candidateIds.length && ready.candidateIds.every(isCorrelationIdentifier)) &&
       typeof ready.moduleScopeId === 'string' && /^[a-f0-9]{64}$/.test(ready.moduleScopeId);
   }
   // The phase and outcome literals select the progress UI, so they are
   // verified instead of being trusted by the message name alone.
   if (message.type === 'TARGET_WORKSPACE_PROGRESS') return isTargetWorkspaceProgress(message);
   if (message.type === 'TARGET_WORKSPACE_RESULT') return isTargetWorkspaceResult(message);
+  if (message.type === 'REPOSITORY_INDEXING_PROGRESS') {
+    const progress = (value as { progress?: Record<string, unknown> }).progress;
+    return Boolean(progress && isOpaqueIdentifier(progress.repositoryId) && typeof progress.displayName === 'string' &&
+      ['snapshot', 'snapshot-verify', 'parse', 'assemble', 'recover', 'structural-write', 'search-projection', 'activation'].includes(String(progress.stage)) &&
+      ['completed', 'total', 'filesCompleted', 'filesTotal', 'position', 'count'].every(key => progress[key] === undefined || Number.isSafeInteger(progress[key]) && Number(progress[key]) >= 0));
+  }
   return true;
 }

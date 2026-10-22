@@ -223,6 +223,19 @@ export class WorkspaceTranslationRuntime {
       at: new Date().toISOString(), requirement,
       repositoryIds: [...new Set(scopes.map((scope) => scope.repositoryId))], excerptCount: 0, characters: 0,
     };
+    if (records.some((item) => item.requirement === requirement && !item.error)) {
+      // A repeated natural-language query cannot produce new evidence in an
+      // immutable revision. Do not spend another HTTP/SeekDB round trip; the
+      // model receives a clear result and can choose a more concrete symbol.
+      records.push(record);
+      this.save(run);
+      return {
+        evidence: [], characters: 0,
+        remainingQueries: budget.maxQueries - records.length,
+        remainingCharacters: remaining,
+        notes: ["DUPLICATE_EVIDENCE_QUERY_USE_A_CONCRETE_SYMBOL"],
+      };
+    }
     try {
       const result = await evidence.port.query({ requirement, limit: limit as number, scopes }, signal);
       const seen = this.#deliveredEvidence.get(run.id) ?? new Set<string>();
@@ -500,7 +513,17 @@ export class WorkspaceTranslationRuntime {
               break;
             }
             case "read_file": {
-              if (typeof args.path !== "string" || !readable.has(args.path)) throw new Error("File is outside the requested read scope.");
+              if (typeof args.path !== "string" || !readable.has(args.path)) {
+                const requested = typeof args.path === "string" ? args.path : "(missing path)";
+                const allowed = [...readable].sort();
+                const requestedPath = typeof args.path === "string" ? args.path : undefined;
+                const sameDirectory = requestedPath
+                  ? allowed.filter((path) => path.slice(0, path.lastIndexOf("/")) === requestedPath.slice(0, requestedPath.lastIndexOf("/"))).slice(0, 4)
+                  : [];
+                throw new Error(`File is outside the requested read scope: ${requested}. `
+                  + `Use read_file only for target workspaceFiles; ${allowed.length} files are allowed.`
+                  + (sameDirectory.length ? ` Nearby allowed files: ${sameDirectory.join(", ")}.` : ""));
+              }
               const content = this.files.read(args.path);
               readHashes.set(args.path, hash(content));
               result = { path: args.path, content, hash: hash(content) };

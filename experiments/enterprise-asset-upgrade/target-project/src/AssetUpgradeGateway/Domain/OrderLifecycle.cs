@@ -29,8 +29,9 @@ public sealed record CustomerAccount(
     string Currency,
     IReadOnlySet<string> Segments)
 {
-    public bool BelongsTo(string tenantId) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public bool IsSegment(string segment) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public bool BelongsTo(string tenantId)
+        => string.Equals(TenantId, tenantId, StringComparison.Ordinal);
+    public bool IsSegment(string segment) => Segments.Contains(segment);
 }
 
 public sealed record PriceBreakdown(
@@ -40,10 +41,10 @@ public sealed record PriceBreakdown(
     long TaxMinor,
     string Currency)
 {
-    public long GrandTotalMinor => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public long GrandTotalMinor => MerchandiseMinor - DiscountMinor + ShippingMinor + TaxMinor;
 
     public PriceBreakdown ApplyDiscount(long discountMinor)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => this with { DiscountMinor = discountMinor };
 }
 
 public sealed record InventoryReservation(
@@ -54,10 +55,11 @@ public sealed record InventoryReservation(
     DateTimeOffset ExpiresAt,
     bool Released)
 {
-    public bool IsExpired(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public InventoryReservation Release() { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public bool IsExpired(DateTimeOffset now) => now >= ExpiresAt;
+    public InventoryReservation Release()
+        => Released ? this : this with { Released = true };
     public bool Contains(string sku, int quantity)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => !Released && Quantities.TryGetValue(sku, out var reserved) && reserved >= quantity;
 }
 
 public sealed record OrderSnapshot(
@@ -70,20 +72,31 @@ public sealed record OrderSnapshot(
     DateTimeOffset UpdatedAt,
     int Version)
 {
-    public bool IsTerminal => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public bool IsTerminal
+        => State is OrderLifecycleState.Accepted
+            or OrderLifecycleState.Rejected
+            or OrderLifecycleState.RolledBack;
 
-    public OrderSnapshot BeginValidation(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public OrderSnapshot AwaitInventory(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public OrderSnapshot BeginValidation(DateTimeOffset now)
+        => Transition(OrderLifecycleState.Validating, now);
+    public OrderSnapshot AwaitInventory(DateTimeOffset now)
+        => Transition(OrderLifecycleState.AwaitingInventory, now);
     public OrderSnapshot Reserve(InventoryReservation reservation, DateTimeOffset now)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public OrderSnapshot BeginCommit(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public OrderSnapshot Accept(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => (this with { Reservation = reservation })
+            .Transition(OrderLifecycleState.Reserved, now);
+    public OrderSnapshot BeginCommit(DateTimeOffset now)
+        => Transition(OrderLifecycleState.Committing, now);
+    public OrderSnapshot Accept(DateTimeOffset now)
+        => Transition(OrderLifecycleState.Accepted, now);
     public OrderSnapshot Reject(string reason, DateTimeOffset now)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public OrderSnapshot BeginRollback(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public OrderSnapshot CompleteRollback(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => (this with { RejectionReason = reason })
+            .Transition(OrderLifecycleState.Rejected, now);
+    public OrderSnapshot BeginRollback(DateTimeOffset now)
+        => Transition(OrderLifecycleState.RollingBack, now);
+    public OrderSnapshot CompleteRollback(DateTimeOffset now)
+        => Transition(OrderLifecycleState.RolledBack, now);
     private OrderSnapshot Transition(OrderLifecycleState next, DateTimeOffset now)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => this with { State = next, UpdatedAt = now, Version = Version + 1 };
 }
 
 public sealed record PluginDescriptor(
@@ -94,9 +107,9 @@ public sealed record PluginDescriptor(
     IReadOnlySet<string> Capabilities,
     bool Enabled)
 {
-    public bool Supports(string capability) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public PluginDescriptor Disable() { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public PluginDescriptor Enable() { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public bool Supports(string capability) => Capabilities.Contains(capability);
+    public PluginDescriptor Disable() => this with { Enabled = false };
+    public PluginDescriptor Enable() => this with { Enabled = true };
 }
 
 public sealed record PluginInvocation(
@@ -108,7 +121,13 @@ public sealed record PluginInvocation(
     DateTimeOffset RequestedAt)
 {
     public PluginInvocation WithParameter(string key, string value)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        var merged = new Dictionary<string, string>(Parameters, StringComparer.Ordinal)
+        {
+            [key] = value,
+        };
+        return this with { Parameters = merged };
+    }
 }
 
 public sealed record OrderDecision(
@@ -118,12 +137,12 @@ public sealed record OrderDecision(
     PaymentRequirement PaymentRequirement,
     string DecisionCode)
 {
-    public bool HasBlockingIssue => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public bool HasBlockingIssue => Issues.Any(issue => issue.BlocksOperation);
 
     public static OrderDecision Deny(string code, params ValidationIssue[] issues)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => new(false, issues ?? Array.Empty<ValidationIssue>(), null, PaymentRequirement.None, code);
     public static OrderDecision Allow(PriceBreakdown price, PaymentRequirement payment)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => new(true, Array.Empty<ValidationIssue>(), price, payment, "Allowed");
 }
 
 public sealed record OrderOperationResult(
@@ -134,7 +153,12 @@ public sealed record OrderOperationResult(
     IReadOnlyList<ValidationIssue> Issues)
 {
     public static OrderOperationResult Rejected(string operationId, params ValidationIssue[] issues)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => new(
+            operationId,
+            false,
+            OrderLifecycleState.Rejected,
+            Array.Empty<string>(),
+            issues ?? Array.Empty<ValidationIssue>());
 }
 
 public sealed class OrderAggregate
@@ -147,15 +171,94 @@ public sealed class OrderAggregate
     }
     public OrderSnapshot Snapshot { get; internal set; }
 
-    public IReadOnlyList<string> SideEffects => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public IReadOnlyList<string> SideEffects => sideEffects;
 
-    public void Validate(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public void Validate(DateTimeOffset now)
+    {
+        if (Snapshot.State != OrderLifecycleState.Draft)
+        {
+            return;
+        }
+
+        var request = Snapshot.Request;
+        if (request is null || request.Lines is null || request.Lines.Count == 0)
+        {
+            return;
+        }
+
+        Snapshot = Snapshot.BeginValidation(now);
+        sideEffects.Add("validated");
+    }
+
     public void Reserve(InventoryReservation reservation, DateTimeOffset now)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        if (reservation is null)
+        {
+            return;
+        }
+
+        if (Snapshot.State is not (OrderLifecycleState.Validating or OrderLifecycleState.AwaitingInventory))
+        {
+            return;
+        }
+
+        var request = Snapshot.Request;
+        if (request is null
+            || !string.Equals(reservation.TenantId, request.TenantId, StringComparison.Ordinal)
+            || !string.Equals(reservation.OrderId, request.OrderId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var attached = Snapshot.Reservation;
+        if (attached is not null
+            && string.Equals(attached.ReservationId, reservation.ReservationId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Snapshot = Snapshot.Reserve(reservation, now);
+        sideEffects.Add($"reserved:{reservation.ReservationId}");
+    }
+
     public void Commit(DateTimeOffset now)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        if (Snapshot.State == OrderLifecycleState.Accepted)
+        {
+            return;
+        }
+
+        if (Snapshot.State != OrderLifecycleState.Reserved)
+        {
+            return;
+        }
+
+        Snapshot = Snapshot.BeginCommit(now).Accept(now);
+        sideEffects.Add("committed");
+    }
+
     public void Rollback(DateTimeOffset now, string reason)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        if (Snapshot.State is not (OrderLifecycleState.Validating
+            or OrderLifecycleState.AwaitingInventory
+            or OrderLifecycleState.Reserved
+            or OrderLifecycleState.Committing))
+        {
+            return;
+        }
+
+        var rolling = Snapshot.BeginRollback(now);
+
+        var reservation = rolling.Reservation;
+        if (reservation is not null && !reservation.Released)
+        {
+            rolling = rolling with { Reservation = reservation.Release() };
+        }
+
+        rolling = rolling with { RejectionReason = reason };
+        Snapshot = rolling.CompleteRollback(now);
+        sideEffects.Add($"rolled-back:{reason}");
+    }
 }
 
 public sealed record OrderBatch(
@@ -164,8 +267,8 @@ public sealed record OrderBatch(
     string BatchId,
     DateTimeOffset CreatedAt)
 {
-    public int Count => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public int Count => Orders.Count;
 
     public bool ContainsTenantOnly()
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+        => Orders.All(order => string.Equals(order.TenantId, TenantId, StringComparison.Ordinal));
 }

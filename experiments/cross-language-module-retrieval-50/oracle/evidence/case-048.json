@@ -1,0 +1,30 @@
+{
+  "caseId": "case-048",
+  "source": {
+    "repository": "nopcommerce",
+    "repositoryId": "repo-871f5b49-b638-4c60-a9f2-e4ad8fd09645",
+    "revision": "analysis-99f515f8-22bb-4829-8eff-e94b6ac9d18d",
+    "projectId": "project-3f8d4dae11493c04fe598a8d",
+    "artifactId": "project-summary:project-3f8d4dae11493c04fe598a8d:code-understanding/v1",
+    "planHash": "sha256:ad07bf424737d2f63d9fce9d04ba1a182154a46db4c5b1a1fc62845e0d80b16c",
+    "analysisHash": "a8c7ea6e94606080f342a5c24ba8e893a8f5aee05bba7633526a74dd67e6d071",
+    "moduleId": "module-891d832f5a79530d9504b5e7"
+  },
+  "excerpts": [
+    {
+      "path": "src/Libraries/Nop.Services/PriceLists/Caching/PriceListCacheEventConsumer.cs",
+      "excerpt": "﻿using Nop.Core.Domain.PriceLists;\nusing Nop.Services.Caching;\n\nnamespace Nop.Services.PriceLists.Caching;\n\n/// <summary>\n/// Represents a price list cache event consumer\n/// </summary>\npublic partial class PriceListCacheEventConsumer : CacheEventConsumer<PriceList>\n{\n    /// <summary>\n    /// Clear cache data\n    /// </summary>\n    /// <param name=\"entity\">Entity</param>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    protected override async Task ClearCacheAsync(PriceList entity)\n    {\n        await RemoveByPrefixAsync(NopPriceListDefaults.PriceListPrefix);\n    }\n}\n",
+      "truncated": false
+    },
+    {
+      "path": "src/Libraries/Nop.Services/PriceLists/Caching/PriceListCustomerCacheEventConsumer.cs",
+      "excerpt": "﻿using Nop.Core.Domain.PriceLists;\nusing Nop.Services.Caching;\n\nnamespace Nop.Services.PriceLists.Caching;\n\n/// <summary>\n/// Represents a price list customer cache event consumer\n/// </summary>\npublic partial class PriceListCustomerCacheEventConsumer : CacheEventConsumer<PriceListCustomer>\n{\n    /// <summary>\n    /// Clear cache data\n    /// </summary>\n    /// <param name=\"entity\">Entity</param>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    protected override async Task ClearCacheAsync(PriceListCustomer entity)\n    {\n        await RemoveByPrefixAsync(NopPriceListDefaults.PriceListPrefix);\n    }\n}\n",
+      "truncated": false
+    },
+    {
+      "path": "src/Libraries/Nop.Services/PriceLists/Caching/PriceListCustomerRoleCacheEventConsumer.cs",
+      "excerpt": "﻿using Nop.Core.Domain.PriceLists;\nusing Nop.Services.Caching;\n\nnamespace Nop.Services.PriceLists.Caching;\n\n/// <summary>\n/// Represents a price list customer role cache event consumer\n/// </summary>\npublic partial class  PriceListCustomerRoleCacheEventConsumer : CacheEventConsumer<PriceListCustomerRole>\n{\n    /// <summary>\n    /// Clear cache data\n    /// </summary>\n    /// <param name=\"entity\">Entity</param>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    protected override async Task ClearCacheAsync(PriceListCustomerRole entity)\n    {\n        await RemoveByPrefixAsync(NopPriceListDefaults.PriceListPrefix);\n    }\n}\n",
+      "truncated": false
+    }
+  ]
+}

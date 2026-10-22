@@ -6,7 +6,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PanelSettingsPresentation } from '../../../src/protocol/messages';
 import type {
   CodeIntelligencePresentation,
-  CodeIntelligenceRevisionPresentation,
   RepositoryStatus,
 } from '../../../src/ui-types';
 
@@ -18,8 +17,6 @@ interface SettingsPanelProps extends PanelSettingsPresentation {
   saving: boolean;
   saveMessage?: string;
   onCheckRepositories(): void;
-  /** Selects only a host-verified opaque repository/revision pair for read-only display. */
-  onSelectCodeIntelligenceRevision(repositoryId: string, analysisRevision: string): void;
   /** Selects only a project inside the host-verified revision. */
   onSelectCodeIntelligenceProject(repositoryId: string, analysisRevision: string, projectId: string): void;
   onSave(settings: PanelSettingsPresentation, modelKey?: string | null): void;
@@ -37,7 +34,6 @@ export function SettingsPanel({
   saving,
   saveMessage,
   onCheckRepositories,
-  onSelectCodeIntelligenceRevision,
   onSelectCodeIntelligenceProject,
   onSave,
   onCancel,
@@ -49,6 +45,7 @@ export function SettingsPanel({
   const [formError, setFormError] = useState<string | null>(null);
   const showApiBase = draftLlm.provider === 'custom' || draftLlm.apiBase !== LLM_PRESETS[draftLlm.provider].apiBase;
   const credentialChanged = draftLlm.provider !== llm.provider || draftLlm.apiBase !== llm.apiBase;
+  const savedKey = !credentialChanged && modelKeyStatus?.configured && draftKey === undefined;
   useEffect(() => { setDraftLlm(llm); setDraftKey(undefined); }, [llm]);
   useEffect(() => { setDraftKey(undefined); }, [draftLlm.provider, draftLlm.apiBase]);
 
@@ -147,13 +144,15 @@ export function SettingsPanel({
             <label htmlFor="model-api-key">API Key</label>
             <div className="model-key-controls">
               <input id="model-api-key" aria-label="API Key" type="password" autoComplete="off" spellCheck={false}
-                value={draftKey ?? ''} maxLength={512} disabled={saving}
-                placeholder={draftKey !== null && !credentialChanged && modelKeyStatus?.configured ? '已保存（留空保留）' : '无'}
+                value={savedKey ? '••••••••••••••••' : draftKey ?? ''} maxLength={512} disabled={saving}
+                placeholder="无" aria-describedby="model-key-state"
+                onFocus={event => { if (savedKey) event.currentTarget.select(); }}
                 onChange={event => setDraftKey(event.target.value || undefined)} />
               {!credentialChanged && modelKeyStatus?.configured ? <button type="button" className="icon-button" aria-label={draftKey === null ? '撤销清除 Key' : '清除保存的 Key'} title={draftKey === null ? '撤销清除 Key' : '清除保存的 Key（保存后生效）'} onClick={() => setDraftKey(draftKey === null ? undefined : null)} disabled={saving}>
                 {draftKey === null ? <RefreshCw size={14} /> : <Trash2 size={14} />}
               </button> : null}
             </div>
+            <span id="model-key-state" className="muted-copy" role="status">{draftKey === null ? '待清除，保存后生效' : savedKey ? '已配置 · 输入新 Key 可替换，保存其他设置会保留' : draftKey ? '新 Key 待保存' : '未配置'}</span>
           </div>
           <label>输出 Token 上限<select aria-label="每次最大输出 Token" value={draftLlm.maxOutputTokens} disabled={saving}
             onChange={event => setDraftLlm(current => ({ ...current, maxOutputTokens: Number(event.target.value) }))}>
@@ -184,7 +183,7 @@ export function SettingsPanel({
           <strong>{codeIntelligenceStatusLabel(codeIntelligence)}</strong>
         </div>
         <p className="settings-intro">
-          代码智能状态仅展示仓库 ID、revision 和能力等级；该状态不携带本地路径、数据库连接或源码内容。
+          查看工程索引状态、语言能力和模块建模结果。
         </p>
         {codeIntelligence?.repositories.length ? (
           <div className="code-intelligence-list">
@@ -195,40 +194,12 @@ export function SettingsPanel({
                   <span>{repository.role === 'target' ? '目标工程' : '参考工程'} · {repository.analysisStatus}</span>
                 </div>
                 <div className="code-intelligence-facts">
-                  <span className="code-intelligence-active-revision" title={repository.activeRevision ?? '尚未激活 revision'}>
-                    {repository.activeRevision ? `活动 revision ${shortId(repository.activeRevision)}` : '尚未索引'}
-                  </span>
-                  {repository.revisions.length ? (
-                    <label className="code-intelligence-revision-picker">
-                      <span>查看 revision</span>
-                      <select
-                        aria-label={`${repository.displayName} 的代码智能 revision`}
-                        value={repository.selectedRevision ?? ''}
-                        onChange={(event) => {
-                          if (event.target.value) {
-                            onSelectCodeIntelligenceRevision(repository.repositoryId, event.target.value);
-                          }
-                        }}
-                      >
-                        {!repository.selectedRevision ? <option value="">请选择可查询 revision</option> : null}
-                        {repository.revisions.map((revision) => (
-                          <option key={revision.analysisRevision} value={revision.analysisRevision}>
-                            {revisionLabel(revision)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  {repository.selectedRevision && repository.activeRevision && repository.selectedRevision !== repository.activeRevision ? (
-                    <span className="code-intelligence-history-notice">
-                      正在查看历史 revision（只读）；活动 revision 未变
-                    </span>
-                  ) : null}
+                  {!repository.activeRevision ? <span>尚未索引</span> : null}
                   <span>{repository.languages.length
                     ? repository.languages.map((language) => `${language.languageId} · ${language.capabilityLevel}`).join('，')
                     : '尚无语言能力数据'}</span>
                   {repository.projects.length ? (
-                    <label className="code-intelligence-revision-picker">
+                    <label className="code-intelligence-project-picker">
                       <span>{repository.role === 'target' ? '目标工程' : '参考工程'}</span>
                       <select
                         aria-label={`${repository.displayName} 的${repository.role === 'target' ? '目标工程' : '参考工程'}`}
@@ -256,7 +227,7 @@ export function SettingsPanel({
                     {summaryLabel(repository.summary.status)}
                   </span>
                   {repository.summary.status === 'stale' ? (
-                    <span className="code-intelligence-stale-warning">该 Summary 不属于活动 revision，不能作为当前结果使用。</span>
+                    <span className="code-intelligence-stale-warning">模块建模结果已过期，请重新建模后使用。</span>
                   ) : null}
                 </div>
               </div>
@@ -367,15 +338,6 @@ function summaryLabel(status: 'missing' | 'current' | 'stale'): string {
   if (status === 'current') return 'Summary 当前';
   if (status === 'stale') return 'Summary 已过期';
   return '尚无 Summary';
-}
-
-function shortId(value: string): string {
-  return value.length <= 18 ? value : `${value.slice(0, 18)}…`;
-}
-
-function revisionLabel(revision: CodeIntelligenceRevisionPresentation): string {
-  const state = revision.isActive ? '活动' : '历史';
-  return `${state} · ${shortId(revision.analysisRevision)} · ${revision.status}`;
 }
 
 function statusClass(status: RepositoryStatus): string {

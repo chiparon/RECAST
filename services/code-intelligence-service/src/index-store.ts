@@ -53,6 +53,15 @@ export interface ProjectionFactLookup {
   symbolsByKey: ReadonlyMap<string, SymbolRecord>;
 }
 
+export interface SearchDocumentQuery {
+  scope: RepositoryRevisionScope & { projectId?: string };
+  query: string;
+  limits: Partial<Record<SearchDocumentRecord['kind'], number>>;
+  views: readonly SearchDocumentRecord['kind'][];
+}
+
+export type SearchDocumentsByView = Partial<Record<SearchDocumentRecord['kind'], SearchDocumentRecord[]>>;
+
 export function projectionFactLookup(index: StructuralIndex): ProjectionFactLookup {
   return { filesByPath: new Map(index.files.map((file) => [file.relativePath, file])),
     symbolsByKey: new Map(index.symbols.map((symbol) => [symbol.symbolKey, symbol])) };
@@ -153,10 +162,9 @@ export interface IndexStore {
     signal?: AbortSignal,
   ): Promise<SearchDocumentRecord[]>;
   /**
-   * Optional batched variant of the same lookup: every requested view is served
-   * by one embedding, two candidate statements and one hydration statement,
-   * which is what keeps a multi-repository recall inside the connection pool.
-   * Results are identical to one `searchSearchDocuments` call per view.
+   * Optional batched variant: requested views share a query embedding and
+   * hydration while retaining independent candidate budgets. Results are
+   * identical to one `searchSearchDocuments` call per view.
    */
   searchSearchDocumentsByViews?(
     scope: RepositoryRevisionScope & { projectId?: string },
@@ -165,6 +173,15 @@ export interface IndexStore {
     views: readonly SearchDocumentRecord['kind'][],
     signal?: AbortSignal,
   ): Promise<Partial<Record<SearchDocumentRecord['kind'], SearchDocumentRecord[]>>>;
+
+  /** Request-local batch; each repository/revision/view retains its own budget.
+   * Identical lexical questions can share an index scan across scopes. Results
+   * stay aligned with requests; vectors and source hydration remain scoped. */
+  searchSearchDocumentsBatch?(
+    requests: readonly SearchDocumentQuery[],
+    signal?: AbortSignal,
+    concurrency?: number,
+  ): Promise<SearchDocumentsByView[]>;
 
   /** Atomically flips the repository's active pointer after a completed build. */
   activateRevision(

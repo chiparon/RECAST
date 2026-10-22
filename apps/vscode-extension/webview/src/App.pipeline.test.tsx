@@ -22,7 +22,7 @@ afterEach(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-it('takes an explicitly selected module through preparation, scoped start, diff review and rollback', async () => {
+it('automatically selects a module reference, prepares and starts generation, then supports rollback', async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   const target: ModuleTarget = { id: 'target-module', name: 'Limit module', kind: 'module', language: 'TypeScript', path: 'target.ts', signature: '',
     module: { sourceFiles: ['target.ts', 'policy.ts'], coreApis: ['limit'], dependsOn: [] } };
@@ -30,6 +30,8 @@ it('takes an explicitly selected module through preparation, scoped start, diff 
     signature: 'limit(int)', summary: 'Boundary policy', preview: 'class Limit {}', license: 'MIT', dependencies: [], compatibility: [], risks: [],
     score: { overall: 0.9, semantic: 0.9, symbol: 1, contract: 1 },
     sourceModule: { repositoryId: 'history', analysisRevision: 'r1', projectId: 'history-project', projectPath: '', moduleId: 'limit', name: 'Limit', sourceFiles: ['Limit.java'], coreApis: ['limit'] } };
+  const complementary: SearchCandidate = { ...candidate, id: 'history-retry', title: 'Java retry module',
+    sourceModule: { ...candidate.sourceModule!, moduleId: 'retry', name: 'Retry', sourceFiles: ['Retry.java'] } };
   const explorer: ModuleExplorerPresentation = { generatedAt: '', history: [], target: {
     id: 'target', repositoryId: 'target', projectId: 'project', revision: 'revision', mode: 'target', name: 'Target', rootLabel: '.', tree: [],
     stats: { modules: 1, files: 2, types: 0, methods: 0, implemented: 0, unimplemented: 1, unknown: 0, dependencies: 0 },
@@ -39,14 +41,14 @@ it('takes an explicitly selected module through preparation, scoped start, diff 
   const run: WorkspaceTranslationRun = { id: '11111111-2222-3333-4444-555555555555', workspaceRoot: '/target', status: 'completed', acceptance: 'behavior-verified',
     request: { spec: 'Limit', sourceLanguage: 'Java', targetLanguage: 'TypeScript', context: [], workspaceFiles: ['target.ts', 'policy.ts'], writeFiles: ['target.ts', 'policy.ts'] },
     createdAt: '', updatedAt: '', completedSteps: [], changes: ['target.ts', 'policy.ts'].map(file => ({ path: file, before: '// original', after: '// translated', applied: true })),
-    compilations: [], modelTurns: 8 };
+    compilations: [], modelTurns: 8, events: [{ at: new Date().toISOString(), phase: 'translating', message: '目标代码生成完成' }] };
   const post = (message: HostToWebviewMessage) => window.dispatchEvent(new MessageEvent('message', { data: message }));
   const sent: WebviewToHostMessage[] = [];
   window.acquireVsCodeApi = () => ({ getState: () => null, setState: () => {}, postMessage: (raw) => {
     const message = raw as WebviewToHostMessage; sent.push(message);
     expect(isWebviewToHostMessage(message)).toBe(true);
-    if (message.type === 'START_SEARCH') post({ type: 'SEARCH_RESULT', candidates: [candidate] });
-    if (message.type === 'START_ADAPT') post({ type: 'MODULE_TRANSLATION_READY', targetId: target.id, candidateId: candidate.id, moduleScopeId: scopeId });
+    if (message.type === 'START_SEARCH') post({ type: 'SEARCH_RESULT', candidates: [candidate, complementary] });
+    if (message.type === 'START_ADAPT') post({ type: 'MODULE_TRANSLATION_READY', targetId: target.id, candidateId: candidate.id, candidateIds: [candidate.id], moduleScopeId: scopeId });
     if (message.type === 'WORKSPACE_TRANSLATION') post({ type: 'WORKSPACE_TRANSLATION_RESULT', requestId: message.requestId,
       ...(message.action === 'describe' ? { profile: { profileId: 'profile', moduleScopeId: scopeId, workspaceRoot: '/target', sourceLanguage: 'Java', targetLanguage: 'TypeScript',
         workspaceFiles: ['target.ts', 'policy.ts'], writeFiles: ['target.ts', 'policy.ts'], behavioralVerification: true } }
@@ -59,26 +61,30 @@ it('takes an explicitly selected module through preparation, scoped start, diff 
     codeIntelligence: { status: 'ready', storage: 'memory', repositories: [] },
     serviceStatus: { moduleSearch: 'connected', adaptation: 'connected', executionMode: 'real' }, searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek' } }));
   const button = (text: string) => [...container.querySelectorAll('button')].find(item => item.textContent?.includes(text))!;
+  await act(async () => button('单模块调试').click());
   expect(container.querySelector('.workspace-translation')).toBeNull();
-  await act(async () => button('查找 4 个候选方案').click());
-  expect(sent.some(item => item.type === 'START_ADAPT')).toBe(false);
-  await act(async () => button('Java limit module').click());
-  expect(sent).toContainEqual({ type: 'SELECT_CANDIDATE', candidateId: candidate.id });
-  await act(async () => button('准备模块翻译与回填').click());
+  expect(button('开始执行').disabled).toBe(true);
+  await act(async () => {
+    const input = container.querySelector<HTMLTextAreaElement>('#pipeline-requirement')!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, '实现限额策略并验证边界条件');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => button('开始执行').click());
+  expect(sent).toContainEqual({ type: 'START_SEARCH', requirement: '实现限额策略并验证边界条件', topK: 4 });
+  expect(sent).toContainEqual({ type: 'SELECT_CANDIDATES', candidateIds: [candidate.id] });
   expect(sent).toContainEqual(expect.objectContaining({ type: 'WORKSPACE_TRANSLATION', action: 'describe', moduleScopeId: scopeId }));
   expect(container.textContent).toContain('target.ts、policy.ts');
-  expect(sent.some(item => item.type === 'WORKSPACE_TRANSLATION' && item.action === 'start')).toBe(false);
-  await act(async () => button('开始模块翻译并回填').click());
   expect(sent).toContainEqual(expect.objectContaining({ type: 'WORKSPACE_TRANSLATION', action: 'start', profileId: 'profile', moduleScopeId: scopeId }));
   expect(container.textContent).toContain('行为测试通过');
   expect(container.textContent).toContain('// translated');
-  expect(container.querySelector('.workspace-translation')!.parentElement!.hidden).toBe(false);
+  expect(container.querySelector('[role="log"]')!.textContent).toContain('目标代码生成完成');
+  expect(sent.filter(item => item.type === 'WORKSPACE_TRANSLATION' && item.action === 'start')).toHaveLength(1);
   await act(async () => button('回滚本次修改').click());
   expect(sent).toContainEqual(expect.objectContaining({ type: 'WORKSPACE_TRANSLATION', action: 'rollback', runId: run.id }));
   expect(container.textContent).toContain('已回滚');
   await act(async () => post({ type: 'TARGET_SELECTED', target }));
   expect(container.querySelector('.workspace-translation')).toBeNull();
-  expect(button('查找 4 个候选方案')).toBeDefined();
+  expect(button('重新开始')).toBeDefined();
   await act(async () => post({ type: 'TARGET_CLEARED' }));
   expect(container.querySelector('.workspace-translation')).toBeNull();
 });
@@ -156,6 +162,8 @@ it('opens without a method, saves two history paths, displays durable summaries 
     serviceStatus: { moduleSearch: 'connected', adaptation: 'connected', executionMode: 'real' },
     searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek',
   } }));
+  expect(container.querySelector<HTMLElement>('.module-sidebar')!.hidden).toBe(true);
+  await act(async () => container.querySelector<HTMLButtonElement>('.workbench-resources-button')!.click());
   expect(container.textContent).toContain('Stored summary: target');
   expect(container.textContent).not.toContain('WRONG DISK SUMMARY');
   expect(container.querySelectorAll('[role="treeitem"]')).toHaveLength(1);

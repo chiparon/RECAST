@@ -20,6 +20,7 @@ import type {
   ToolRuntimeContext,
   HostTool,
   ToolContext,
+  ToolState,
 } from "./tools/common.js";
 import { resolveTestEnvironment } from "./test-environment.js";
 import {
@@ -32,14 +33,18 @@ import {
   type AgentTraceEvent,
   type AgentTraceLogger,
 } from "./trace-log.js";
+import type { TestCorrectionReviewer } from "./test-evidence.js";
+import { createModelTestCorrectionReviewer } from "./test-correction-reviewer.js";
 
 export type AgentHostOptions<Result = unknown> = {
   modelClient: AgentModelClient;
+  signal?: AbortSignal;
   limits?: Partial<AgentRunLimits>;
   continuePrompt?: string;
   resolveToolContext?: ToolContextResolver;
   workLogger?: AgentWorkLogger;
   traceLogger?: AgentTraceLogger;
+  reviewTestCorrection?: TestCorrectionReviewer;
 };
 
 export type ToolContextResolver = (
@@ -60,6 +65,7 @@ async function defaultToolContextResolver(
     testRoots: testEnvironment.testRoots,
     testRunner: testEnvironment.framework,
     targetTest: testEnvironment.targetTest,
+    cleanup: testEnvironment.cleanup,
   };
 }
 
@@ -81,7 +87,7 @@ export function createAgentHost<Result = unknown>(
     async run(task) {
       const runId = randomUUID();
       const startedAt = performance.now();
-      const budget = createAgentRunBudget(limits);
+      const budget = createAgentRunBudget(limits, Date.now(), options.signal);
       emitAgentWorkLog(
         options.workLogger,
         workEvent(runId, "run.started"),
@@ -90,14 +96,20 @@ export function createAgentHost<Result = unknown>(
         options.traceLogger,
         traceEvent(runId, "run.started"),
       );
+      let cleanup: (() => Promise<void>) | undefined;
+      const state: ToolState = { ...(task.functionGroup?.testEvidence ? { testEvidence: structuredClone(task.functionGroup.testEvidence) } : {}) };
       try {
+        budget.assertActive();
         const resolvedContext = {
-          state: {},
+          state,
           budget,
           runtime: await resolveToolContext(task.taskContext),
         };
+        cleanup = resolvedContext.runtime.cleanup;
+        budget.assertActive();
         const context: ToolContext = {
           ...resolvedContext,
+          reviewTestCorrection: options.reviewTestCorrection ?? createModelTestCorrectionReviewer(options.modelClient, budget, limits),
           runner: bindTestRunner(resolvedContext),
           ...(task.functionGroup
             ? { functionGroupRunner: bindFunctionGroupTestRunner(resolvedContext) }
@@ -106,7 +118,7 @@ export function createAgentHost<Result = unknown>(
         const tools = bindTools(task, context);
         const result = await runAgentLoop({
           client: options.modelClient,
-          task,
+          task: withRuntimeTestInstructions(task, resolvedContext.runtime, limits),
           tools,
           budget,
           limits,
@@ -115,6 +127,9 @@ export function createAgentHost<Result = unknown>(
           workLogger: options.workLogger,
           traceLogger: options.traceLogger,
         }) as Result;
+        if (state.testEvidence && result && typeof result === "object") {
+          Object.assign(result, { testEvidence: structuredClone(state.testEvidence) });
+        }
         emitAgentWorkLog(
           options.workLogger,
           workEvent(runId, "run.completed", {
@@ -133,6 +148,9 @@ export function createAgentHost<Result = unknown>(
         );
         return result;
       } catch (error) {
+        if (state.testEvidence && error && typeof error === "object") {
+          Object.assign(error, { testEvidence: structuredClone(state.testEvidence) });
+        }
         emitAgentWorkLog(
           options.workLogger,
           workEvent(runId, "run.failed", {
@@ -153,10 +171,47 @@ export function createAgentHost<Result = unknown>(
         );
         throw error;
       } finally {
-        budget.dispose();
+        try {
+          await cleanup?.();
+        } finally {
+          budget.dispose();
+        }
       }
     },
   };
+}
+
+/**
+ * The test root can be Host-created (for example the disposable C# harness),
+ * so it is not available when a strategy builds its task.  Put the exact
+ * project-relative roots into the user message after the Host has resolved
+ * them.  This prevents the model from guessing `tests/` and repeatedly
+ * submitting paths rejected by the allowlist.
+ */
+function withRuntimeTestInstructions(
+  task: AgentTask,
+  runtime: ToolRuntimeContext,
+  limits: AgentRunLimits,
+): AgentTask {
+  const roots = runtime.testRoots.join(", ");
+  const instruction = [
+    "Host test setup (authoritative):",
+    `- Test framework: ${runtime.testRunner}`,
+    `- Authorized test roots: ${roots}`,
+    "- Every test path passed to write_target_test and run_function_group_tests must start with one of those exact roots.",
+    "- Use one test file and one test class for this verification whenever possible; after writing it, run it immediately and use the Host diagnostics to fix it.",
+    `- Run budget: ${limits.maxTurns} model turns and ${limits.maxToolCalls} tool calls, with up to ${limits.maxToolCallsPerTurn} tool calls per turn.`,
+    "- Batch independent source reads in one turn. Use at most the first third of model turns for initial inspection and reserve the remaining turns for writing, running, correcting tests, and finishing.",
+    "- Discover sibling dependency files with list_target_files using directory '.'; use the returned project-relative paths rather than guessing file names.",
+    "- Use the exact types and public signatures from the files you read; do not guess dependency names or dump the whole assembly through reflection probes. If a signature is unclear, read only its declaring file.",
+    "- The Host retains executed failures and immutable test versions. A later green run or deletion of an assertion does not resolve historical failures. Test compilation errors with zero executed failures do not create requirement failures.",
+    "- You may freely correct test-authoring mistakes. When changing a previously failed assertion, include write_target_test.corrections with its failureId, an explanation, and an exact excerpt from the public requirement. A proposal alone is not confirmation; unresolved facts remain available to Integration. Retain actual requirement failures and report_uncertain when their correctness cannot be established.",
+    "- Copy failureId exactly from the latest tool result's testEvidence.unresolvedFailures[].id or the earlier unresolved Host failures below, never from a compiler diagnostic or the test name. Invalid references reject the write; retry with the exact Host id. Compilation-only repairs need no corrections metadata.",
+    "- Keep the original test case identity when correcting a fixture or assertion. After editing, run the corrected version: the Host then independently reviews the immutable failing version against the executed replacement. If renaming or consolidating is necessary, preserve the failing scenario and its assertions in the replacement; deletion alone cannot discharge a failure.",
+    ...(runtime.functionGroup?.testEvidence?.failures.some(item => item.status === "unresolved")
+      ? [`- Earlier unresolved Host failures: ${JSON.stringify(runtime.functionGroup.testEvidence.failures.filter(item => item.status === "unresolved"))}`] : []),
+  ].join("\n");
+  return { ...task, userPrompt: `${task.userPrompt}\n\n${instruction}` };
 }
 
 type BoundTool = HostTool<any, any>;
@@ -306,7 +361,25 @@ export async function runAgentLoop({
       continue;
     }
     if (calls.some((call) => terminalNames.has(call.name)) && calls.length !== 1) {
-      throw new Error("A terminal tool must be the only call in its turn.");
+      // Do not execute any part of a mixed terminal turn.  Returning a tool
+      // error for every call keeps the provider transcript valid and lets the
+      // model resubmit the terminal action alone on the next turn.  The
+      // terminal-only rule remains enforced; this is a recoverable protocol
+      // mistake rather than a verifier run failure.
+      const message = "A terminal tool must be the only call in its turn. Resubmit only finish_function_group or report_uncertain; no tool from this turn was executed.";
+      for (const call of calls) {
+        messages.push({ role: "tool", toolCallId: call.id, content: JSON.stringify({ error: message }) });
+      }
+      emitAgentWorkLog(workLogger, workEvent(runId, "agent.continued", {
+        turn,
+        status: "mixed-terminal-call",
+        toolNames: calls.map((call) => call.name),
+      }));
+      emitAgentTrace(traceLogger, traceEvent(runId, "agent.continued", {
+        turn,
+        prompt: message,
+      }));
+      continue;
     }
 
     for (const call of calls) {
@@ -367,7 +440,7 @@ export async function runAgentLoop({
         messages.push({
           role: "tool",
           toolCallId: call.id,
-          content: serializeToolValue(output),
+          content: serializeToolValue(modelVisibleToolOutput(call.name, output)),
         });
         emitAgentWorkLog(
           workLogger,
@@ -561,6 +634,38 @@ function serializeToolValue(value: unknown): string {
   const serialized = JSON.stringify(value);
   if (serialized === undefined) throw new Error("Tool returned a non-serializable value.");
   return serialized;
+}
+
+function modelVisibleToolOutput(name: string, value: unknown): unknown {
+  if (!["run_target_tests", "run_function_group_tests", "write_target_test"].includes(name) ||
+      typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const output = value as Record<string, unknown>;
+  const bounded = (text: unknown, limit: number): unknown => {
+    if (typeof text !== "string" || text.length <= limit) return text;
+    const half = Math.floor(limit / 2);
+    return `${text.slice(0, half)}\n[Host retained ${text.length - limit} additional diagnostic characters]\n${text.slice(-half)}`;
+  };
+  // Reflection probes and compiler dumps can fill the context in one call.
+  // Keep facts and coverage intact; only bound the model-visible diagnostics.
+  // The Host state and trace retain the original complete observation.
+  return {
+    ...output,
+    ...(output.testEvidence && typeof output.testEvidence === "object" ? {
+      testEvidence: {
+        unresolvedFailures: (output.testEvidence as import("../types.js").VerificationTestEvidence).failures.filter(item => item.status === "unresolved").map(item => ({ ...item, message: bounded(item.message, 2000) })),
+        latestRun: (output.testEvidence as import("../types.js").VerificationTestEvidence).runs.at(-1),
+        latestRevision: (output.testEvidence as import("../types.js").VerificationTestEvidence).revisions.at(-1),
+        note: "Full immutable history is retained by the Host and forwarded in the final result.",
+      },
+    } : {}),
+    ...(typeof output.stdout === "string" ? { stdout: bounded(output.stdout, 8_000) } : {}),
+    ...(typeof output.stderr === "string" ? { stderr: bounded(output.stderr, 4_000) } : {}),
+    ...(Array.isArray(output.failures) ? {
+      failures: output.failures.slice(0, 8).map(failure => typeof failure === "object" && failure !== null
+        ? { ...failure, message: bounded(failure.message, 2_000) } : failure),
+      ...(output.failures.length > 8 ? { omittedFailureCount: output.failures.length - 8 } : {}),
+    } : {}),
+  };
 }
 
 function errorMessage(error: unknown): string {

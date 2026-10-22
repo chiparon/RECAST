@@ -1,15 +1,28 @@
 package com.example.assetupgrade.attachment.port;
 
+import java.util.concurrent.locks.Lock;
+
 /**
- * Skeleton seam for AttachmentLockPort.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Tenant-scoped locking boundary guarding release of a single attachment.
+ *
+ * <p>A lock acquired for {@code (tenantId, attachmentId)} must never conflict with another
+ * tenant's lock, and the returned {@link Lock} must already be held by the time
+ * {@code lock} returns (or the caller acquires it).</p>
  */
 public interface AttachmentLockPort {
-    java.util.concurrent.locks.Lock lock(com.example.assetupgrade.common.TenantId tenantId,
-                                         String attachmentId);
-    /** Generic compatibility seam; typed methods define the contract. */
+
+    /** @return an acquired lock guarding {@code attachmentId} for {@code tenantId}. */
+    Lock lock(com.example.assetupgrade.common.TenantId tenantId, String attachmentId);
+
+    /** Compatibility seam; the typed contract is {@link #lock}. */
     default Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
+        if (input instanceof LockRequest request) {
+            return lock(request.tenantId(), request.attachmentId());
+        }
+        throw new IllegalArgumentException("Expected a LockRequest");
+    }
+
+    /** Request holder accepted by the compatibility seam. */
+    record LockRequest(com.example.assetupgrade.common.TenantId tenantId, String attachmentId) {
     }
 }

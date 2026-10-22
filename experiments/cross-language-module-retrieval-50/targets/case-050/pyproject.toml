@@ -1,0 +1,5 @@
+[project]
+name = "fulfillment-warehouse-directory"
+version = "0.0.0"
+requires-python = ">=3.11"
+description = "Cross-language contract skeleton"

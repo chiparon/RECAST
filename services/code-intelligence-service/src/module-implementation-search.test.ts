@@ -140,10 +140,9 @@ describe('module implementation search', () => {
     const target = { id: 'target-compute', name: 'computeThing', kind: 'function' as const, path: 'compute.ts', language: 'TypeScript' as const, signature: 'computeThing()' };
     const query = [target.name, target.signature, '', 'payment zqMarker'].join('\n');
     const summaries = await runtime.store.searchSearchDocuments!(scope, query, 20, 'summary');
-    // Only the six rivals are recalled by a summary; `helpers` never matches one,
-    // and `topK: 3` lets the module stage expand at most `max(4, topK * 2) = 6`
-    // of the seven modules, so `helpers` is the one module it cannot reach.
-    expect([...new Set(summaries.map((document) => (JSON.parse(document.text) as { moduleId: string }).moduleId))].sort()).toEqual(rivals);
+    // The identity view also carries the implementation file name, so the
+    // helper module is now a valid summary hit alongside the six rivals.
+    expect([...new Set(summaries.map((document) => (JSON.parse(document.text) as { moduleId: string }).moduleId))].sort()).toEqual(['helpers', ...rivals].sort());
 
     const candidates = await runtime.moduleImplementationSearch.search({ target, requirement: 'payment zqMarker', topK: 3, repositoryIds: ['history-flat'] });
     const compute = candidates.find((candidate) => candidate.title === 'computeThing');

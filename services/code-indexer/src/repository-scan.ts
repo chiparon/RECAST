@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { constants, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
@@ -22,7 +22,7 @@ import { parseSourceFiles, type ParsePoolOptions } from './structural-parse-pool
 import { assembleStructuralIndex } from './structural-assembly.js';
 
 export interface StructuralScanProgress {
-  stage: 'snapshot' | 'parse' | 'assemble';
+  stage: 'snapshot' | 'snapshot-verify' | 'parse' | 'assemble';
   completed?: number;
   total?: number;
 }
@@ -158,7 +158,9 @@ async function collectSourceFiles(
 }
 
 async function snapshotSourceFiles(request: RepositoryStructuralScanRequest, registry: LanguageRegistry, maxFileBytes: number) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'forexplore-source-'));
+  const spoolRoot = process.env.FOREXPLORE_SOURCE_SNAPSHOT_DIR || os.tmpdir();
+  await mkdir(spoolRoot, { recursive: true });
+  const directory = await mkdtemp(path.join(spoolRoot, 'forexplore-source-'));
   const storedPaths = new Map<string, string>();
   const files: StructuralSourceFile[] = [];
   const observed: Array<{ absolutePath: string; size: number; mtimeMs: number; ctimeMs: number; ino: number }> = [];
@@ -225,14 +227,21 @@ async function snapshotSourceFiles(request: RepositoryStructuralScanRequest, reg
   };
   try {
     await visit(request.repositoryRoot);
-    for (const previous of observed) {
-      request.signal?.throwIfAborted();
-      const current = await lstat(previous.absolutePath);
-      if (current.isSymbolicLink() || current.size !== previous.size || current.mtimeMs !== previous.mtimeMs || current.ctimeMs !== previous.ctimeMs || current.ino !== previous.ino) {
-        throw new Error('Repository changed during source snapshot capture; retry after the current edits finish.');
-      }
-    }
     request.onProgress?.({ stage: 'snapshot', completed: files.length, total: files.length });
+    request.onProgress?.({ stage: 'snapshot-verify', completed: 0, total: observed.length });
+    // Bounded metadata reads keep mounted workspaces responsive while retaining
+    // the final check that every captured file still describes the same source.
+    for (let start = 0; start < observed.length; start += 32) {
+      request.signal?.throwIfAborted();
+      await Promise.all(observed.slice(start, start + 32).map(async previous => {
+        const current = await lstat(previous.absolutePath);
+        if (current.isSymbolicLink() || current.size !== previous.size || current.mtimeMs !== previous.mtimeMs || current.ctimeMs !== previous.ctimeMs || current.ino !== previous.ino) {
+          throw new Error('Repository changed during source snapshot capture; retry after the current edits finish.');
+        }
+      }));
+      request.signal?.throwIfAborted();
+      request.onProgress?.({ stage: 'snapshot-verify', completed: Math.min(start + 32, observed.length), total: observed.length });
+    }
     return { directory, files, storedPaths, sourceReader: {
       async read(relativePath: string): Promise<string | null> {
         request.signal?.throwIfAborted();

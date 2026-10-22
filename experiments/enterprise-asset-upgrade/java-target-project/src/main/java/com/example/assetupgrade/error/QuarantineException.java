@@ -1,10 +1,19 @@
 package com.example.assetupgrade.error;
 
+import com.example.assetupgrade.common.ProblemCode;
+
 /**
- * Skeleton seam for QuarantineException.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Typed failure for the QuarantineException condition, classified as {@link ProblemCode#QUARANTINED}.
  */
-public class QuarantineException extends RuntimeException {
-    public QuarantineException(String message) { super(message); }
+public class QuarantineException extends AssetUpgradeException {
+
+    private static final long serialVersionUID = 1L;
+
+    public QuarantineException(String message) {
+        super(ProblemCode.QUARANTINED, message);
+    }
+
+    public QuarantineException(String message, Throwable cause) {
+        super(ProblemCode.QUARANTINED, message, cause);
+    }
 }

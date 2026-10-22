@@ -20,6 +20,66 @@ function fakeStore(corpus: Record<string, SearchDocumentRecord[]>) {
 }
 
 describe('shared recall kernel', () => {
+  it('batches repository lookups without changing scoped fusion, channel weights or ordering', async () => {
+    const requests = ['repo', 'other'].map(repositoryId => ({ scope: { repositoryId, analysisRevision: 'rev' }, plans: [
+      { label: 'summary', query: 'behavior', views: ['summary'] as const, weight: 1 },
+      { label: 'implementation', query: 'identity', views: ['source-fragment'] as const, weight: 0.9 },
+      { label: 'symbol', query: 'identity', views: ['symbol'] as const, weight: 0.7 },
+    ], limitPerView: 2 }));
+    const lookup = (scope: RepositoryRevisionScope, views: readonly SearchDocumentKind[]) => Object.fromEntries(views.map(kind =>
+      [kind, [document(`${scope.repositoryId}-${kind}`, kind, scope)]]));
+    const searchSearchDocumentsByViews = vi.fn(async (scope: RepositoryRevisionScope, _query: string, _limits: unknown,
+      views: readonly SearchDocumentKind[]) => lookup(scope, views));
+    const searchSearchDocumentsBatch = vi.fn(async (queries) => queries.map((query: any) => lookup(query.scope, query.views)));
+    const expected = await Promise.all(requests.map(request => new RecallKernel({ searchSearchDocumentsByViews }).recall(request)));
+    const actual = await new RecallKernel({ searchSearchDocumentsBatch }).recallBatch(requests);
+    expect(actual).toEqual(expected);
+    expect(searchSearchDocumentsBatch).toHaveBeenCalledTimes(1);
+    expect(searchSearchDocumentsBatch.mock.calls[0]![0]).toHaveLength(4);
+  });
+
+  it('validates all batch requests before I/O and refuses cross-revision batch results', async () => {
+    const searchSearchDocumentsBatch = vi.fn(async (queries) => queries.map(() => ({ symbol: [document('bad', 'symbol', { analysisRevision: 'old' })] })));
+    const kernel = new RecallKernel({ searchSearchDocumentsBatch });
+    const good = { scope, plans: [{ label: 'api', query: 'identity', weight: 0.7, views: ['symbol'] as const }] };
+    await expect(kernel.recallBatch([good, { ...good, plans: [] }])).rejects.toThrow('at least one query plan');
+    expect(searchSearchDocumentsBatch).not.toHaveBeenCalled();
+    await expect(kernel.recallBatch([good])).rejects.toThrow('another revision');
+  });
+
+  it('shares repeated scoped questions while retaining each callers limits and plan weights', async () => {
+    const requests = [
+      { scope, plans: [{ label: 'primary', query: 'identity', weight: 1, views: ['symbol'] as const }], limitPerView: 1 },
+      { scope, plans: [{ label: 'secondary', query: 'identity', weight: 0.7, views: ['symbol', 'summary'] as const }], limitPerView: 2 },
+    ];
+    const lookup = (views: readonly SearchDocumentKind[], limits: Partial<Record<SearchDocumentKind, number>>) =>
+      Object.fromEntries(views.map(kind => [kind, [document(`${kind}-0`, kind), document(`${kind}-1`, kind)].slice(0, limits[kind])]));
+    const searchSearchDocumentsByViews = vi.fn(async (_scope: RepositoryRevisionScope, _query: string,
+      limits: Partial<Record<SearchDocumentKind, number>>, views: readonly SearchDocumentKind[]) => lookup(views, limits));
+    const searchSearchDocumentsBatch = vi.fn(async (queries) => queries.map((query: any) => lookup(query.views, query.limits)));
+    const expected = await Promise.all(requests.map(request => new RecallKernel({ searchSearchDocumentsByViews }).recall(request)));
+    const actual = await new RecallKernel({ searchSearchDocumentsBatch }).recallBatch(requests);
+    expect(actual).toEqual(expected);
+    expect(searchSearchDocumentsBatch.mock.calls[0]![0]).toEqual([
+      { scope, query: 'identity', views: ['symbol', 'summary'], limits: { symbol: 2, summary: 2 } },
+    ]);
+  });
+  it('shares identical questions across plans without changing view weights or provenance', async () => {
+    const fragment = document('body', 'source-fragment');
+    const symbol = document('api', 'symbol');
+    const perView = fakeStore({ 'same|source-fragment': [fragment], 'same|symbol': [symbol] });
+    const batched = { searchSearchDocumentsByViews: vi.fn(async () => ({ 'source-fragment': [fragment], symbol: [symbol] })) };
+    const request = { scope, plans: [
+      { label: 'implementation', query: 'same', views: ['source-fragment'], weight: 0.9 },
+      { label: 'api', query: 'same', views: ['symbol'], weight: 0.7 },
+    ], limitPerView: 32 } as const;
+    const expected = await new RecallKernel(perView.store).recall(request);
+    const actual = await new RecallKernel(batched).recall(request);
+    expect(batched.searchSearchDocumentsByViews).toHaveBeenCalledTimes(1);
+    expect(batched.searchSearchDocumentsByViews).toHaveBeenCalledWith(scope, 'same', { 'source-fragment': 32, symbol: 32 }, ['source-fragment', 'symbol'], undefined);
+    expect(actual).toEqual(expected);
+  });
+
   it('asks a batching store once per plan and keeps the fused ranking identical', async () => {
     const symbol = [document('a', 'symbol'), document('b', 'symbol')];
     const fragments = [document('c', 'source-fragment'), document('a', 'source-fragment')];
@@ -124,6 +184,34 @@ describe('shared recall kernel', () => {
     const outcome = await new RecallKernel(store).recall({ scope, plans: [{ label: 'p', query: 'query', weight: 1 }], views: ['summary'], limitPerView: 4 });
     expect(calls).toEqual([{ query: 'query', limit: 4, kind: 'summary' }]);
     expect(outcome.channels).toEqual([{ planLabel: 'p', view: 'summary', documents: 1 }]);
+  });
+
+  it('routes behavior and symbol questions to their own views without multiplying recall work', async () => {
+    const { store, calls } = fakeStore({
+      'behavior|summary': [document('s', 'summary')],
+      'behavior|source-fragment': [document('f', 'source-fragment')],
+      'identity|symbol': [document('i', 'symbol')],
+    });
+    const outcome = await new RecallKernel(store).recall({ scope, plans: [
+      { label: 'behavior', query: 'behavior', weight: 1, views: ['summary', 'source-fragment'] },
+      { label: 'identity', query: 'identity', weight: 0.7, views: ['symbol'] },
+    ], limitPerView: 4 });
+    expect(calls).toEqual([
+      { query: 'behavior', kind: 'summary', limit: 4 },
+      { query: 'behavior', kind: 'source-fragment', limit: 4 },
+      { query: 'identity', kind: 'symbol', limit: 4 },
+    ]);
+    expect(outcome.provenance.get('i')).toEqual([{ planLabel: 'identity', view: 'symbol', rank: 0, weight: 0.7 }]);
+  });
+
+  it('validates every view restriction before issuing any lookup', async () => {
+    const { store, search } = fakeStore({});
+    for (const views of [[], ['invalid'], ['symbol', 'invalid']] as any[]) {
+      await expect(new RecallKernel(store).recall({ scope, plans: [
+        { label: 'good', query: 'q', weight: 1 }, { label: 'invalid', query: 'q', weight: 1, views },
+      ] })).rejects.toThrow('valid views');
+    }
+    expect(search).not.toHaveBeenCalled();
   });
 
   it('refuses a document that belongs to another revision', async () => {

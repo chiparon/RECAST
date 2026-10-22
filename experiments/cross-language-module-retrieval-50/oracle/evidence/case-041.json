@@ -1,0 +1,30 @@
+{
+  "caseId": "case-041",
+  "source": {
+    "repository": "nopcommerce",
+    "repositoryId": "repo-871f5b49-b638-4c60-a9f2-e4ad8fd09645",
+    "revision": "analysis-99f515f8-22bb-4829-8eff-e94b6ac9d18d",
+    "projectId": "project-1133a0288d95fd93d6132ebf",
+    "artifactId": "project-summary:project-1133a0288d95fd93d6132ebf:code-understanding/v1",
+    "planHash": "sha256:d9dc163cdf890a7352d860c2ba620b895c2ea69c286c867dbdda61d77a1d416e",
+    "analysisHash": "a8c7ea6e94606080f342a5c24ba8e893a8f5aee05bba7633526a74dd67e6d071",
+    "moduleId": "module-124286a93d3fe4631745b454"
+  },
+  "excerpts": [
+    {
+      "path": "src/Presentation/Nop.Web/Areas/Admin/Models/Blogs/BlogCommentListModel.cs",
+      "excerpt": "﻿using Nop.Web.Framework.Models;\n\nnamespace Nop.Web.Areas.Admin.Models.Blogs;\n\n/// <summary>\n/// Represents a blog comment list model\n/// </summary>\npublic partial record BlogCommentListModel : BasePagedListModel<BlogCommentModel>;",
+      "truncated": false
+    },
+    {
+      "path": "src/Presentation/Nop.Web/Areas/Admin/Models/Blogs/BlogCommentModel.cs",
+      "excerpt": "﻿using Nop.Web.Framework.Models;\nusing Nop.Web.Framework.Mvc.ModelBinding;\n\nnamespace Nop.Web.Areas.Admin.Models.Blogs;\n\n/// <summary>\n/// Represents a blog comment model\n/// </summary>\npublic partial record BlogCommentModel : BaseNopEntityModel\n{\n    #region Properties\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.BlogPost\")]\n    public int BlogPostId { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.BlogPost\")]\n    public string BlogPostTitle { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.Customer\")]\n    public int CustomerId { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.Customer\")]\n    public string CustomerInfo { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.Comment\")]\n    public string Comment { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.IsApproved\")]\n    public bool IsApproved { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.StoreName\")]\n    public int StoreId { get; set; }\n    public string StoreName { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.Fields.CreatedOn\")]\n    public DateTime CreatedOn { get; set; }\n\n    #endregion\n}",
+      "truncated": false
+    },
+    {
+      "path": "src/Presentation/Nop.Web/Areas/Admin/Models/Blogs/BlogCommentSearchModel.cs",
+      "excerpt": "﻿using System.ComponentModel.DataAnnotations;\nusing Microsoft.AspNetCore.Mvc.Rendering;\nusing Nop.Web.Framework.Models;\nusing Nop.Web.Framework.Mvc.ModelBinding;\n\nnamespace Nop.Web.Areas.Admin.Models.Blogs;\n\n/// <summary>\n/// Represents a blog comment search model\n/// </summary>\npublic partial record BlogCommentSearchModel : BaseSearchModel\n{\n    #region Ctor\n\n    public BlogCommentSearchModel()\n    {\n        AvailableApprovedOptions = new List<SelectListItem>();\n    }\n\n    #endregion\n\n    #region Properties\n\n    public int? BlogPostId { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.List.CreatedOnFrom\")]\n    [UIHint(\"DateNullable\")]\n    public DateTime? CreatedOnFrom { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.List.CreatedOnTo\")]\n    [UIHint(\"DateNullable\")]\n    public DateTime? CreatedOnTo { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.List.SearchText\")]\n    public string SearchText { get; set; }\n\n    [NopResourceDisplayName(\"Admin.ContentManagement.Blog.Comments.List.SearchApproved\")]\n    public int SearchApprovedId { get; set; }\n\n    public IList<SelectListItem> AvailableApprovedOptions { get; set; }\n\n    #endregion\n}",
+      "truncated": false
+    }
+  ]
+}

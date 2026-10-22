@@ -1,5 +1,5 @@
 import { MAVEN_COVERAGE_GOALS } from "./test-runner.js";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,6 +36,28 @@ describe("resolveTestEnvironment", () => {
       testRoots: ["custom-tests/java", "custom-tests/resources"],
       targetTest: { executable: "mvn", args: [...MAVEN_COVERAGE_GOALS] },
     });
+  });
+
+  it("creates and cleans the Maven default test root when a project has no tests", async () => {
+    const root = await project();
+    await writeFile(join(root, "pom.xml"), "<project />");
+    const environment = await resolveTestEnvironment({ targetLanguage: "Java", targetProjectPath: root });
+    expect(environment).toMatchObject({ framework: "maven", testRoots: ["src/test/java"] });
+    await expect(access(join(root, "src/test/java"))).resolves.toBeUndefined();
+    await environment.cleanup?.();
+    await expect(access(join(root, "src/test/java"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("matches an isolated Maven harness to the compiled project's Java release", async () => {
+    const root = await project();
+    await mkdir(join(root, "target/classes"), { recursive: true });
+    await writeFile(join(root, "pom.xml"), "<project><artifactId>demo</artifactId><version>1</version><properties><maven.compiler.release>17</maven.compiler.release></properties></project>");
+    const environment = await resolveTestEnvironment({ targetLanguage: "Java", targetProjectPath: root });
+    const harnessPom = join(root, environment.targetTest.args[1]!);
+    expect(await readFile(harnessPom, "utf8")).toContain("<maven.compiler.release>17</maven.compiler.release>");
+    expect(await readFile(harnessPom, "utf8")).toContain("<outputDirectory>\${production.classes}</outputDirectory>");
+    expect(await readFile(harnessPom, "utf8")).not.toContain("<classDirectories>");
+    await environment.cleanup?.();
   });
 
   it("uses pytest testpaths from project configuration", async () => {
@@ -77,6 +99,27 @@ describe("resolveTestEnvironment", () => {
     });
   });
 
+  it("creates and cleans a Node test root when Jest has no configured root", async () => {
+    const root = await project();
+    await writeFile(join(root, "package.json"), JSON.stringify({ devDependencies: { jest: "^30.0.0" }, scripts: { test: "jest" } }));
+    const environment = await resolveTestEnvironment({ targetLanguage: "JavaScript", targetProjectPath: root });
+    expect(environment).toMatchObject({ framework: "jest", targetTest: { args: ["test", "--", "--runInBand"] } });
+    expect(environment.testRoots[0]).toMatch(/^\.translation-verifier-tests\/.+\/tests$/);
+    const generatedRoot = join(root, environment.testRoots[0]!);
+    await expect(access(generatedRoot)).resolves.toBeUndefined();
+    await environment.cleanup?.();
+    await expect(access(generatedRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("creates and cleans a Python tests root without pytest configuration", async () => {
+    const root = await project();
+    const environment = await resolveTestEnvironment({ targetLanguage: "Python", targetProjectPath: root });
+    expect(environment).toMatchObject({ framework: "pytest", testRoots: ["tests"], targetTest: { args: ["-m", "pytest"] } });
+    await expect(access(join(root, "tests"))).resolves.toBeUndefined();
+    await environment.cleanup?.();
+    await expect(access(join(root, "tests"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("binds C# to one dedicated standard test project and ignores build artifacts", async () => {
     const root = await project();
     await mkdir(join(root, "tests/obj"), { recursive: true });
@@ -94,10 +137,16 @@ describe("resolveTestEnvironment", () => {
     await expect(resolveTestEnvironment({ targetLanguage: "C#", targetProjectPath: root })).rejects.toThrow("dedicated test directory");
   });
 
-  it("does not mistake a C# Console project for a test project", async () => {
+  it("creates and cleans a disposable harness for a C# Console project", async () => {
     const root = await project();
     await writeFile(join(root, "Application.csproj"), '<Project><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup></Project>');
-    await expect(resolveTestEnvironment({ targetLanguage: "C#", targetProjectPath: root })).rejects.toThrow("standard dotnet test project");
+    const environment = await resolveTestEnvironment({ targetLanguage: "C#", targetProjectPath: root });
+    expect(environment).toMatchObject({ framework: "dotnet", targetTest: { executable: "dotnet" } });
+    const harnessProject = join(root, environment.targetTest.args[1]!);
+    expect(environment.testRoots[0]).toMatch(/^\.translation-verifier-tests\/.+\/tests$/);
+    await expect(access(harnessProject)).resolves.toBeUndefined();
+    await environment.cleanup?.();
+    await expect(access(harnessProject)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects a configured test root that does not exist", async () => {

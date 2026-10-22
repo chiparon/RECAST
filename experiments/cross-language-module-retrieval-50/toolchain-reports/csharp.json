@@ -1,0 +1,132 @@
+[
+  {
+    "caseId": "case-001",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:04.98\n"
+  },
+  {
+    "caseId": "case-002",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:02.57\n"
+  },
+  {
+    "caseId": "case-003",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:02.91\n"
+  },
+  {
+    "caseId": "case-004",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:02.26\n"
+  },
+  {
+    "caseId": "case-005",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:01.95\n"
+  },
+  {
+    "caseId": "case-013",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:01.90\n"
+  },
+  {
+    "caseId": "case-014",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:01.85\n"
+  },
+  {
+    "caseId": "case-015",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:02.07\n"
+  },
+  {
+    "caseId": "case-016",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:01.92\n"
+  },
+  {
+    "caseId": "case-017",
+    "success": true,
+    "command": [
+      "/home/ryanlyu/.local/bin/dotnet",
+      "build",
+      "ParallelModule.csproj",
+      "--nologo",
+      "--verbosity",
+      "quiet"
+    ],
+    "output": "\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n\nTime Elapsed 00:00:01.76\n"
+  }
+]

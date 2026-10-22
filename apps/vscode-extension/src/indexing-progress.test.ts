@@ -24,6 +24,18 @@ describe('indexing progress presentation', () => {
       .toBe('Camel：正在解析源文件（100/100）');
   });
 
+  it('labels source verification separately from parsing', () => {
+    expect(indexingProgressMessage({ repositoryId: 'repo', displayName: 'Camel', stage: 'snapshot-verify', completed: 32, total: 40 }))
+      .toBe('Camel：正在校验源码快照（32/40）');
+    expect(indexingProgressMessage({ repositoryId: 'repo', displayName: 'Camel', stage: 'search-projection', completed: 128, filesCompleted: 3, filesTotal: 40 }))
+      .toBe('Camel：正在生成检索向量（128） · 源文件 3/40');
+    const report = vi.fn();
+    const progress = createIndexingProgressReporter(report, () => 0);
+    progress({ repositoryId: 'repo', displayName: 'Camel', stage: 'search-projection', completed: 128, filesCompleted: 3, filesTotal: 40 });
+    progress({ repositoryId: 'repo', displayName: 'Camel', stage: 'search-projection', completed: 128, filesCompleted: 40, filesTotal: 40 });
+    expect(report).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps existing retrieval usable after one repository fails', () => {
     const failed = { status: 'error', storage: 'seekdb', repositories: [
       { repositoryId: 'target', analysisStatus: 'failed', activeRevision: null },

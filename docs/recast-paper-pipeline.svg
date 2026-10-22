@@ -1,0 +1,205 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="900" viewBox="0 0 2400 900" role="img" aria-labelledby="title desc">
+  <title id="title">RECAST five-stage pipeline</title>
+  <desc id="desc">Five RECAST cards: repository indexing, module modeling, module retrieval, translation, and validation.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#1e293b" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#b45309"/>
+    </marker>
+    <style>
+      .title { font-family: Georgia, 'Times New Roman', 'Noto Serif CJK SC', SimSun, serif; fill:#0f172a; }
+      .sans { font-family: Arial, 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; fill:#0f172a; }
+      .stage-title { font-family: Arial, 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; font-weight:700; font-size:25px; fill:#ffffff; }
+      .stage-en { font-family: Arial, sans-serif; font-size:13px; letter-spacing:1.7px; fill:#e2e8f0; }
+      .label { font-family: Arial, 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; font-size:17px; font-weight:600; fill:#0f172a; }
+      .sub { font-family: Arial, 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; font-size:14px; fill:#475569; }
+      .micro { font-family: Arial, 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; font-size:12px; fill:#64748b; }
+      .chip { font-family: Arial, 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; font-size:13px; font-weight:600; fill:#334155; }
+      .rail { font-family: Arial, 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; font-size:15px; font-weight:600; fill:#334155; }
+    </style>
+  </defs>
+  <rect width="2400" height="900" fill="#ffffff"/>
+  <g transform="translate(0 -322)">
+  <!-- stage cards -->
+  <g filter="url(#shadow)">
+    <rect x="120" y="382" width="408" height="755" rx="18" fill="#ffffff" stroke="#93c5fd" stroke-width="2"/>
+    <rect x="120" y="382" width="408" height="94" rx="18" fill="#2563eb"/>
+    <rect x="120" y="444" width="408" height="32" fill="#2563eb"/>
+    <text x="146" y="422" class="stage-title">① 仓库入库与索引</text>
+    <text x="146" y="451" class="stage-en">INGEST &amp; INDEX</text>
+
+    <rect x="146" y="508" width="356" height="74" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="166" y="538" class="label">RepositoryRegistry</text>
+    <text x="166" y="563" class="sub">注册 target / history 仓库与活动版本</text>
+
+    <path d="M324 582 L324 611" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="146" y="612" width="356" height="84" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="166" y="643" class="label">AnalysisCoordinator</text>
+    <text x="166" y="668" class="sub">全量或增量 · revision-scoped run</text>
+
+    <path d="M324 696 L324 725" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="146" y="726" width="356" height="104" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="166" y="756" class="label">RepositoryStructuralScanner</text>
+    <text x="166" y="782" class="sub">Tree-sitter · Java/C# compiler probes</text>
+    <text x="166" y="806" class="micro">symbols · projects · dependency edges · diagnostics</text>
+
+    <path d="M324 830 L324 859" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="146" y="860" width="356" height="118" rx="12" fill="#dbeafe" stroke="#93c5fd"/>
+    <text x="166" y="892" class="label">SeekDB structural index</text>
+    <text x="166" y="918" class="sub">不可变 revision store + source copies</text>
+    <text x="166" y="944" class="micro">analysisHash · parser version · activeRevision</text>
+
+    <rect x="146" y="1010" width="356" height="92" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text x="166" y="1041" class="label">检索投影</text>
+    <text x="166" y="1066" class="sub">summary / symbol / source-fragment</text>
+    <text x="166" y="1088" class="micro">全文索引 + embeddings + HNSW</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="578" y="382" width="408" height="755" rx="18" fill="#ffffff" stroke="#5eead4" stroke-width="2"/>
+    <rect x="578" y="382" width="408" height="94" rx="18" fill="#0f766e"/>
+    <rect x="578" y="444" width="408" height="32" fill="#0f766e"/>
+    <text x="604" y="422" class="stage-title">② 项目与模块建模</text>
+    <text x="604" y="451" class="stage-en">MODEL MODULES</text>
+
+    <rect x="604" y="508" width="356" height="84" rx="12" fill="#f0fdfa" stroke="#99f6e4"/>
+    <text x="624" y="540" class="label">ProjectAnalysisCoordinator</text>
+    <text x="624" y="566" class="sub">锁定 project scope + active revision</text>
+
+    <path d="M782 592 L782 621" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="604" y="622" width="356" height="98" rx="12" fill="#f0fdfa" stroke="#99f6e4"/>
+    <text x="624" y="654" class="label">模块划分与依赖归属</text>
+    <text x="624" y="680" class="sub">directory boundaries + resolved dependency affinity</text>
+    <text x="624" y="701" class="micro">source / test / configuration ownership</text>
+
+    <path d="M782 720 L782 749" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="604" y="750" width="356" height="120" rx="12" fill="#ccfbf1" stroke="#5eead4"/>
+    <text x="624" y="781" class="label">Agent建模 / adaptive hierarchy</text>
+    <text x="624" y="807" class="sub">职责 · 核心 API · 文件集合 · 依赖图</text>
+    <text x="624" y="833" class="micro">ProjectAnalysisRecord / proposal / evidence IDs</text>
+
+    <path d="M782 870 L782 899" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="604" y="900" width="356" height="118" rx="12" fill="#ccfbf1" stroke="#5eead4"/>
+    <text x="624" y="932" class="label">proposal + evidence validation</text>
+    <text x="624" y="958" class="sub">analysisHash · planHash · snapshot scope</text>
+    <text x="624" y="984" class="micro">失败 / 过期 / 篡改产物不发布为 current</text>
+
+    <rect x="604" y="1046" width="356" height="56" rx="28" fill="#ecfeff" stroke="#99f6e4"/>
+    <text x="782" y="1081" class="chip" text-anchor="middle">summary artifacts → published search views</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="1036" y="382" width="408" height="755" rx="18" fill="#ffffff" stroke="#fdba74" stroke-width="2"/>
+    <rect x="1036" y="382" width="408" height="94" rx="18" fill="#c2410c"/>
+    <rect x="1036" y="444" width="408" height="32" fill="#c2410c"/>
+    <text x="1062" y="422" class="stage-title">③ 模块检索与候选组装</text>
+    <text x="1062" y="451" class="stage-en">RETRIEVE MODULES</text>
+
+    <rect x="1062" y="508" width="356" height="92" rx="12" fill="#fff7ed" stroke="#fed7aa"/>
+    <text x="1082" y="539" class="label">resolveModuleRetrievalTarget</text>
+    <text x="1082" y="565" class="sub">刷新当前 revision 的目标模块</text>
+
+    <path d="M1240 600 L1240 629" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1062" y="630" width="356" height="105" rx="12" fill="#fff7ed" stroke="#fed7aa"/>
+    <text x="1082" y="661" class="label">三视图召回（并行）</text>
+    <text x="1082" y="687" class="sub">behavior · implementation · symbols</text>
+    <text x="1082" y="712" class="micro">全文 MATCH + vector ANN · SearchQueryGate</text>
+
+    <path d="M1240 735 L1240 764" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1062" y="765" width="356" height="99" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+    <text x="1082" y="796" class="label">RRF + API matching</text>
+    <text x="1082" y="822" class="sub">跨仓库全局融合 · coverage score</text>
+    <text x="1082" y="847" class="micro">目标职责、核心 API 与证据关联</text>
+
+    <path d="M1240 864 L1240 893" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1062" y="894" width="356" height="108" rx="12" fill="#ffedd5" stroke="#fdba74"/>
+    <text x="1082" y="925" class="label">LLM重排</text>
+    <text x="1082" y="951" class="sub">responsibility coverage · relevance</text>
+    <text x="1082" y="977" class="micro">按行为证据与职责互补性选前四</text>
+
+    <rect x="1062" y="1030" width="356" height="72" rx="12" fill="#fff7ed" stroke="#fed7aa"/>
+    <text x="1082" y="1060" class="label">候选模块包</text>
+    <text x="1082" y="1085" class="sub">1–3 history candidates + evidence scopes</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="1492" y="382" width="408" height="755" rx="18" fill="#ffffff" stroke="#c4b5fd" stroke-width="2"/>
+    <rect x="1492" y="382" width="408" height="94" rx="18" fill="#6d28d9"/>
+    <rect x="1492" y="444" width="408" height="32" fill="#6d28d9"/>
+    <text x="1518" y="422" class="stage-title">④ 分析、翻译与集成修复</text>
+    <text x="1518" y="451" class="stage-en">TRANSLATE &amp; INTEGRATE</text>
+
+    <rect x="1518" y="508" width="356" height="86" rx="12" fill="#f5f3ff" stroke="#ddd6fe"/>
+    <text x="1538" y="539" class="label">Host-owned translation scope</text>
+    <text x="1538" y="565" class="sub">1–3 candidates · read-only deps · writeFiles</text>
+
+    <path d="M1696 594 L1696 623" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1518" y="624" width="356" height="90" rx="12" fill="#f5f3ff" stroke="#ddd6fe"/>
+    <text x="1538" y="655" class="label">Analyzer Agent / Plan</text>
+    <text x="1538" y="681" class="sub">mapping · dependencies · GlobalProtocol</text>
+
+    <path d="M1696 714 L1696 743" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1518" y="744" width="356" height="94" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+    <text x="1538" y="775" class="label">Translator Agent</text>
+    <text x="1538" y="801" class="sub">read / edit / write · exact file hashes</text>
+
+    <path d="M1696 838 L1696 867" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1518" y="868" width="356" height="104" rx="12" fill="#ede9fe" stroke="#c4b5fd"/>
+    <text x="1538" y="899" class="label">编译反馈与修复循环</text>
+    <text x="1538" y="925" class="sub">standalone / integrated compile</text>
+    <text x="1538" y="951" class="micro">失败反馈 → same Translator run</text>
+
+    <rect x="1518" y="1010" width="356" height="92" rx="12" fill="#f5f3ff" stroke="#ddd6fe"/>
+    <text x="1538" y="1041" class="label">Project integration pass</text>
+    <text x="1538" y="1067" class="sub">GlobalProtocol · whole production tree</text>
+    <text x="1538" y="1090" class="micro">cross-module behavior gaps → repair</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="1948" y="382" width="408" height="755" rx="18" fill="#ffffff" stroke="#86efac" stroke-width="2"/>
+    <rect x="1948" y="382" width="408" height="94" rx="18" fill="#15803d"/>
+    <rect x="1948" y="444" width="408" height="32" fill="#15803d"/>
+    <text x="1974" y="422" class="stage-title">⑤ 验证、回滚与原子提交</text>
+    <text x="1974" y="451" class="stage-en">VALIDATE &amp; COMMIT</text>
+
+    <rect x="1974" y="508" width="356" height="86" rx="12" fill="#f0fdf4" stroke="#bbf7d0"/>
+    <text x="1994" y="539" class="label">Durable workspace runtime</text>
+    <text x="1994" y="565" class="sub">one writer · before-images · rollback</text>
+
+    <path d="M2152 594 L2152 623" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1974" y="624" width="356" height="92" rx="12" fill="#f0fdf4" stroke="#bbf7d0"/>
+    <text x="1994" y="655" class="label">compile + protected tests</text>
+    <text x="1994" y="681" class="sub">host command · immutable criteria hashes</text>
+
+    <path d="M2152 716 L2152 745" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1974" y="746" width="356" height="100" rx="12" fill="#dcfce7" stroke="#86efac"/>
+    <text x="1994" y="777" class="label">translation-verifier</text>
+    <text x="1994" y="803" class="sub">function-group / requirement-group</text>
+    <text x="1994" y="828" class="micro">行为映射、覆盖率与证据记录</text>
+
+    <path d="M2152 846 L2152 875" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="1974" y="876" width="356" height="102" rx="12" fill="#dcfce7" stroke="#86efac"/>
+    <text x="1994" y="907" class="label">verification repair</text>
+    <text x="1994" y="933" class="sub">feedback → same Translator run</text>
+    <text x="1994" y="959" class="micro">失败回修，或保留可审计失败状态</text>
+
+    <rect x="1974" y="1010" width="356" height="92" rx="12" fill="#f0fdf4" stroke="#bbf7d0"/>
+    <text x="1994" y="1041" class="label">preparedHash → approval → commit</text>
+    <text x="1994" y="1067" class="sub">snapshot evidence · atomic Git transaction</text>
+    <text x="1994" y="1090" class="micro">validated patch · audit trail</text>
+  </g>
+
+  <!-- inter-stage arrows -->
+  <path d="M528 758 L578 758" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M986 758 L1036 758" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M1444 758 L1492 758" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M1900 758 L1948 758" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
+
+
+  </g>
+</svg>

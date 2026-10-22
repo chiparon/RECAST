@@ -1,14 +1,21 @@
 package com.example.assetupgrade.attachment.port;
 
 /**
- * Skeleton seam for AttachmentFingerprintPort.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Computes a stable content fingerprint used for duplicate detection and audit evidence.
+ *
+ * <p>A fingerprint must be deterministic for identical bytes and must not leak tenant data.
+ * The value is surfaced through {@code AttachmentMetadata.contentHash}.</p>
  */
 public interface AttachmentFingerprintPort {
+
+    /** @return a stable fingerprint for {@code content}, or {@code null} when it cannot be computed. */
     String fingerprint(com.example.assetupgrade.attachment.AttachmentContent content);
-    /** Generic compatibility seam; typed methods define the contract. */
+
+    /** Compatibility seam; the typed contract is {@link #fingerprint}. */
     default Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
+        if (input instanceof com.example.assetupgrade.attachment.AttachmentContent content) {
+            return fingerprint(content);
+        }
+        throw new IllegalArgumentException("Expected AttachmentContent");
     }
 }

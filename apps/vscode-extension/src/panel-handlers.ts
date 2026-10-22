@@ -7,12 +7,14 @@ import type { PanelHandlers } from './panel';
  * those are exactly the messages that must never be dropped in silence.
  */
 export const awaitedWebviewActions = new Set<unknown>([
+  'START_PROJECT_PIPELINE', 'PROJECT_PIPELINE_ACTION',
   'START_ADAPT', 'START_SEARCH', 'APPLY_CURRENT_RUN', 'WORKSPACE_TRANSLATION',
   'SELECT_WORKSPACE_TARGET', 'SELECT_CODE_INTELLIGENCE_PROJECT', 'SAVE_SETTINGS',
 ]);
 
 /** Host replies a user waits for; dropping one of them stalls the panel. */
 export const awaitedHostReplies = new Set<unknown>([
+  'PROJECT_PIPELINE_STATE',
   'SEARCH_RESULT', 'ADAPT_RESULT', 'APPLY_RESULT', 'ERROR', 'MODULE_TRANSLATION_READY',
   'MODULE_CHILDREN', 'MODULE_CHILDREN_ERROR',
   'WORKSPACE_TRANSLATION_RESULT', 'WORKSPACE_TRANSLATION_ERROR', 'TARGET_WORKSPACE_RESULT',

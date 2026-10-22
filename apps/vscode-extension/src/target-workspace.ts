@@ -3,6 +3,7 @@ import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { normaliseConfiguredPath, normaliseConfiguredPaths } from '@forexplore/contracts';
+import { platformLocalPath } from '../../../services/code-intelligence-service/src/platform-path';
 import type { TargetWorkspaceAddMode, TargetWorkspacePhase } from './protocol/messages';
 import { resolveWorkspaceConfiguredPaths } from './settings';
 
@@ -12,6 +13,7 @@ export type TargetWorkspaceProgressPhase = Extract<TargetWorkspacePhase, 'resolv
 export interface TargetWorkspaceProgress {
   phase: TargetWorkspaceProgressPhase;
   message: string;
+  directory?: string;
 }
 
 /**
@@ -30,6 +32,8 @@ export type TargetWorkspaceAddResult =
 export interface PendingTargetImport {
   requestedAt: string;
   mode: TargetWorkspaceAddMode;
+  taskId?: string;
+  taskJournalKey?: string;
 }
 
 // sessionId survives an extension-host restart and is distinct for each window.
@@ -54,7 +58,10 @@ export function readPendingTargetImport(
   if (!['browse', 'input', 'workspace'].includes(record.mode)) return undefined;
   const requestedAt = Date.parse(record.requestedAt);
   if (!Number.isFinite(requestedAt) || requestedAt > now || now - requestedAt > maxAgeMs) return undefined;
-  return { requestedAt: record.requestedAt, mode: record.mode as TargetWorkspaceAddMode };
+  return { requestedAt: record.requestedAt, mode: record.mode as TargetWorkspaceAddMode,
+    ...(typeof record.taskId === 'string' && /^[a-f0-9-]{36}$/.test(record.taskId) ? { taskId: record.taskId } : {}),
+    ...(typeof record.taskJournalKey === 'string' && /^forexplore\.targetImportTasks\.[a-f0-9]{64}$/.test(record.taskJournalKey)
+      ? { taskJournalKey: record.taskJournalKey } : {}) };
 }
 
 /**
@@ -71,18 +78,34 @@ function targetPathKeys(value: string): string[] {
   const configured = normaliseConfiguredPath(value);
   if (configured === undefined) return [];
   const add = (candidate: string) => {
-    const normalized = process.platform === 'win32' ? candidate.toLowerCase() : candidate;
+    const normalizedCandidate = candidate.replaceAll('\\', '/').replace(/\/+$/, '') || '/';
+    // `/mnt/<drive>/...` is a Windows filesystem path when seen from WSL,
+    // whose mount remains case-insensitive even though the host process is
+    // Linux. Treat it like a drive-letter path for comparison purposes.
+    const windowsFilesystemPath = /^[A-Za-z]:\//.test(normalizedCandidate) ||
+      /^\/mnt\/[A-Za-z](?:\/|$)/.test(normalizedCandidate);
+    const normalized = process.platform === 'win32' || windowsFilesystemPath
+      ? normalizedCandidate.toLowerCase()
+      : normalizedCandidate;
     keys.add(normalized);
-    // VS Code may report a Windows path with either separator.
-    if (process.platform === 'win32') keys.add(normalized.replaceAll('\\', '/'));
   };
-  const resolved = path.resolve(configured);
-  add(resolved);
-  try {
-    add(realpathSync(resolved));
-  } catch {
-    // An unreachable entry keeps its resolved form; an unusable directory is
-    // reported separately when it is the newly chosen one.
+
+  // A persisted repository row can have been written by the other platform:
+  // Windows stores `E:\\...`, while WSL stores `/mnt/e/...`. Translate the
+  // spelling before resolving it locally so both forms produce the same key.
+  // Keep the raw spelling too because a path may not exist on this machine
+  // when it is only being compared with another persisted value.
+  add(configured);
+  const candidates = new Set([configured, platformLocalPath(configured)]);
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    add(resolved);
+    try {
+      add(realpathSync(resolved));
+    } catch {
+      // An unreachable entry keeps its resolved form; an unusable directory is
+      // reported separately when it is the newly chosen one.
+    }
   }
   return [...keys];
 }
@@ -175,7 +198,7 @@ function attachWorkspaceFolder(directory: string, signal?: AbortSignal): Promise
 
 export async function addTargetWorkspace(
   mode: TargetWorkspaceAddMode,
-  options: { signal?: AbortSignal; onProgress?(progress: TargetWorkspaceProgress): void } = {},
+  options: { signal?: AbortSignal; onProgress?(progress: TargetWorkspaceProgress): void | Promise<void> } = {},
 ): Promise<TargetWorkspaceAddResult> {
   options.signal?.throwIfAborted();
   let picked: string | undefined;
@@ -206,7 +229,7 @@ export async function addTargetWorkspace(
   if (picked === undefined) return { status: 'cancelled' };
   const directory = normaliseConfiguredPath(picked);
   if (directory === undefined || !path.isAbsolute(directory)) throw new Error('请输入目标工程的绝对目录路径。');
-  options.onProgress?.({ phase: 'resolving', message: '正在校验目标目录…' });
+  await options.onProgress?.({ phase: 'resolving', message: '正在校验目标目录…', directory });
   let resolved: string;
   try {
     resolved = await realpath(directory);
@@ -217,13 +240,17 @@ export async function addTargetWorkspace(
   }
   options.signal?.throwIfAborted();
   const config = vscode.workspace.getConfiguration('forexplore');
+  // An explicit workspace value (including []) overrides user settings. Save
+  // the choice at that level so the next synchronization actually sees it.
+  const configurationTarget = config.inspect('targetRepositoryPaths')?.workspaceValue !== undefined
+    ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
   // Read the existing selection through the same normalisation that decides the
   // match, so a quoted duplicate is recognised instead of being appended twice.
   const previous = normaliseConfiguredPaths(config.get<unknown[]>('targetRepositoryPaths', []));
   const previousResolved = resolveWorkspaceConfiguredPaths(previous);
   const remember = async (workspacePath = resolved) => {
     if (!previousResolved.some((entry) => sameTargetPath(entry, workspacePath))) {
-      await config.update('targetRepositoryPaths', [...previous, workspacePath], vscode.ConfigurationTarget.Global);
+      await config.update('targetRepositoryPaths', [...previous, workspacePath], configurationTarget);
     }
   };
   const folders = vscode.workspace.workspaceFolders ?? [];
@@ -235,13 +262,13 @@ export async function addTargetWorkspace(
       return { status: 'remembered', directory: resolved };
     }
   }
-  options.onProgress?.({ phase: 'attaching', message: '正在将目标目录加入工作区…' });
+  await options.onProgress?.({ phase: 'attaching', message: '正在将目标目录加入工作区…', directory: resolved });
   // Selecting the first folder can restart the extension host. Persist the
   // explicit choice before asking VS Code to change the workspace.
   await remember();
   options.signal?.throwIfAborted();
   if (!await attachWorkspaceFolder(resolved, options.signal)) {
-    await config.update('targetRepositoryPaths', previous, vscode.ConfigurationTarget.Global);
+    await config.update('targetRepositoryPaths', previous, configurationTarget);
     // An empty window has no workspace to splice a folder into, which is a
     // permanent condition rather than a transient one.
     throw new Error(folders.length === 0

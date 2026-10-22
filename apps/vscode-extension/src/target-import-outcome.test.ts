@@ -72,7 +72,10 @@ describe('targetImportVerdict', () => {
   });
 
   it('fails when no target is configured at all', () => {
-    expect(targetImportVerdict(presentation([target({ role: 'history' })]), []).status).toBe('failed');
+    const verdict = targetImportVerdict(presentation([target({ role: 'history' })]), []);
+    expect(verdict.status).toBe('failed');
+    expect(verdict.status === 'failed' ? verdict.message : '').toContain('索引尚未开始');
+    expect(verdict.status === 'failed' ? verdict.message : '').toContain('有效配置');
   });
 
   it('reports a failed target with the index-failure reason', () => {

@@ -29,12 +29,14 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { get } from 'node:http';
 import { createConnection as connectDatabase } from 'mysql2/promise';
+import { ensureDockerRuntime } from './docker-runtime.mjs';
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const runtimePackage = '@huggingface/transformers';
 // Pinned to the version the service scripts assume: they rely on `env.cacheDir`,
 // `env.allowRemoteModels` and `dtype: 'q8'`.
 const runtimeVersion = '3.8.1';
+const tokenizerVersion = '0.23.2';
 const defaultModelHost = 'https://hf-mirror.com';
 const embeddingPort = Number(process.env.FOREXPLORE_EMBEDDING_PORT ?? 4021);
 const rerankPort = Number(process.env.FOREXPLORE_RERANK_PORT ?? 4022);
@@ -58,6 +60,22 @@ function defaultToolsDirectory() {
 
 const tools = process.env.FOREXPLORE_EMBEDDING_TOOLS ?? defaultToolsDirectory();
 const cache = process.env.FOREXPLORE_MODEL_CACHE ?? path.join(homedir(), '.cache', 'forexplore-model-cache');
+// CUDA's driver is supplied by WSL, but CUDA/cuDNN user libraries belong to
+// the isolated inference runtime, alongside the optional ONNX provider.
+function cudaLibraryEnvironment() {
+  if (process.platform !== 'linux') return {};
+  const libraries = [];
+  const nvidiaRoot = path.join(homedir(), '.cache', 'recast', 'cuda-runtime', 'nvidia');
+  if (existsSync(nvidiaRoot)) {
+    for (const name of readdirSync(nvidiaRoot).sort()) {
+      const directory = path.join(nvidiaRoot, name, 'lib');
+      if (existsSync(directory)) libraries.push(directory);
+    }
+  }
+  if (existsSync('/usr/lib/wsl/lib')) libraries.push('/usr/lib/wsl/lib');
+  if (process.env.LD_LIBRARY_PATH) libraries.push(process.env.LD_LIBRARY_PATH);
+  return libraries.length ? { LD_LIBRARY_PATH: libraries.join(':') } : {};
+}
 const logDir = process.env.RECAST_SERVICES_LOG_DIR ?? path.join(tmpdir(), 'recast-services');
 const waitMs = Number(process.env.RECAST_SERVICES_WAIT_MS ?? 180_000);
 const maxLogBytes = 10 * 1024 * 1024;
@@ -78,20 +96,28 @@ const runtimeResolvable = (directory) => {
  * reporting a probe timeout.
  */
 function ensureEmbeddingRuntime() {
-  if (runtimeResolvable(tools)) return true;
+  const hasRuntime = runtimeResolvable(tools);
+  let hasTokenizer = false;
+  try { createRequire(path.join(tools, 'package.json')).resolve('tokenizers'); hasTokenizer = true; } catch { /* optional */ }
+  if (hasRuntime && hasTokenizer) return true;
   if (process.env.FOREXPLORE_EMBEDDING_SKIP_INSTALL === '1') {
+    if (hasRuntime) return true;
     console.error(`Embedding runtime ${runtimePackage} is missing from ${tools} and FOREXPLORE_EMBEDDING_SKIP_INSTALL=1.`);
     return false;
   }
-  console.log(`Embedding runtime ${runtimePackage} is missing from ${tools}; installing ${runtimeVersion}.`);
+  console.log(`Preparing inference runtime in ${tools}${hasRuntime ? ' (adding native tokenization)' : ''}.`);
   mkdirSync(tools, { recursive: true });
   const manifest = path.join(tools, 'package.json');
   if (!existsSync(manifest)) {
     writeFileSync(manifest, `${JSON.stringify({ name: 'recast-embed-tools', private: true, version: '1.0.0' }, null, 2)}\n`);
   }
   const installed = spawnSync(npmCommand, ['install', '--prefix', tools, '--ignore-scripts', '--no-audit', '--no-fund',
-    `${runtimePackage}@${runtimeVersion}`], { stdio: 'inherit', shell: process.platform === 'win32' });
+    ...(hasRuntime ? [] : [`${runtimePackage}@${runtimeVersion}`]), `tokenizers@${tokenizerVersion}`], { stdio: 'inherit', shell: process.platform === 'win32' });
   if (installed.status !== 0 || !runtimeResolvable(tools)) {
+    if (hasRuntime && runtimeResolvable(tools)) {
+      console.warn('Native tokenization could not be installed; continuing with JavaScript tokenization.');
+      return true;
+    }
     console.error(`Unable to install ${runtimePackage} into ${tools}.`);
     console.error('Install it by hand, or point FOREXPLORE_EMBEDDING_TOOLS at a directory that already contains it.');
     return false;
@@ -156,6 +182,13 @@ async function serviceReady(label, port) {
       if (health.model !== model || (label === 'embedding' && health.ready !== true)) {
         throw new Error(`port ${port} is not serving the configured ${label} model ${model}`);
       }
+      if (label === 'embedding') {
+        const device = process.env.FOREXPLORE_EMBEDDING_DEVICE?.trim();
+        const dtype = process.env.FOREXPLORE_EMBEDDING_DTYPE?.trim();
+        if ((device && health.device !== device) || (dtype && health.dtype !== dtype)) {
+          throw new Error(`port ${port} serves ${health.device}/${health.dtype}, expected ${device || 'automatic'}/${dtype || 'automatic'}`);
+        }
+      }
     }
     return { ready: true };
   } catch (error) { return { ready: false, detail: error.message }; }
@@ -174,18 +207,14 @@ function launch(label, script, env) {
     // No log yet, or it is still held open; keep appending.
   }
   const handle = openSync(log, 'a');
-  const child = spawn(process.execPath, [script], { detached: true, stdio: ['ignore', handle, handle], cwd: process.cwd(),
-    env: { ...process.env, ...env } });
+  const child = spawn(process.execPath, [script], { detached: true, windowsHide: true, stdio: ['ignore', handle, handle], cwd: process.cwd(),
+    env: { ...process.env, ...cudaLibraryEnvironment(), ...env } });
   closeSync(handle);
   const launched = { child, log, error: undefined };
   child.once('error', error => { launched.error = error.message; });
   child.unref();
   return launched;
 }
-
-/** `docker info` only needs its exit status, so nothing is piped. */
-const dockerReady = () => spawnSync('docker', ['info'], { stdio: 'ignore' }).status === 0;
-
 
 const results = [];
 const step = async (label, port, action) => {
@@ -201,7 +230,7 @@ const step = async (label, port, action) => {
     // Docker can expose TCP before the database has finished recovery.
     detail = health.detail;
   }
-  const launched = occupied ? undefined : action();
+  const launched = occupied ? undefined : await action();
   if (launched === false) { results.push([label, port, 'FAILED: dependency could not start']); return false; }
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
@@ -223,9 +252,10 @@ const step = async (label, port, action) => {
   return false;
 };
 
-const seekdb = await step('SeekDB', seekdbPort, () => {
+const seekdb = await step('SeekDB', seekdbPort, async () => {
   if (skipSeekDb || !['127.0.0.1', 'localhost', '::1'].includes(seekdbHost)) return undefined;
-  if (!dockerReady()) { console.error('SeekDB: Docker daemon unavailable — start Docker Desktop and retry.'); return false; }
+  try { await ensureDockerRuntime(); }
+  catch (error) { console.error(`SeekDB: ${error.message}`); return false; }
   const started = spawnSync('docker', ['start', container], { stdio: 'inherit' });
   if (started.status !== 0) return false;
   return undefined;

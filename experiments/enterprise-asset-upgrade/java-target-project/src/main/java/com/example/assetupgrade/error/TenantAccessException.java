@@ -1,10 +1,19 @@
 package com.example.assetupgrade.error;
 
+import com.example.assetupgrade.common.ProblemCode;
+
 /**
- * Skeleton seam for TenantAccessException.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Typed failure for the TenantAccessException condition, classified as {@link ProblemCode#TENANT_DENIED}.
  */
-public class TenantAccessException extends RuntimeException {
-    public TenantAccessException(String message) { super(message); }
+public class TenantAccessException extends AssetUpgradeException {
+
+    private static final long serialVersionUID = 1L;
+
+    public TenantAccessException(String message) {
+        super(ProblemCode.TENANT_DENIED, message);
+    }
+
+    public TenantAccessException(String message, Throwable cause) {
+        super(ProblemCode.TENANT_DENIED, message, cause);
+    }
 }

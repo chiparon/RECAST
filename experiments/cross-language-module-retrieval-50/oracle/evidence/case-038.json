@@ -1,0 +1,30 @@
+{
+  "caseId": "case-038",
+  "source": {
+    "repository": "nopcommerce",
+    "repositoryId": "repo-871f5b49-b638-4c60-a9f2-e4ad8fd09645",
+    "revision": "analysis-99f515f8-22bb-4829-8eff-e94b6ac9d18d",
+    "projectId": "project-3f8d4dae11493c04fe598a8d",
+    "artifactId": "project-summary:project-3f8d4dae11493c04fe598a8d:code-understanding/v1",
+    "planHash": "sha256:ad07bf424737d2f63d9fce9d04ba1a182154a46db4c5b1a1fc62845e0d80b16c",
+    "analysisHash": "a8c7ea6e94606080f342a5c24ba8e893a8f5aee05bba7633526a74dd67e6d071",
+    "moduleId": "module-3cce61905bdb66e67347cef5"
+  },
+  "excerpts": [
+    {
+      "path": "src/Libraries/Nop.Services/Plugins/BasePlugin.cs",
+      "excerpt": "﻿namespace Nop.Services.Plugins;\n\n/// <summary>\n/// Base plugin\n/// </summary>\npublic abstract partial class BasePlugin : IPlugin\n{\n    /// <summary>\n    /// Gets a configuration page URL\n    /// </summary>\n    public virtual string GetConfigurationPageUrl()\n    {\n        return null;\n    }\n\n    /// <summary>\n    /// Gets or sets the plugin descriptor\n    /// </summary>\n    public virtual PluginDescriptor PluginDescriptor { get; set; }\n\n    /// <summary>\n    /// Install plugin\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    public virtual Task InstallAsync()\n    {\n        return Task.CompletedTask;\n    }\n\n    /// <summary>\n    /// Install sample data of plugin\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    public virtual Task InstallSampleDataAsync()\n    {\n        return Task.CompletedTask;\n    }\n\n    /// <summary>\n    /// Uninstall plugin\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    public virtual Task UninstallAsync()\n    {\n        return Task.CompletedTask;\n    }\n\n    /// <summary>\n    /// Update plugin\n    /// </summary>\n    /// <param name=\"currentVersion\">Current version of plugin</param>\n    /// <param name=\"targetVersion\">New version of plugin</param>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    public virtual Task UpdateAsync(string currentVersion, string targetVersion)\n    {\n        return Task.CompletedTask;\n    }\n\n    /// <summary>\n    /// Prepare plugin to the uninstallation\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    public virtual Task PreparePluginToUninstallAsync()\n    {\n        //any can put any custom validation logic here\n        //throw an exception if this plugin cannot be uninstalled\n        //for example, requires some other certain plugins to be uninstalled first\n        return Task.CompletedTask;\n    }\n}",
+      "truncated": false
+    },
+    {
+      "path": "src/Libraries/Nop.Services/Plugins/IDescriptor.cs",
+      "excerpt": "﻿namespace Nop.Services.Plugins;\n\n/// <summary>\n/// Represents descriptor of the application extension (plugin or theme)\n/// </summary>\npublic partial interface IDescriptor\n{\n    /// <summary>\n    /// Gets or sets the system name\n    /// </summary>\n    string SystemName { get; set; }\n\n    /// <summary>\n    /// Gets or sets the friendly name\n    /// </summary>\n    string FriendlyName { get; set; }\n}",
+      "truncated": false
+    },
+    {
+      "path": "src/Libraries/Nop.Services/Plugins/IPlugin.cs",
+      "excerpt": "﻿namespace Nop.Services.Plugins;\n\n/// <summary>\n/// Interface denoting plug-in attributes that are displayed throughout \n/// the editing interface.\n/// </summary>\npublic partial interface IPlugin\n{\n    /// <summary>\n    /// Gets a configuration page URL\n    /// </summary>\n    string GetConfigurationPageUrl();\n\n    /// <summary>\n    /// Gets or sets the plugin descriptor\n    /// </summary>\n    PluginDescriptor PluginDescriptor { get; set; }\n\n    /// <summary>\n    /// Install plugin\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    Task InstallAsync();\n\n    /// <summary>\n    /// Install sample data of plugin\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    Task InstallSampleDataAsync();\n\n    /// <summary>\n    /// Uninstall plugin\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    Task UninstallAsync();\n\n    /// <summary>\n    /// Update plugin\n    /// </summary>\n    /// <param name=\"currentVersion\">Current version of plugin</param>\n    /// <param name=\"targetVersion\">New version of plugin</param>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    Task UpdateAsync(string currentVersion, string targetVersion);\n\n    /// <summary>\n    /// Prepare plugin to the uninstallation\n    /// </summary>\n    /// <returns>A task that represents the asynchronous operation</returns>\n    Task PreparePluginToUninstallAsync();\n}",
+      "truncated": false
+    }
+  ]
+}

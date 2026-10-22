@@ -15,11 +15,16 @@ it('keeps failed key drafts for retry, clears them on provider changes/success, 
   const save = vi.fn();
   const props = { llm: DEFAULT_LLM_SETTINGS, topK: 4, repositoryPaths: [], repositoryStatuses: [],
     modelKeyStatus: { configured: true }, onCheckRepositories: vi.fn(), onSelectCodeIntelligenceProject: vi.fn(),
-    onSelectCodeIntelligenceRevision: vi.fn(), onSave: save, onCancel: vi.fn() };
+    onSave: save, onCancel: vi.fn() };
   await act(async () => root.render(<SettingsPanel {...props} saving={false} />));
   const input = container.querySelector<HTMLInputElement>('[aria-label="API Key"]')!;
-  expect(input.value).toBe('');
-  expect(input.placeholder).toContain('留空保留');
+  expect(input.type).toBe('password');
+  expect(input.value).toMatch(/^•+$/);
+  expect(container.querySelector('#model-key-state')?.textContent).toContain('已配置');
+  await act(async () => window.dispatchEvent(new Event('recast-save-settings')));
+  expect(save).toHaveBeenLastCalledWith(expect.any(Object));
+  expect(save.mock.calls[0]).toHaveLength(1); // The display mask must never replace the saved secret.
+  save.mockClear();
   const enter = async (value: string) => act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -35,7 +40,7 @@ it('keeps failed key drafts for retry, clears them on provider changes/success, 
   await act(async () => root.render(<SettingsPanel {...props} saving={false} />));
   expect(input.value).toBe('test-key');
   await act(async () => root.render(<SettingsPanel {...props} llm={{ ...DEFAULT_LLM_SETTINGS }} saving={false} />));
-  expect(input.value).toBe('');
+  expect(input.value).toMatch(/^•+$/);
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="清除保存的 Key"]')!.click());
   expect(input.placeholder).toBe('无');
   expect(save).toHaveBeenCalledTimes(1);
@@ -58,7 +63,7 @@ it('browses into an unsaved draft, preserves cancellation, and saves provider/mo
   const save = vi.fn();
   const browse = vi.fn().mockResolvedValueOnce(['D:/Legacy', 'D:/Added']).mockResolvedValueOnce([]);
   await act(async () => root.render(<SettingsPanel llm={DEFAULT_LLM_SETTINGS} topK={4} repositoryPaths={['D:/Legacy']} repositoryStatuses={[]} saving={false}
-    onCheckRepositories={vi.fn()} onSelectCodeIntelligenceProject={vi.fn()} onSelectCodeIntelligenceRevision={vi.fn()}
+    onCheckRepositories={vi.fn()} onSelectCodeIntelligenceProject={vi.fn()}
     onBrowseReferenceFolders={browse} onSave={save} onCancel={vi.fn()} />));
   const clickBrowse = () => [...container.querySelectorAll('button')].find(b => b.textContent?.includes('浏览文件夹'))!.click();
   await act(async () => clickBrowse());
@@ -136,7 +141,7 @@ it('shows URL only for custom interfaces or an existing nonstandard endpoint', a
   const container = document.createElement('div'); document.body.append(container);
   const root = createRoot(container); unmount = () => root.unmount();
   const props = { topK: 4, repositoryPaths: [], repositoryStatuses: [], saving: false,
-    onCheckRepositories: vi.fn(), onSelectCodeIntelligenceProject: vi.fn(), onSelectCodeIntelligenceRevision: vi.fn(), onSave: vi.fn(), onCancel: vi.fn() };
+    onCheckRepositories: vi.fn(), onSelectCodeIntelligenceProject: vi.fn(), onSave: vi.fn(), onCancel: vi.fn() };
   await act(async () => root.render(<SettingsPanel {...props} llm={{ ...DEFAULT_LLM_SETTINGS, apiBase: 'https://proxy.example/v1' }} />));
   expect(container.querySelector<HTMLInputElement>('[aria-label="API Base URL"]')!.value).toBe('https://proxy.example/v1');
   await act(async () => {

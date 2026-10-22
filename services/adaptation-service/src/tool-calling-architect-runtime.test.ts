@@ -441,6 +441,55 @@ describe("ToolCallingArchitectRuntime", () => {
     expect(messages.at(-1)!.content).toContain(evidenceId);
   });
 
+  it('rejects a retrieved symbol when it belongs to another module file', async () => {
+    const otherPath = 'src/Other.java';
+    const port = projectPort(['src/QuoteService.java', otherPath]);
+    const otherEvidence = evidence({
+      evidenceId: 'symbol:other',
+      relativePath: otherPath,
+      value: { symbolKey: 'java:example.Other:class', relativePath: otherPath },
+    });
+    vi.mocked(port.searchSymbols).mockResolvedValue({ symbols: [evidence(), otherEvidence] } as never);
+    const invalid = proposal({
+      modules: [{ ...proposal().modules[0]!, sourceFiles: [otherPath], symbolKeys: [symbolKey],
+        writeSet: [otherPath] }],
+      unassignedFiles: [{ path: 'src/QuoteService.java', reason: 'Assigned to another responsibility.' }],
+    });
+    const client = scriptedClient([{ content: JSON.stringify(invalid) }]);
+    await expect(new ToolCallingArchitectRuntime({ queryPort: port, client, maxProposalRepairs: 0 })
+      .proposeModulePlanWithEvidence({ ...request, projectId: 'quote' }))
+      .rejects.toThrow('does not belong to its sourceFiles');
+  });
+
+  it('repairs a cross-file symbol mapping by dropping optional symbol keys', async () => {
+    const otherPath = 'src/Other.java';
+    const port = projectPort(['src/QuoteService.java', otherPath]);
+    const otherSymbolKey = 'java:example.Other:class';
+    vi.mocked(port.searchSymbols).mockResolvedValue({ symbols: [evidence(), evidence({
+      evidenceId: 'symbol:other',
+      relativePath: otherPath,
+      value: { symbolKey: otherSymbolKey, relativePath: otherPath },
+    })] } as never);
+    const invalid = proposal({
+      modules: [{ ...proposal().modules[0]!, symbolKeys: [symbolKey, otherSymbolKey],
+        sourceFiles: ['src/QuoteService.java'], writeSet: ['src/QuoteService.java'] }],
+      unassignedFiles: [{ path: otherPath, reason: 'Build support file without a functional module.' }],
+    });
+    // The duplicate entry above is intentionally invalid only by its second
+    // symbol's file relationship; the correction keeps the file-level plan.
+    const corrected = proposal({
+      modules: [{ ...proposal().modules[0]!, symbolKeys: [], sourceFiles: ['src/QuoteService.java'],
+        writeSet: ['src/QuoteService.java'] }],
+      unassignedFiles: [{ path: otherPath, reason: 'Build support file without a functional module.' }],
+    });
+    const client = scriptedClient([{ content: JSON.stringify(invalid) }, { content: JSON.stringify(corrected) }]);
+    const result = await new ToolCallingArchitectRuntime({ queryPort: port, client })
+      .proposeModulePlanWithEvidence({ ...request, projectId: 'quote' });
+    expect(result.proposal).toEqual(corrected);
+    expect(client.complete).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(client.complete).mock.calls[1]![0].at(-1)!.content).toContain('does not belong to its sourceFiles');
+  });
+
   it.each(['overlap', 'duplicate-unassigned', 'missing-file', 'foreign-assigned', 'foreign-unassigned', 'missing-summary'] as const)(
     'repairs %s before returning a project proposal', async (mode) => {
       const files = ['duplicate-unassigned', 'missing-file'].includes(mode)

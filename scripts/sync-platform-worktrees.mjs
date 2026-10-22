@@ -12,7 +12,9 @@ const excluded = new Set(['node_modules', 'dist', 'bin', 'obj', 'target', 'cover
 
 function included(file) {
   const parts = file.split('/');
-  return !parts.some(part => excluded.has(part)) &&
+  // These dated directories contain experiment runs, snapshots and Maven caches.
+  const historicalRun = /^experiments\/enterprise-asset-upgrade\/(?:full-coverage|history-assisted|history-blocked|history-isolated|no-history)-java(?:-[^/]+)?-\d{8}\//.test(file);
+  return !historicalRun && !parts.some(part => excluded.has(part)) &&
     !/\.(?:log|vsix|zip|pyc)$/.test(file) && !parts.some(part => part === '.env' || part.startsWith('.env.') && part !== '.env.example') &&
     !file.startsWith('.recast-platform') && file !== '.claude/settings.local.json';
 }

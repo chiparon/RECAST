@@ -19,6 +19,10 @@ const maxBytes = 1_000_000;
 const allowLarge = new Set([
   'docs/proj47-面向 Agent记忆的向量检索系统IO优化-山东大学.pptx',
   'docs/request/聚焦国家战略需求.pdf',
+  // Frozen 716-module oracle used to reproduce the 50-case retrieval dataset;
+  // build_dataset.py and experiment.mts read it directly. It is fixture input,
+  // not a generated run log or a model/runtime cache.
+  'experiments/cross-language-module-retrieval-50/oracle/catalog-snapshot.json',
 ]);
 /** 同样是历史遗留的误提交文件：门禁放过，但仓库里不应再出现新的同类。 */
 const legacyTracked = new Set([

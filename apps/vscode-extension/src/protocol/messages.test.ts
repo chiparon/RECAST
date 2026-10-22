@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { isHostToWebviewMessage, isWebviewToHostMessage, webviewMessageRejectionReason } from './messages';
 
+describe('Project pipeline intent boundary', () => {
+  const input = { repositoryId: 'repo', projectId: 'project', requirement: 'Implement gateway', topK: 4 };
+  it('accepts project intent while refusing page-supplied paths, commands and oversized documents', () => {
+    expect(isWebviewToHostMessage({ type: 'START_PROJECT_PIPELINE', input })).toBe(true);
+    for (const extra of [{ workspaceRoot: 'C:/other' }, { command: 'arbitrary' }, { requirement: 'x'.repeat(8001) }, { mode: 'unknown' }]) {
+      expect(isWebviewToHostMessage({ type: 'START_PROJECT_PIPELINE', input: { ...input, ...extra } })).toBe(false);
+    }
+  });
+  it('only accepts supported actions and opaque action targets', () => {
+    const action = { type: 'PROJECT_PIPELINE_ACTION', action: 'read', runId: '11111111-2222-3333-4444-555555555555' };
+    expect(isWebviewToHostMessage(action)).toBe(true);
+    expect(isWebviewToHostMessage({ ...action, action: 'unknown' })).toBe(false);
+    expect(isWebviewToHostMessage({ ...action, action: 'export-report', destination: 'C:/arbitrary' })).toBe(false);
+    expect(isWebviewToHostMessage({ ...action, action: 'resume' })).toBe(true);
+    expect(isWebviewToHostMessage({ ...action, action: 'retry-module', moduleId: 'module-domain' })).toBe(true);
+    expect(isWebviewToHostMessage({ ...action, action: 'retry-module' })).toBe(false);
+    expect(isWebviewToHostMessage({ ...action, action: 'resume', moduleId: 'module-domain' })).toBe(false);
+    expect(isWebviewToHostMessage({ ...action, action: 'retry-module', moduleId: '../output' })).toBe(false);
+  });
+});
+
 describe('Module translation handoff boundary', () => {
   it('accepts the module target id the explorer actually produces', () => {
     // A module target id is a module:// URI (project-explorer.ts). Validating it

@@ -87,8 +87,10 @@ export async function buildProjectExplorer(host: Pick<CodeIntelligenceHost, 'exp
           ? moduleTargetId([repository.repositoryId, index.analysisRevision, projectId, module.id]) : undefined;
         if (targetId && representative) result.targets.set(targetId, {
           id: targetId, name: module.name, kind: 'module', path: representative.path, language: representative.language,
-          signature: (module.coreApis ?? []).join('\n'), documentation: module.purpose ?? module.description,
+          signature: (module.coreApis ?? []).join('\n'),
+          documentation: [module.purpose, module.description].filter(Boolean).join('\n'),
           module: { repositoryId: repository.repositoryId, analysisRevision: index.analysisRevision, projectId,
+            moduleId: module.id, purpose: module.purpose, description: module.description,
             sourceFiles, coreApis: module.coreApis ?? [], dependsOn: [...module.dependsOn] },
         });
         return {

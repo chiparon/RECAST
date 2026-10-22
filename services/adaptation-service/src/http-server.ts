@@ -1,6 +1,6 @@
 import { modelSettingsScope, requestModelSettings } from './model-request';
 import { isLocalIdeRequest } from './model-request';
-import { parseRetrievalRerank, rankRetrieval, type RetrievalRerankInput } from './retrieval-rerank';
+import { parseRetrievalRerank, rankRetrieval, rankRetrievalWithReferences, type RetrievalRerankInput } from './retrieval-rerank';
 import { modelCredentialScope, requestModelCredential } from './model-credential';
 import {
   createServer,
@@ -20,6 +20,7 @@ import {
   type ModuleHierarchyPlanner,
   type RepositoryArchitectureRequest,
   type RepositoryStaticAnalysis,
+  type WorkspaceVerificationFeedback,
 } from "@forexplore/contracts";
 import type {
   CodeAdaptationPort,
@@ -364,8 +365,10 @@ export function createHttpServer(options: HttpServerOptions): Server {
         let input: RetrievalRerankInput;
         try { input = parseRetrievalRerank(await readBody(request)); }
         catch { throw new HttpError(400, 'Invalid bounded rerank request.'); }
-        const order = await (options.retrievalRerank ?? rankRetrieval)(input, requestSignal(request));
-        json(response, 200, { order, provider: modelSettingsScope.getStore()?.provider ?? 'deepseek',
+        const ranked = input.selectReferences
+          ? await rankRetrievalWithReferences(input, requestSignal(request))
+          : {order: await (options.retrievalRerank ?? rankRetrieval)(input, requestSignal(request))};
+        json(response, 200, { ...ranked, provider: modelSettingsScope.getStore()?.provider ?? 'deepseek',
           model: modelSettingsScope.getStore()?.model ?? 'environment' }, options.corsOrigin);
         return;
       }
@@ -396,7 +399,7 @@ export function createHttpServer(options: HttpServerOptions): Server {
           json(response, 200, translation.runtime.configuration(), options.corsOrigin);
           return;
         }
-        const route = /^\/v1\/workspace-translations(?:\/([a-f0-9-]{36})(?:\/(cancel|resume|rollback))?)?$/.exec(request.url);
+        const route = /^\/v1\/workspace-translations(?:\/([a-f0-9-]{36})(?:\/(cancel|resume|rollback|verification-repair))?)?$/.exec(request.url);
         if (!route) throw new HttpError(404, "Not found.");
         const [, id, action] = route;
         if (request.method === "POST" && !id) {
@@ -410,6 +413,14 @@ export function createHttpServer(options: HttpServerOptions): Server {
           return;
         }
         if (request.method === "POST" && id && action) {
+          if (action === "verification-repair") {
+            requireJson(request);
+            const runtime = translation.runtime as typeof translation.runtime & { repairAfterVerification?: (runId: string, feedback: WorkspaceVerificationFeedback) => unknown };
+            if (typeof runtime.repairAfterVerification !== "function") throw new HttpError(409, "Verifier repair is only available for the Codex workspace runtime.");
+            const run = runtime.repairAfterVerification(id, await readBody(request) as WorkspaceVerificationFeedback);
+            json(response, 202, run, options.corsOrigin);
+            return;
+          }
           const run = action === "cancel" ? await translation.runtime.cancel(id)
             : action === "resume" ? translation.runtime.resume(id) : translation.runtime.rollback(id);
           json(response, action === "resume" ? 202 : 200, run, options.corsOrigin);

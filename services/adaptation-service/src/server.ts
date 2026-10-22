@@ -12,6 +12,8 @@ import { HttpSemanticQueryPort } from './http-semantic-query-port.js';
 import { HttpWorkspaceEvidencePort } from './http-workspace-evidence-port.js';
 import { WorkspaceTranslationRuntime } from './workspace-translation-runtime.js';
 import { CodexWorkspaceTranslationRuntime } from './codex-workspace-translation-runtime.js';
+import { prepareDeepSeekCodexHome } from './codex-experiment-home.js';
+import { resolveModelApiKey } from './model-credential.js';
 import { createWorkspaceTranslationModelClient } from './workspace-translation-agent.js';
 import {
   createDeepSeekToolCallingArchitectClient,
@@ -25,6 +27,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   if (config.workspaceTranslation) {
     if (config.workspaceTranslation.agent === 'codex') {
+      const translation = config.workspaceTranslation;
       workspaceTranslationRuntime = new CodexWorkspaceTranslationRuntime({
         workspaceRoot: config.projectRoot,
         compileCommand: config.workspaceTranslation.compileCommand,
@@ -33,6 +36,12 @@ async function main(): Promise<void> {
         timeoutMs: config.workspaceTranslation.timeoutMs,
         codexCommand: config.workspaceTranslation.codexCommand,
         codexModel: config.workspaceTranslation.codexModel,
+        prepareCodexHome: () => prepareDeepSeekCodexHome({
+          explicitHome: translation.codexHome,
+          apiKey: translation.codexHome ? undefined : resolveModelApiKey(() => config.apiKey),
+          model: translation.codexModel ?? 'deepseek-v4-pro',
+          baseUrl: translation.codexBaseUrl ?? process.env.DEEPSEEK_API_BASE,
+        }),
       });
     } else {
       workspaceTranslationRuntime = new WorkspaceTranslationRuntime({

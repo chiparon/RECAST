@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { moduleFileHash } from './module-translation-handoff';
-import { MAX_RETRIEVAL_SCOPES, type WorkspaceEvidenceScope, type WorkspaceHistoryView, type WorkspaceTranslationContext, type WorkspaceTranslationRequest, type WorkspaceTranslationRun } from '@forexplore/contracts';
+import { MAX_RETRIEVAL_SCOPES, type GlobalProtocol, type ModuleProtocol, type WorkspaceEvidenceScope, type WorkspaceHistoryView, type WorkspaceTranslationContext, type WorkspaceTranslationMode, type WorkspaceTranslationRequest, type WorkspaceTranslationRun, type WorkspaceVerificationFeedback, type WorkspaceTranslationTaskKind } from '@forexplore/contracts';
 import type { HostToWebviewMessage, WebviewToHostMessage } from './protocol/messages';
 
 export interface TranslationProfile {
@@ -16,7 +16,8 @@ export type TranslationIntent = Extract<WebviewToHostMessage, { type: 'WORKSPACE
 
 /**
  * A host-owned translation scope derived from a selected target module and its
- * retrieved history candidates. The page may only refer to it by opaque id, so
+ * retrieved history candidates, or an explicit direct-translation fallback.
+ * The page may only refer to it by opaque id, so
  * a Webview can neither widen the write set nor inject source or a path.
  */
 export interface WorkspaceTranslationModuleScope {
@@ -29,6 +30,11 @@ export interface WorkspaceTranslationModuleScope {
   evidenceScopes?: WorkspaceEvidenceScope[];
   /** Host-created source snapshot; only its manifest and opaque metadata reach the run record. */
   historyView?: WorkspaceHistoryView;
+  /** Host-selected Agent route; direct-translator is used without history. */
+  translationMode?: WorkspaceTranslationMode;
+  taskKind?: WorkspaceTranslationTaskKind;
+  moduleProtocol?: ModuleProtocol;
+  globalProtocol?: GlobalProtocol;
   /** Bounded, non-blocking observations about the derived scope. */
   warnings?: string[];
   /** Snapshot captured by the host when the user prepares a module translation. */
@@ -61,6 +67,21 @@ export class WorkspaceTranslationHost {
 
   get activeModuleScopeId(): string | undefined {
     return this.moduleScope?.id;
+  }
+
+  /** Host-only verifier feedback path; this is deliberately outside Webview actions. */
+  async repairAfterVerification(runId: string, feedback: WorkspaceVerificationFeedback): Promise<WorkspaceTranslationRun> {
+    if (!/^[a-f0-9-]{36}$/.test(runId)) throw new Error('无效的运行编号。');
+    const { url, token } = this.configuration();
+    if (!token) throw new Error('翻译服务认证未配置。');
+    const endpoint = new URL(url);
+    const base = endpoint.pathname.replace(/\/+$/, '');
+    endpoint.search = ''; endpoint.hash = '';
+    endpoint.pathname = `${base}/v1/workspace-translations/${runId}/verification-repair`;
+    const response = await this.transport(endpoint, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(feedback), signal: AbortSignal.timeout(30000) });
+    const value = await response.json() as WorkspaceTranslationRun & { error?: string };
+    if (!response.ok) throw new Error(value.error ?? `翻译服务返回 ${response.status}`);
+    return value;
   }
 
   async handle(intent: TranslationIntent): Promise<HostToWebviewMessage> {
@@ -101,7 +122,7 @@ export class WorkspaceTranslationHost {
         if (intent.moduleScopeId !== undefined && intent.moduleScopeId !== this.moduleScope?.id) throw new Error('模块翻译范围已变化，请重新选择候选。');
         const context: WorkspaceTranslationRequest['context'] = scope ? structuredClone(scope.context) : [];
         let evidenceScopes = [...(scope?.evidenceScopes ?? [])];
-        if (context.length === 0) throw new Error('模块翻译缺少可用上下文：请选择历史候选模块。');
+        if (context.length === 0 && scope?.taskKind !== 'project-integration') throw new Error('模块翻译缺少可用上下文：请选择历史候选模块。');
         const mergedScopes = new Map<string, WorkspaceEvidenceScope>();
         for (const next of evidenceScopes) {
           const key = JSON.stringify([next.repositoryId, next.analysisRevision]);
@@ -114,6 +135,10 @@ export class WorkspaceTranslationHost {
         const input = { spec: scope ? moduleSpec(scope, undefined) : '',
           sourceLanguage: profile!.sourceLanguage, targetLanguage: profile!.targetLanguage,
           workspaceFiles: profile!.workspaceFiles, writeFiles: profile!.writeFiles, context,
+          ...(scope?.translationMode ? { translationMode: scope.translationMode } : {}),
+          ...(scope?.taskKind ? { taskKind: scope.taskKind } : {}),
+          ...(scope?.moduleProtocol ? { moduleProtocol: structuredClone(scope.moduleProtocol) } : {}),
+          ...(scope?.globalProtocol ? { globalProtocol: structuredClone(scope.globalProtocol) } : {}),
           ...(evidenceScopes.length ? { evidenceScopes } : {}),
           ...(scope?.historyView ? { historyView: structuredClone(scope.historyView) } : {}) };
         // Do not repeat a write request if the UI delivers the same operation twice.
@@ -157,7 +182,10 @@ export class WorkspaceTranslationHost {
       if (visibleRun.request?.historyView) {
         delete visibleRun.request.historyView;
       }
-      if (run.status === 'completed' || run.status === 'rolled-back') {
+      // Keep a completed module's immutable history-view alive: the host may
+      // submit verifier feedback and re-enter the same Translator run. It is
+      // removed on rollback or when the host session is disposed.
+      if (run.status === 'rolled-back') {
         const historyRoot = this.historyRoots.get(run.id) ?? scope?.historyView?.root;
         if (historyRoot) {
           this.historyRoots.delete(run.id);
@@ -184,7 +212,7 @@ function parseProfile(raw: string): TranslationProfile {
 
 /** Identity covers the reviewed file scope and the module package inventory. */
 function canonicalScope(scope: WorkspaceTranslationModuleScope): string {
-  return JSON.stringify([scope.label, scope.profile, scope.spec, scope.context, scope.evidenceScopes, scope.historyView, scope.fileHashes]);
+  return JSON.stringify([scope.label, scope.profile, scope.spec, scope.context, scope.evidenceScopes, scope.historyView, scope.fileHashes, scope.translationMode, scope.taskKind, scope.moduleProtocol, scope.globalProtocol]);
 }
 
 /** A module run's specification is host-owned; a task requirement only adds detail. */

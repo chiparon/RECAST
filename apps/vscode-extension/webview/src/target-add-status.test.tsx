@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../src/protocol/messages';
 import type { ModuleExplorerPresentation } from '../../src/ui-types';
 import App from './App';
+import type { TargetImportTask } from '../../src/target-import-task-types';
 
 let reactRoot: Root | undefined;
 afterEach(async () => {
@@ -19,6 +20,32 @@ const unselectedTarget: ModuleExplorerPresentation = {
     summary: { exists: false, path: '.forexplore/module-summary.json' }, tree: [],
   },
 };
+
+it('restores historical import logs in the same independent task area and retries only incomplete models', async () => {
+  const { container, post, posted } = await mountPanel();
+  const at = new Date().toISOString();
+  await act(async () => {
+    post({ type: 'CODE_INTELLIGENCE_STATUS', presentation: { status: 'ready', storage: 'seekdb', repositories: [{
+      repositoryId: 'orders', displayName: 'Orders', role: 'history', analysisStatus: 'ready', activeRevision: 'r1', selectedRevision: 'r1',
+      revisions: [], languages: [], summary: { status: 'missing' }, selectedProjectId: 'core', projects: [{
+        projectId: 'core', displayName: 'Core', relativePath: '.', languageIds: [], kind: 'node', analysis: {
+          repositoryId: 'orders', projectId: 'core', analysisRevision: 'r1', analysisProfile: 'profile', state: 'failed', projection: 'pending', updatedAt: at,
+        },
+      }],
+    }] } });
+    post({ type: 'HISTORY_IMPORT_TASKS', tasks: [{ id: '11111111-2222-3333-4444-555555555555', mode: 'workspace', status: 'failed', stage: 'modeling',
+      createdAt: at, updatedAt: at, repositoryId: 'orders', displayName: 'Orders', indexReady: true, modelReady: false,
+      message: '模型响应校验失败', events: [{ at, stage: 'parse', message: '解析完成：460 个文件' }] }] });
+  });
+  const panel = container.querySelector<HTMLElement>('[aria-label="参考工程导入任务"]')!;
+  expect(panel.closest('.module-main-scroll')).toBeNull();
+  const button = (text: string) => [...panel.querySelectorAll('button')].find(button => button.textContent === text)!;
+  await act(async () => button('过程记录').click());
+  expect(panel.querySelector('[role="log"]')?.textContent).toContain('460 个文件');
+  await act(async () => button('重试导入').click());
+  expect(posted).toContainEqual({ type: 'RETRY_PROJECT_ANALYSIS', repositoryId: 'orders', analysisRevision: 'r1', projectId: 'core', force: false });
+  expect(posted.some(message => message.type === 'REFRESH_REPOSITORY')).toBe(false);
+});
 
 async function mountPanel(initialMode: 'search' | 'migration' = 'search') {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,6 +64,33 @@ async function mountPanel(initialMode: 'search' | 'migration' = 'search') {
     searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek' } }));
   return { container, post, postRaw, posted };
 }
+
+it('keeps the independent import task visible with collapsed inputs, both modes and settings, then restores host history', async () => {
+  const tasks: TargetImportTask[] = [{ id: '11111111-2222-3333-4444-555555555555', mode: 'browse', status: 'running', stage: 'modeling',
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), displayName: 'Orders', directory: 'E:\\orders',
+    indexReady: true, modelReady: false, message: '索引已完成，正在生成模块模型…', events: [
+      { at: new Date().toISOString(), stage: 'parse', message: '解析完成：460 个文件' },
+    ] }];
+  const { container, post, posted } = await mountPanel();
+  await act(async () => post({ type: 'TARGET_IMPORT_TASKS', tasks }));
+  const panel = () => container.querySelector<HTMLElement>('[aria-label="目标工程导入任务"]')!;
+  expect(panel().closest('.module-main-scroll')).toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>('.project-section-toggle')!.click());
+  expect(container.querySelector('#project-task-inputs')?.hasAttribute('hidden')).toBe(true);
+  expect(panel().closest('[hidden]')).toBeNull();
+  await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === '单模块调试')!.click());
+  expect(panel().textContent).toContain('正在生成模块模型');
+  await act(async () => container.querySelector<HTMLButtonElement>('.header-settings-button')!.click());
+  expect(panel().closest('[hidden]')).toBeNull();
+  await act(async () => [...panel().querySelectorAll('button')].find(button => button.textContent === '停止等待')!.click());
+  expect(posted).toContainEqual({ type: 'TARGET_IMPORT_ACTION', taskId: tasks[0]!.id, action: 'cancel' });
+  await act(async () => reactRoot!.unmount()); reactRoot = undefined;
+  const reopened = await mountPanel();
+  await act(async () => reopened.post({ type: 'TARGET_IMPORT_TASKS', tasks: [{ ...tasks[0]!, status: 'interrupted', endedAt: new Date().toISOString() }] }));
+  await act(async () => [...reopened.container.querySelectorAll('button')].find(button => button.textContent === '过程记录')!.click());
+  expect(reopened.container.querySelector('[aria-label="导入过程记录"]')?.textContent).toContain('460 个文件');
+  expect(reopened.container.querySelector('[aria-label="目标工程导入任务"]')?.textContent).toContain('已中断');
+});
 
 /**
  * A native dialog returns nothing until it closes and the first index can run
@@ -78,15 +132,15 @@ it('renders every target-selection phase and keeps a retry beside the failure', 
  */
 it('shows a live index state for a target the host is still indexing', async () => {
   const { container, post } = await mountPanel('migration');
-  expect(container.querySelector('.target-empty-state h1')?.textContent).toContain('选择目标工程');
+  expect(container.querySelector('.project-launch-bar')?.textContent).toContain('请先导入目标代码');
   await act(async () => post({ type: 'CODE_INTELLIGENCE_STATUS', presentation: { status: 'ready', storage: 'seekdb',
     repositories: [{ repositoryId: 'repo-1', displayName: 'engine', role: 'target', analysisStatus: 'indexing',
       activeRevision: null, selectedRevision: null, revisions: [], languages: [], projects: [],
       selectedProjectId: null, summary: { status: 'missing' } }] } }));
-  const empty = container.querySelector('.target-empty-state')!;
-  expect(empty.querySelector('h1')?.textContent).toContain('正在建立项目索引');
+  const empty = container.querySelector('.pipeline-import-feedback')!;
+  expect(empty.textContent).toContain('正在建立项目索引');
   expect(empty.textContent).toContain('engine');
-  expect(empty.querySelector('.is-spinning')).not.toBeNull();
+  expect(container.querySelector('[role="log"]')).toBeNull();
 });
 
 it('settles an import from the durable ready state when the final result message was lost', async () => {

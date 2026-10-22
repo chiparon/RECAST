@@ -136,8 +136,11 @@ performs any local write.
 The workspace workflow takes a development Spec and module evidence Context. The
 production Agent is Codex CLI: it runs in a disposable staging workspace containing
 the target project and a host-created, read-only `history-view` with only the selected
-history module files. Each run has two Codex invocations: an Analyzer in a read-only
-sandbox that returns the validated JSON implementation plan, followed by a Translator
+history module files. The extension host bounds that evidence view to at most sixteen
+files and about 192 KB of source, while retaining the candidate's first source file for
+verification; omitted files are listed in the read-only manifest. Each run has two Codex
+invocations: an Analyzer in a read-only sandbox that returns the validated JSON
+implementation plan, followed by a Translator
 in a workspace-write sandbox that receives the same plan and may change only `target/`.
 The host applies only the exact `writeFiles` diff, then runs the configured compiler and
 immutable behavior suite. Hidden criteria never enter the Codex staging workspace. Set `ADAPTATION_WORKSPACE_AGENT=legacy` only to use the old
@@ -151,8 +154,15 @@ JSON object with `executable`, `args`, optional workspace-relative `cwd`, and op
 `cargo check`, or a project-specific `javac` argument list. Dependencies must already
 be available. The compiler is launched with an argument array, without a shell. Codex
 is selected with `ADAPTATION_WORKSPACE_AGENT=codex` (the default), optionally
-`ADAPTATION_CODEX_COMMAND` and `ADAPTATION_CODEX_MODEL`. The default Codex budget is
-four invocations; each failed compile may request another repair staging run.
+`ADAPTATION_CODEX_COMMAND`, `ADAPTATION_CODEX_MODEL`, `ADAPTATION_CODEX_BASE_URL`,
+and `ADAPTATION_CODEX_HOME`. Codex translation defaults to `deepseek-v4-pro` and,
+when no home is supplied, the backend creates a temporary `CODEX_HOME` containing
+the backend's `DEEPSEEK_API_KEY` and removes it at shutdown. This means the
+experiment does not read the user's interactive Codex provider or model. Set
+`ADAPTATION_CODEX_HOME` only when it already contains a deliberate DeepSeek
+configuration. The runtime does not read global `CODEX_BIN` or `CODEX_MODEL`.
+The default Codex budget is four invocations; each failed compile may request
+another repair staging run.
 Neither HTTP requests nor model tools select the workspace root or compiler command.
 
 All routes below require `Authorization: Bearer <configured token>`:

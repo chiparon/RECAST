@@ -14,11 +14,13 @@ async function setup(modelKeyRefusal: string | undefined, analysisState: 'missin
   const runtime = await createCodeIntelligenceRuntime({ store: new InMemoryIndexStore() });
   const ensure = vi.fn(async () => {});
   const refusals: string[] = [];
+  const analysisErrors = vi.fn();
   const host = new CodeIntelligenceHost({
     runtimeFactory: async () => runtime,
     planProject: async () => { throw new Error('The test must not invoke a model.'); },
     modelKeyRefusal: async () => modelKeyRefusal,
     onModelRefusal: (reason) => { refusals.push(reason); },
+    onProjectAnalysisError: analysisErrors,
     projectAnalysisPort: { ensure, idle: async () => {}, read: async (scope) => ({ ...scope,
       state: analysisState, projection: analysisState === 'ready' ? 'ready' : 'pending',
       analysisProfile: 'code-understanding/v1', updatedAt: '' }) },
@@ -34,16 +36,17 @@ async function setup(modelKeyRefusal: string | undefined, analysisState: 'missin
   const selected = { repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision!,
     projectId: repository.projects[0]!.projectId };
   const dispose = async () => { host.dispose(); await rm(root, { recursive: true, force: true }); };
-  return { host, ensure, refusals, selected, dispose, projects: repository.projects };
+  return { host, ensure, refusals, selected, dispose, projects: repository.projects, analysisErrors };
 }
 
 it('refuses module analysis without a model key while indexing stays usable', async () => {
-  const { host, ensure, refusals, selected, dispose, projects } = await setup(refusal);
+  const { host, ensure, refusals, selected, dispose, projects, analysisErrors } = await setup(refusal);
   try {
     await host.selectProjectForDisplay(selected);
     await host.waitForProjects();
     expect(ensure).not.toHaveBeenCalled();
     expect(refusals).toEqual([refusal]);
+    expect(analysisErrors).toHaveBeenCalledExactlyOnceWith(selected, expect.objectContaining({ message: refusal }));
     // An explicit retry fails loudly instead of being swallowed by the background log.
     await expect(host.retryProject(selected, true)).rejects.toThrow('API Key');
     await host.waitForProjects();

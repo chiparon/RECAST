@@ -1,10 +1,19 @@
 package com.example.assetupgrade.error;
 
+import com.example.assetupgrade.common.ProblemCode;
+
 /**
- * Skeleton seam for ConflictException.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Typed failure for the ConflictException condition, classified as {@link ProblemCode#CONFLICT}.
  */
-public class ConflictException extends RuntimeException {
-    public ConflictException(String message) { super(message); }
+public class ConflictException extends AssetUpgradeException {
+
+    private static final long serialVersionUID = 1L;
+
+    public ConflictException(String message) {
+        super(ProblemCode.CONFLICT, message);
+    }
+
+    public ConflictException(String message, Throwable cause) {
+        super(ProblemCode.CONFLICT, message, cause);
+    }
 }

@@ -26,6 +26,8 @@ export interface AdaptationServiceConfig {
     timeoutMs: number;
     codexCommand?: string;
     codexModel?: string;
+    codexHome?: string;
+    codexBaseUrl?: string;
   };
   /**
    * Optional host-owned read-only semantic-query endpoint for revision-scoped
@@ -120,7 +122,9 @@ function loadWorkspaceTranslationConfig(env: NodeJS.ProcessEnv): NonNullable<Ada
     maxModelTurns: positiveInteger(env.ADAPTATION_WORKSPACE_MAX_TURNS, agent === 'codex' ? 4 : 80, "ADAPTATION_WORKSPACE_MAX_TURNS"),
     timeoutMs: positiveInteger(env.ADAPTATION_WORKSPACE_TIMEOUT_MS, 1_800_000, "ADAPTATION_WORKSPACE_TIMEOUT_MS"),
     ...(env.ADAPTATION_CODEX_COMMAND?.trim() ? { codexCommand: env.ADAPTATION_CODEX_COMMAND.trim() } : {}),
-    ...(env.ADAPTATION_CODEX_MODEL?.trim() ? { codexModel: env.ADAPTATION_CODEX_MODEL.trim() } : {}),
+    ...(agent === 'codex' ? { codexModel: env.ADAPTATION_CODEX_MODEL?.trim() || 'deepseek-v4-pro' } : {}),
+    ...(env.ADAPTATION_CODEX_HOME?.trim() ? { codexHome: env.ADAPTATION_CODEX_HOME.trim() } : {}),
+    ...(env.ADAPTATION_CODEX_BASE_URL?.trim() ? { codexBaseUrl: env.ADAPTATION_CODEX_BASE_URL.trim() } : {}),
   };
 }
 

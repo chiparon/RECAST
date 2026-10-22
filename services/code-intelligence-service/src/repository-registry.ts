@@ -47,6 +47,26 @@ function normalizeComparisonPath(value: string): string {
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
+/**
+ * A shared SeekDB can be opened from Windows and WSL. Compare the two lexical
+ * spellings as aliases while leaving the persisted host-local path untouched.
+ */
+function comparisonPathKeys(value: string): string[] {
+  const normalized = value.replaceAll('\\', '/').replace(/\/+/g, '/').replace(/\/$/, '');
+  const keys = new Set([normalized || '/']);
+  const drive = /^([a-z]):\/(.*)$/i.exec(normalized);
+  if (drive) keys.add(`/mnt/${drive[1]}/${drive[2]}`);
+  const mounted = /^\/mnt\/([a-z])\/(.*)$/i.exec(normalized);
+  if (mounted) keys.add(`${mounted[1]}:/${mounted[2]}`);
+  return [...keys].map((key) => /^[a-z]:\//i.test(key) || /^\/mnt\/[a-z]\//i.test(key)
+    ? key.toLowerCase() : key);
+}
+
+function sameComparisonPath(left: string, right: string): boolean {
+  const rightKeys = new Set(comparisonPathKeys(right));
+  return comparisonPathKeys(left).some((key) => rightKeys.has(key));
+}
+
 function defaultDisplayName(localPath: string): string {
   return path.basename(localPath) || 'repository';
 }
@@ -83,9 +103,7 @@ export class RepositoryRegistry {
     }
 
     const existing = await this.store.listRepositories();
-    const samePath = existing.find((repository) =>
-      normalizeComparisonPath(repository.localPath) === normalizeComparisonPath(localPath),
-    );
+    const samePath = existing.find((repository) => sameComparisonPath(repository.localPath, localPath));
     if (samePath) {
       if (requestedId && requestedId !== samePath.repositoryId) {
         throw new Error('The local path is already registered under a different repositoryId.');
@@ -162,5 +180,7 @@ export class RepositoryRegistry {
 export const repositoryRegistryInternals = {
   defaultDisplayName,
   normalizeComparisonPath,
+  comparisonPathKeys,
+  sameComparisonPath,
   resolveDirectory,
 };

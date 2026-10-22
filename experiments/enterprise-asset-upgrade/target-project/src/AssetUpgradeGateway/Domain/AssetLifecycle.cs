@@ -53,9 +53,15 @@ public sealed record AssetDescriptor
     public string ExternalKey { get; init; }
     public IReadOnlyDictionary<string, string> Tags { get; init; }
 
-    public bool HasTag(string key) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public bool HasTag(string key) => Tags.ContainsKey(key);
     public AssetDescriptor WithTag(string key, string value)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        var merged = new Dictionary<string, string>(Tags, StringComparer.Ordinal)
+        {
+            [key] = value,
+        };
+        return new AssetDescriptor(AssetId, TenantId, Kind, ExternalKey, merged);
+    }
 }
 
 public sealed record AttachmentMetadata(
@@ -70,15 +76,45 @@ public sealed record AttachmentMetadata(
     DateTimeOffset? ScannedAt,
     string? RejectionReason)
 {
-    public bool IsTerminal => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public bool IsTerminal
+        => InspectionState is AttachmentInspectionState.Rejected or AttachmentInspectionState.Released;
 
-    public bool IsUsable => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public bool IsUsable
+        => InspectionState is AttachmentInspectionState.Clean or AttachmentInspectionState.Released;
 
-    public AttachmentMetadata Quarantine() { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public AttachmentMetadata BeginScan(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public AttachmentMetadata MarkClean(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public AttachmentMetadata Reject(string reason) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public AttachmentMetadata Release() { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public AttachmentMetadata Quarantine()
+        => IsTerminal
+            ? this
+            : this with { InspectionState = AttachmentInspectionState.Quarantined };
+
+    public AttachmentMetadata BeginScan(DateTimeOffset now)
+        => IsTerminal || InspectionState == AttachmentInspectionState.Scanning
+            ? this
+            : this with { InspectionState = AttachmentInspectionState.Scanning };
+
+    public AttachmentMetadata MarkClean(DateTimeOffset now)
+        => IsTerminal
+            ? this
+            : this with
+            {
+                InspectionState = AttachmentInspectionState.Clean,
+                ScannedAt = now,
+                RejectionReason = null,
+            };
+
+    public AttachmentMetadata Reject(string reason)
+        => IsTerminal
+            ? this
+            : this with
+            {
+                InspectionState = AttachmentInspectionState.Rejected,
+                RejectionReason = reason,
+            };
+
+    public AttachmentMetadata Release()
+        => InspectionState == AttachmentInspectionState.Clean
+            ? this with { InspectionState = AttachmentInspectionState.Released }
+            : this;
 }
 
 public sealed record ContentSignature(
@@ -88,7 +124,75 @@ public sealed record ContentSignature(
     bool IsText)
 {
     public bool Matches(ReadOnlySpan<byte> content)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        if (Prefix.Count == 0)
+        {
+            return true;
+        }
+
+        if (content.Length < Prefix.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < Prefix.Count; index++)
+        {
+            if (content[index] != Prefix[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Extension allow-list check. An empty allow list accepts any extension so
+    /// callers can opt into per-media-type restrictions without breaking the
+    /// default signature.
+    /// </summary>
+    public bool AllowsExtension(string? fileName)
+    {
+        if (AllowedExtensions.Count == 0)
+        {
+            return true;
+        }
+
+        var extension = GetExtension(fileName).TrimStart('.');
+        if (extension.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (var allowed in AllowedExtensions)
+        {
+            var normalized = (allowed ?? string.Empty).TrimStart('.');
+            if (normalized.Length > 0
+                && string.Equals(normalized, extension, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Combines the extension allow-list with the byte-prefix signature so an
+    /// unsafe file name or mismatched payload keeps the attachment quarantined.
+    /// </summary>
+    public bool Matches(string? fileName, ReadOnlySpan<byte> content)
+        => AllowsExtension(fileName) && Matches(content);
+
+    private static string GetExtension(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return string.Empty;
+        }
+
+        return Path.GetExtension(fileName) ?? string.Empty;
+    }
 }
 
 public sealed record TenantScope(
@@ -98,11 +202,30 @@ public sealed record TenantScope(
     IReadOnlySet<string> Permissions,
     DateTimeOffset ExpiresAt)
 {
-    public bool IsExpired(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public bool HasRole(string role) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public bool Can(string permission) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public bool IsExpired(DateTimeOffset now) => now >= ExpiresAt;
+    public bool HasRole(string role) => Roles.Contains(role);
+    public bool Can(string permission) => Permissions.Contains(permission);
     public TenantScope RequireTenant(string tenantId)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        if (!string.Equals(TenantId, tenantId, StringComparison.Ordinal))
+        {
+            throw new UnauthorizedAccessException(
+                $"Tenant scope for '{TenantId}' cannot be used for tenant '{tenantId}'.");
+        }
+
+        return this;
+    }
+
+    public TenantScope RequireTenant(string tenantId, DateTimeOffset now)
+    {
+        if (IsExpired(now))
+        {
+            throw new UnauthorizedAccessException(
+                $"Tenant scope for '{TenantId}' expired at {ExpiresAt:O}.");
+        }
+
+        return RequireTenant(tenantId);
+    }
 }
 
 public sealed class AssetAggregate
@@ -116,16 +239,92 @@ public sealed class AssetAggregate
     }
     public AssetDescriptor Descriptor { get; private set; }
 
-    public IReadOnlyList<AttachmentMetadata> Attachments => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public IReadOnlyList<AttachmentMetadata> Attachments => attachments;
 
-    public IReadOnlyList<AssetEvent> Events => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public IReadOnlyList<AssetEvent> Events => events;
 
+    /// <summary>
+    /// Idempotent by <see cref="AttachmentMetadata.AttachmentId"/>: repeated
+    /// submission of the same attachment refreshes the existing entry in place
+    /// instead of appending a duplicate row, so intake stays auditable.
+    /// </summary>
     public void AddAttachment(AttachmentMetadata attachment)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        ArgumentNullException.ThrowIfNull(attachment);
+
+        var index = attachments.FindIndex(
+            existing => string.Equals(existing.AttachmentId, attachment.AttachmentId, StringComparison.Ordinal));
+
+        if (index >= 0)
+        {
+            attachments[index] = attachment;
+        }
+        else
+        {
+            attachments.Add(attachment);
+        }
+    }
+
+    /// <summary>
+    /// Idempotent by <see cref="AssetEvent.EventId"/>: a replayed event updates
+    /// the recorded event in place so the same logical event is never recorded
+    /// twice.
+    /// </summary>
     public void RecordEvent(AssetEvent assetEvent)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        ArgumentNullException.ThrowIfNull(assetEvent);
+
+        var index = events.FindIndex(
+            existing => string.Equals(existing.EventId, assetEvent.EventId, StringComparison.Ordinal));
+
+        if (index >= 0)
+        {
+            events[index] = assetEvent;
+        }
+        else
+        {
+            events.Add(assetEvent);
+        }
+    }
+
+    /// <summary>
+    /// Advances the matching recorded event to <see cref="WorkflowState.Completed"/>
+    /// exactly once. Events that are unknown or already terminal are left
+    /// untouched so a successful retry cannot advance the workflow twice.
+    /// </summary>
+    public void MarkDelivered(string eventId, DateTimeOffset now)
+    {
+        if (string.IsNullOrEmpty(eventId))
+        {
+            return;
+        }
+
+        var index = events.FindIndex(
+            existing => string.Equals(existing.EventId, eventId, StringComparison.Ordinal));
+
+        if (index < 0)
+        {
+            return;
+        }
+
+        var current = events[index];
+        if (current.State.IsTerminal())
+        {
+            return;
+        }
+
+        events[index] = current.WithState(WorkflowState.Completed);
+    }
+
     public void RenameExternalKey(string externalKey)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        Descriptor = new AssetDescriptor(
+            Descriptor.AssetId,
+            Descriptor.TenantId,
+            Descriptor.Kind,
+            externalKey,
+            Descriptor.Tags);
+    }
 }
 
 public sealed record EventEnvelope(
@@ -141,12 +340,31 @@ public sealed record EventEnvelope(
     public EventEnvelope(AssetEvent assetEvent, string correlationId)
         : this(assetEvent, correlationId, string.Empty, 0, default, default, null, new Dictionary<string, string>())
     {
-        throw new NotImplementedException("Implementation belongs to the evaluated Agent.");
     }
-    public EventEnvelope NextAttempt(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public EventEnvelope MarkDelivered(DateTimeOffset now) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public EventEnvelope NextAttempt(DateTimeOffset now)
+        => Stage.IsTerminal()
+            ? this
+            : this with
+            {
+                DeliveryAttempt = DeliveryAttempt + 1,
+                Stage = EventProcessingStage.RetryScheduled,
+            };
+    public EventEnvelope MarkDelivered(DateTimeOffset now)
+        => Stage.IsTerminal()
+            ? this
+            : this with
+            {
+                Stage = EventProcessingStage.Delivered,
+                DeliveredAt = now,
+            };
     public EventEnvelope WithHeader(string name, string value)
-    { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    {
+        var merged = new Dictionary<string, string>(Headers, StringComparer.Ordinal)
+        {
+            [name] = value,
+        };
+        return this with { Headers = merged };
+    }
 }
 
 public sealed record AssetPage<T>(
@@ -155,5 +373,5 @@ public sealed record AssetPage<T>(
     int TotalCount,
     bool HasMore)
 {
-    public static AssetPage<T> Empty => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public static AssetPage<T> Empty => new(Array.Empty<T>(), null, 0, false);
 }

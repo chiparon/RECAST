@@ -1,0 +1,30 @@
+{
+  "caseId": "case-013",
+  "source": {
+    "repository": "apscheduler",
+    "repositoryId": "repo-1a2694de-fbac-4801-a032-d196819db437",
+    "revision": "analysis-0e954a02-c771-4e71-b6a7-45395b3c61e2",
+    "projectId": "project-1133a0288d95fd93d6132ebf",
+    "artifactId": "project-summary:project-1133a0288d95fd93d6132ebf:code-understanding/v1",
+    "planHash": "sha256:6a7e716e5c034d5df532ed63a1f052ec013fef9f78b27a0dc39a34e75ee50e7c",
+    "analysisHash": "a278d5871fba78f9be6dc4bc59f68289a229b11e0dc387cd2fa95665f862b1bb",
+    "moduleId": "module-executors"
+  },
+  "excerpts": [
+    {
+      "path": "src/apscheduler/executors/async_.py",
+      "excerpt": "from __future__ import annotations\n\nfrom collections.abc import Callable\nfrom inspect import isawaitable\nfrom typing import Any\n\nfrom .._structures import Job\nfrom ..abc import JobExecutor\n\n\nclass AsyncJobExecutor(JobExecutor):\n    \"\"\"\n    Executes functions directly on the event loop thread.\n\n    If the function returns a coroutine object (or another kind of awaitable), that is\n    awaited on and its return value is used as the job's return value.\n    \"\"\"\n\n    async def run_job(self, func: Callable[..., Any], job: Job) -> Any:\n        retval = func(*job.args, **job.kwargs)\n        if isawaitable(retval):\n            retval = await retval\n\n        return retval\n",
+      "truncated": false
+    },
+    {
+      "path": "src/apscheduler/executors/thread.py",
+      "excerpt": "from __future__ import annotations\n\nfrom collections.abc import Callable\nfrom contextlib import AsyncExitStack\nfrom functools import partial\nfrom typing import Any\n\nimport attrs\nfrom anyio import CapacityLimiter, to_thread\n\nfrom .._structures import Job\nfrom ..abc import JobExecutor\n\n\n@attrs.define(eq=False, kw_only=True)\nclass ThreadPoolJobExecutor(JobExecutor):\n    \"\"\"\n    Executes functions in a thread pool.\n\n    :param max_workers: the maximum number of worker threads to keep\n    \"\"\"\n\n    max_workers: int = 40\n    _limiter: CapacityLimiter = attrs.field(init=False)\n\n    async def start(self, exit_stack: AsyncExitStack) -> None:\n        self._limiter = CapacityLimiter(self.max_workers)\n\n    async def run_job(self, func: Callable[..., Any], job: Job) -> Any:\n        wrapped = partial(func, *job.args, **job.kwargs)\n        return await to_thread.run_sync(wrapped, limiter=self._limiter)\n",
+      "truncated": false
+    },
+    {
+      "path": "src/apscheduler/executors/subprocess.py",
+      "excerpt": "from __future__ import annotations\n\nfrom collections.abc import Callable\nfrom contextlib import AsyncExitStack\nfrom functools import partial\nfrom typing import Any\n\nimport attrs\nfrom anyio import CapacityLimiter, to_process\n\nfrom .._structures import Job\nfrom ..abc import JobExecutor\n\n\n@attrs.define(eq=False, kw_only=True)\nclass ProcessPoolJobExecutor(JobExecutor):\n    \"\"\"\n    Executes functions in a process pool.\n\n    :param max_workers: the maximum number of worker processes to keep\n    \"\"\"\n\n    max_workers: int = 40\n    _limiter: CapacityLimiter = attrs.field(init=False)\n\n    async def start(self, exit_stack: AsyncExitStack) -> None:\n        self._limiter = CapacityLimiter(self.max_workers)\n\n    async def run_job(self, func: Callable[..., Any], job: Job) -> Any:\n        wrapped = partial(func, *job.args, **job.kwargs)\n        return await to_process.run_sync(\n            wrapped, cancellable=True, limiter=self._limiter\n        )\n",
+      "truncated": false
+    }
+  ]
+}

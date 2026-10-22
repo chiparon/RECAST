@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createAgentHost } from "./runtime.js";
 import { createTranslationVerifierModelClient } from "./model-client.js";
 import type { AgentCompletion, AgentMessage, AgentModelClient } from "./model.js";
@@ -76,6 +79,44 @@ function clientFor(
 }
 
 describe("AgentHost runtime", () => {
+  it("bounds model diagnostics while preserving the complete Host trace and test facts", async () => {
+    const output = { status: "success", tests: { executed: 23, passed: 23, failed: 0, skipped: 0 },
+      stdout: `BEGIN ${"x".repeat(200_000)} END`, stderr: "y".repeat(100_000),
+      failures: [{ message: "z".repeat(200_000) }] };
+    const events: AgentTraceEvent[] = [], observed: AgentMessage[][] = [];
+    const host = createAgentHost({ resolveToolContext, traceLogger: event => events.push(event),
+      limits: { maxContextCharacters: 40_000 },
+      modelClient: clientFor([
+        { toolCalls: [{ id: "run", name: "run_function_group_tests", arguments: "{}" }] },
+        { toolCalls: [{ id: "finish", name: "finish", arguments: "{}" }] },
+      ], observed) });
+    await host.run(task([tool("run_function_group_tests", async () => output), tool("finish", async () => ({ status: "success" }))]));
+    const response = observed[1]!.find(message => message.role === "tool")!;
+    const visible = JSON.parse(response.content);
+    expect(visible.tests).toEqual(output.tests);
+    expect(visible.stdout).toContain("BEGIN");
+    expect(visible.stdout).toContain("END");
+    expect(response.content.length).toBeLessThan(20_000);
+    expect(events.find(event => event.event === "tool.completed" && event.toolName === "run_function_group_tests")?.output).toEqual(output);
+  });
+  it.each([false, true])("cleans a Host-created C# harness after a run (failure=%s)", async (fail) => {
+    const root = await mkdtemp(join(tmpdir(), "verifier-host-cleanup-"));
+    try {
+      await writeFile(join(root, "Product.csproj"), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>');
+      const host = createAgentHost({
+        modelClient: { complete: async () => {
+          expect((await readdir(join(root, ".translation-verifier-tests"))).length).toBe(1);
+          if (fail) throw new Error("model unavailable");
+          return { toolCalls: [{ id: "finish", name: "finish", arguments: "{}" }] };
+        } },
+      });
+      const input = { ...task([tool("finish", async () => ({ status: "success" }))]),
+        taskContext: { ...taskContext, targetLanguage: "C#", targetProjectPath: root } };
+      if (fail) await expect(host.run(input)).rejects.toThrow("model unavailable");
+      else await expect(host.run(input)).resolves.toEqual({ status: "success" });
+      expect(await readdir(root)).toEqual(["Product.csproj"]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("executes tool calls and returns a terminal tool result", async () => {
     const observed: AgentMessage[][] = [];
     const client = clientFor(
@@ -412,7 +453,7 @@ describe("AgentHost runtime", () => {
     expect(modelCalls).toBe(1);
   });
 
-  it("rejects a terminal tool combined with another call", async () => {
+  it("recovers when a terminal tool is combined with another call", async () => {
     const client = clientFor([
       {
         toolCalls: [
@@ -420,19 +461,16 @@ describe("AgentHost runtime", () => {
           { id: "call-2", name: "finish", arguments: "{}" },
         ],
       },
+      { toolCalls: [{ id: "call-3", name: "finish", arguments: "{}" }] },
     ]);
     const host = createAgentHost({
       modelClient: client,
       resolveToolContext,
     });
 
-    await expect(
-      host.run(
-        task([
-          tool("inspect", async () => ({})),
-          tool("finish", async () => ({})),
-        ]),
-      ),
-    ).rejects.toThrow("terminal tool must be the only call");
+    await expect(host.run(task([
+      tool("inspect", async () => { throw new Error("must not execute"); }),
+      tool("finish", async () => ({ status: "success" })),
+    ]))).resolves.toEqual({ status: "success" });
   });
 });

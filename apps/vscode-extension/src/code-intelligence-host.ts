@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 import path from 'node:path';
@@ -27,14 +27,97 @@ import type {
   CodeIntelligenceSummaryPresentation,
 } from './ui-types';
 import { projectAnalysisPresentation } from './project-analysis-presentation';
-import { MAX_RETRIEVAL_SCOPES, type WorkspaceEvidenceScope, type WorkspaceHistoryView } from '@forexplore/contracts';
+import { MAX_RETRIEVAL_SCOPES, MAX_SELECTED_HISTORY_MODULES, type WorkspaceEvidenceScope, type WorkspaceHistoryCandidate, type WorkspaceHistoryView } from '@forexplore/contracts';
 import type { ModuleReranker } from '../../../services/code-intelligence-service/src/module-reranker';
-import { platformLocalPath } from '../../../services/code-intelligence-service/src/platform-path';
+import { platformLocalPath, repositoryPathIdentity } from '../../../services/code-intelligence-service/src/platform-path';
 import { createIndexingProgressReporter, indexingProgressMessage, isIndexingCancellation,
   type IndexingProgress, type RepositoryIndexingProgress } from './indexing-progress';
 
+/**
+ * A history-view is evidence for one module, not a checkout of the whole
+ * historical subsystem. Keep the view small enough that an Analyzer cannot
+ * accidentally spend its entire context on a bulk `cat` command. The first
+ * source file is retained when it fits the byte budget; oversized entry files
+ * must not defeat that budget.
+ */
+export const HISTORY_VIEW_MAX_FILES = 8;
+// This limits materialized observations, not automatic prompt injection. Allow
+// a normal implementation file with its contracts; the Analyzer still reads a
+// focused sample instead of loading every available source into its context.
+export const HISTORY_VIEW_MAX_BYTES = 256_000;
+
+export interface HistoryModuleSelection {
+  repositoryId: RepositoryId;
+  analysisRevision: string;
+  projectId?: ProjectId;
+  moduleId: string;
+  sourceFiles: readonly string[];
+  preferredFiles?: readonly string[];
+  relevanceTerms?: readonly string[];
+  name?: string;
+  language?: string;
+}
+
+const historyPathStopWords = new Set(['src', 'main', 'test', 'tests', 'java', 'csharp', 'cs', 'com', 'org', 'net', 'example']);
+
+function historyTokens(value: string): string[] {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length >= 3 && !historyPathStopWords.has(token));
+}
+
+function historyFileRelevance(file: string, terms: readonly string[]): number {
+  const normalized = file.toLowerCase();
+  // Score the basename rather than the whole path. A module-level directory
+  // term (for example `Nop.Core.Infrastructure`) is shared by every file and
+  // must not make all candidates tie before the size fallback is applied.
+  const basename = normalized.split('/').at(-1) ?? normalized;
+  const compactPath = basename.replace(/[^a-z0-9]+/g, '');
+  const fileTokens = new Set(historyTokens(basename));
+  let score = 0;
+  for (const term of terms) {
+    const compactTerm = term.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (compactTerm.length >= 4 && compactPath.includes(compactTerm)) score += 10;
+    const tokens = historyTokens(term);
+    if (!tokens.length) continue;
+    const matches = tokens.filter((token) => fileTokens.has(token)).length;
+    score += matches / tokens.length;
+  }
+  return score;
+}
+
+export function boundHistoryViewFiles(
+  files: readonly string[],
+  sizes: ReadonlyMap<string, number>,
+  maxFiles = HISTORY_VIEW_MAX_FILES,
+  maxBytes = HISTORY_VIEW_MAX_BYTES,
+  relevanceTerms: readonly string[] = [],
+): string[] {
+  const unique = [...new Set(files)];
+  if (!unique.length) return [];
+  const firstSize = Math.max(0, sizes.get(unique[0]!) ?? 0);
+  const selected: string[] = firstSize <= maxBytes ? [unique[0]!] : [];
+  let bytes = selected.length ? firstSize : 0;
+  const ranked = unique.slice(1).map((file, index) => ({ file, index, score: historyFileRelevance(file, relevanceTerms), size: Math.max(0, sizes.get(file) ?? 0) }));
+  if (ranked.some((item) => item.score > 0)) {
+    ranked.sort((left, right) => right.score - left.score || left.index - right.index);
+  }
+  for (const { file, size } of ranked) {
+    if (selected.length >= maxFiles) break;
+    if (bytes + size > maxBytes) continue;
+    selected.push(file);
+    bytes += size;
+  }
+  return selected;
+}
+
 /** Local-only SeekDB configuration; credentials never cross a UI boundary. */
 export interface SeekDbRuntimeConfig {
+  initialization?: { onProgress?: (progress: {
+    stage: 'waiting' | 'initializing' | 'migrating' | 'ready'; message: string; migration?: number;
+  }) => void; timeoutMs?: number };
   host: string;
   port: number;
   user: string;
@@ -123,7 +206,7 @@ export interface CodeIntelligenceRuntime {
       requirement: string;
       topK: number;
       repositoryIds: readonly RepositoryId[];
-    }, signal?: AbortSignal): Promise<SearchCandidate[]>;
+    }, signal?: AbortSignal, reranker?: ModuleReranker): Promise<SearchCandidate[]>;
   };
   close(): Promise<void>;
 }
@@ -133,6 +216,7 @@ interface CodeIntelligenceServiceModule {
     store: HostIndexStore;
     plan?(scope: ProjectAnalysisScope & { objective: string }): Promise<ProjectAnalysisResult>;
     hierarchyPlanner?: ModuleHierarchyPlanner;
+    allowLargeAgentPlan?: boolean;
     onChange?(): void;
   }) => ProjectAnalysisPort;
   createCodeIntelligenceRuntime(
@@ -176,9 +260,13 @@ export type CodeIntelligenceRuntimeFactory = (
 
 export interface CodeIntelligenceHostOptions {
   projectAnalysisPort?: ProjectAnalysisPort;
+  /** The host supplied a bounded complete plan and it may cover a large repository. */
+  allowLargeAgentPlan?: boolean;
   planProject?: (scope: ProjectAnalysisScope & { objective: string }) => Promise<ProjectAnalysisResult>;
   hierarchyPlanner?: ModuleHierarchyPlanner;
   onChange?: () => void;
+  /** Import journals must receive failures that otherwise only reached the output log. */
+  onProjectAnalysisError?: (scope: ProjectAnalysisScope, error: unknown) => void;
   /**
    * Module analysis calls a model, so the trusted host refuses it while this
    * returns a reason (e.g. no API Key in the settings). Indexing, symbols and
@@ -195,6 +283,8 @@ export interface CodeIntelligenceHostOptions {
   runtimeOptions?: CreateCodeIntelligenceRuntimeOptions;
   runtimeFactory?: CodeIntelligenceRuntimeFactory;
   identityStore?: RepositoryIdentityStore;
+  /** Initial project choices for a read-only preloaded workbench. */
+  initialSelectedProjects?: ReadonlyMap<RepositoryId, ProjectId>;
   output?: { appendLine(value: string): void };
   storageKind?: 'seekdb' | 'memory';
   now?: () => string;
@@ -214,6 +304,8 @@ export interface CodeIntelligenceRepositoryInput {
   localPath: string;
   displayName?: string;
   role: RepositoryRole;
+  /** Preloaded windows may remap a persisted path across Windows and WSL. */
+  repositoryId?: RepositoryId;
 }
 
 export interface SynchronizeCodeIntelligenceRequest {
@@ -229,6 +321,14 @@ export interface SynchronizeCodeIntelligenceRequest {
   forceFull?: boolean;
   /** Registration-only requests are useful for a lightweight status refresh. */
   scan?: boolean;
+  /** Resume project modelling from existing indexes, even when scanning is disabled or restricted by role. */
+  resumeProjectAnalysis?: boolean;
+  /**
+   * A prebuilt corpus can contain a stale registry "indexing" flag while its
+   * active immutable revision is already ready. Repair that presentation-only
+   * lifecycle flag during registration without crawling source files.
+   */
+  repairStaleIndexing?: boolean;
 }
 
 export interface CodeIntelligenceSynchronizationResult {
@@ -279,9 +379,7 @@ function defaultRuntimeFactory(
 }
 
 function stableIdentityKey(localPath: string): string {
-  const normalized = process.platform === 'win32'
-    ? path.resolve(localPath).toLowerCase()
-    : path.resolve(localPath);
+  const normalized = repositoryPathIdentity(path.resolve(platformLocalPath(localPath)));
   const digest = createHash('sha256').update(normalized).digest('hex');
   return `${identityKeyPrefix}:${digest}`;
 }
@@ -326,6 +424,17 @@ async function safeHistoryFile(root: string, relative: string): Promise<string> 
     throw new Error(`历史候选文件越界：${relative}`);
   }
   return candidate;
+}
+
+async function removeHistoryView(root: string): Promise<void> {
+  async function makeWritable(directory: string): Promise<void> {
+    await chmod(directory, 0o700);
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) await makeWritable(path.join(directory, entry.name));
+    }
+  }
+  await makeWritable(root).catch(() => undefined);
+  await rm(root, { recursive: true, force: true });
 }
 
 async function chmodReadonlyTree(root: string): Promise<void> {
@@ -431,11 +540,14 @@ export class CodeIntelligenceHost {
   #projectAnalysis?: ProjectAnalysisPort;
   #planProject?: CodeIntelligenceHostOptions['planProject'];
   #hierarchyPlanner?: ModuleHierarchyPlanner;
+  #allowLargeAgentPlan: boolean;
   #onChange?: () => void;
   #modelKeyRefusal?: CodeIntelligenceHostOptions['modelKeyRefusal'];
   #onModelRefusal?: CodeIntelligenceHostOptions['onModelRefusal'];
   #syncQueue: Promise<unknown> = Promise.resolve();
   #selectedTarget?: RepositoryId;
+  /** Local view override for legacy rows whose active revision is already ready. */
+  #readOnlyReadyRevisions = new Map<RepositoryId, string>();
   #selectionSequence = 0;
   readonly #runtimeFactory: CodeIntelligenceRuntimeFactory;
   readonly #runtimeOptions: CreateCodeIntelligenceRuntimeOptions;
@@ -450,6 +562,10 @@ export class CodeIntelligenceHost {
   #ephemeralRepositoryIds = new Map<string, RepositoryId>();
   /** Repository visibility belongs to one VS Code window, not the shared persistent registry. */
   #visibleRepositoryIds = new Set<RepositoryId>();
+  #indexingProgress = new Map<RepositoryId, NonNullable<CodeIntelligenceRepositoryPresentation['indexing']>>();
+  #projectTasks = new Set<Promise<void>>();
+  readonly #onProjectAnalysisError?: CodeIntelligenceHostOptions['onProjectAnalysisError'];
+  #lastPresentation: CodeIntelligencePresentation | undefined;
   /** Per-panel-host display choice only; never persisted as repository state. */
   #selectedRevisions = new Map<RepositoryId, string>();
   /**
@@ -468,12 +584,17 @@ export class CodeIntelligenceHost {
     this.#projectAnalysis = options.projectAnalysisPort;
     this.#planProject = options.planProject;
     this.#hierarchyPlanner = options.hierarchyPlanner;
+    this.#allowLargeAgentPlan = options.allowLargeAgentPlan === true;
     this.#onChange = options.onChange;
+    this.#onProjectAnalysisError = options.onProjectAnalysisError;
     this.#modelKeyRefusal = options.modelKeyRefusal;
     this.#onModelRefusal = options.onModelRefusal;
     this.#runtimeFactory = options.runtimeFactory ?? defaultRuntimeFactory;
     this.#runtimeOptions = options.runtimeOptions ?? {};
     this.#identityStore = options.identityStore;
+    for (const [repositoryId, projectId] of options.initialSelectedProjects ?? []) {
+      this.#selectedProjects.set(repositoryId, projectId);
+    }
     this.#output = options.output;
     this.#storageKind = options.storageKind ?? (options.runtimeOptions?.seekdb ? 'seekdb' : 'memory');
     this.#now = options.now ?? (() => new Date().toISOString());
@@ -555,6 +676,18 @@ export class CodeIntelligenceHost {
     return this.#semanticQueryEndpoint;
   }
 
+  /** Host-only identity lookup; does not create an identity or require a finished index. */
+  async registeredRepositoryIdForPath(localPath: string): Promise<RepositoryId | null> {
+    const repositoryId = await this.existingRepositoryIdFor(localPath);
+    return repositoryId && this.#visibleRepositoryIds.has(repositoryId) ? repositoryId : null;
+  }
+
+  async sourceRootForRepository(repositoryId: RepositoryId): Promise<string> {
+    const repository = await (await this.runtime()).registry.get(repositoryId);
+    if (!this.#visibleRepositoryIds.has(repositoryId) || repository?.role !== 'target') throw new Error('目标工程不在当前工作区范围。');
+    return realpath(platformLocalPath(repository.localPath));
+  }
+
   /** Resolves a registered local root to the active revision without exposing the root. */
   async activeScopeForPath(localPath: string): Promise<RepositoryRevisionScope> {
     const runtime = await this.runtime();
@@ -579,7 +712,7 @@ export class CodeIntelligenceHost {
     target: ModuleTarget;
     requirement: string;
     topK: number;
-  }, signal?: AbortSignal): Promise<SearchCandidate[]> {
+  }, signal?: AbortSignal, reranker?: ModuleReranker): Promise<SearchCandidate[]> {
     const runtime = await this.runtime();
     const targetScope = request.target.module;
     if (targetScope?.repositoryId && targetScope.analysisRevision) {
@@ -594,16 +727,21 @@ export class CodeIntelligenceHost {
     const repositoryIds = (await runtime.registry.list?.() ?? [])
       .filter((repository) => repository.role === 'history' && this.#visibleRepositoryIds.has(repository.repositoryId))
       .map((repository) => repository.repositoryId);
-    return runtime.moduleImplementationSearch.search({ ...request, repositoryIds }, signal);
+    return reranker ? runtime.moduleImplementationSearch.search({ ...request, repositoryIds }, signal, reranker)
+      : runtime.moduleImplementationSearch.search({ ...request, repositoryIds }, signal);
   }
 
-  async historyEvidenceScopes(selected: RepositoryRevisionScope): Promise<WorkspaceEvidenceScope[]> {
+  async historyEvidenceScopes(selected: RepositoryRevisionScope & { projectId?: ProjectId }): Promise<WorkspaceEvidenceScope[]> {
     const runtime = await this.runtime();
     if (!selected || !this.#visibleRepositoryIds.has(selected.repositoryId)) throw new Error('候选仓库不在当前窗口的参考范围。');
     const repository = await runtime.registry.get(selected.repositoryId);
     const revision = await runtime.store.getRevision(selected);
     if (repository?.role !== 'history' || !revision || !['ready', 'superseded'].includes(revision.status)) throw new Error('历史候选版本已不可查询，请重新检索。');
-    const scopes: WorkspaceEvidenceScope[] = [{ repositoryId: selected.repositoryId, analysisRevision: selected.analysisRevision }];
+    const scopes: WorkspaceEvidenceScope[] = [{
+      repositoryId: selected.repositoryId,
+      analysisRevision: selected.analysisRevision,
+      ...(selected.projectId ? { projectId: selected.projectId } : {}),
+    }];
     for (const reference of await runtime.registry.list?.() ?? []) {
       if (!this.#visibleRepositoryIds.has(reference.repositoryId) || reference.role !== 'history' ||
           reference.repositoryId === selected.repositoryId) continue;
@@ -617,8 +755,8 @@ export class CodeIntelligenceHost {
   }
 
   /**
-   * Materialize only the selected history module into a temporary, immutable
-   * view.  The returned root is an internal hand-off for the local adaptation
+   * Materialize a bounded, immutable evidence view for the selected history
+   * module.  The returned root is an internal hand-off for the local adaptation
    * service; callers never publish it to the webview or the model.  Every file
    * is checked against the registered history repository before it is copied.
    */
@@ -630,6 +768,10 @@ export class CodeIntelligenceHost {
     projectId?: ProjectId;
     moduleId: string;
     sourceFiles: readonly string[];
+    /** Representative implementation paths selected by module retrieval. */
+    preferredFiles?: readonly string[];
+    /** Target symbols and paths used only to prioritize files in a bounded view. */
+    relevanceTerms?: readonly string[];
   }): Promise<WorkspaceHistoryView> {
     if (!this.#visibleRepositoryIds.has(selected.repositoryId)) {
       throw new Error('候选仓库不在当前窗口的参考范围。');
@@ -646,8 +788,22 @@ export class CodeIntelligenceHost {
     // The row may have been written by a process on the other platform (a WSL run
     // stores /mnt/e/..., a Windows run stores E:\...), so translate before opening it.
     const sourceRoot = await realpath(platformLocalPath(repository.localPath));
-    const files = [...new Set(selected.sourceFiles.map(normalizeHistoryPath))];
-    if (!files.length || files.length > 256 || files.some((file) => !file)) throw new Error('历史候选模块没有有效的源文件清单（最多 256 个文件）。');
+    const inventory = [...new Set(selected.sourceFiles.map(normalizeHistoryPath))];
+    if (!inventory.length || inventory.some((file) => !file)) throw new Error('历史候选模块没有有效的源文件清单。');
+    const preferred = [...new Set((selected.preferredFiles ?? []).map(normalizeHistoryPath))].filter(file => inventory.includes(file));
+    const files = [...preferred, ...inventory.filter(file => !preferred.includes(file))];
+    // Validate and measure every candidate file at the trusted host boundary,
+    // then materialize only a bounded evidence view. Module inventory size is
+    // not the Agent's observation budget: large indexed modules are valid too.
+    const fileSizes = new Map<string, number>();
+    for (const file of files) {
+      const source = await safeHistoryFile(sourceRoot, file);
+      const stat = await lstat(source);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`历史候选文件不是普通文件：${file}`);
+      fileSizes.set(file, stat.size);
+    }
+    const viewFiles = boundHistoryViewFiles(files, fileSizes, HISTORY_VIEW_MAX_FILES, HISTORY_VIEW_MAX_BYTES, selected.relevanceTerms ?? []);
+    if (!viewFiles.length) throw new Error('历史候选没有符合历史视图大小预算的 source files。');
     const runId = randomUUID();
     let targetRoot = selected.workspaceRoot?.trim();
     if (!targetRoot && this.#selectedTarget) {
@@ -656,15 +812,13 @@ export class CodeIntelligenceHost {
     }
     const root = targetRoot
       ? path.join(await realpath(platformLocalPath(targetRoot)), '.forexpore', 'history-views', runId)
-      : await mkdtemp(path.join(tmpdir(), 'forexpore-history-view-'));
+      : await mkdtemp(path.join(tmpdir(), 'forexplore-history-view-'));
     await mkdir(path.join(root, 'source'), { recursive: true });
     const generatedAt = new Date().toISOString();
     const manifestEntries: Array<[string, string]> = [];
     try {
-      for (const file of files) {
+      for (const file of viewFiles) {
         const source = await safeHistoryFile(sourceRoot, file);
-        const stat = await lstat(source);
-        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`历史候选文件不是普通文件：${file}`);
         const bytes = await readFile(source);
         const destination = path.join(root, 'source', ...file.split('/'));
         await mkdir(path.dirname(destination), { recursive: true });
@@ -680,6 +834,7 @@ export class CodeIntelligenceHost {
         repositoryId: selected.repositoryId, analysisRevision: selected.analysisRevision,
         projectId: selected.projectId, moduleId: selected.moduleId, runId, generatedAt,
         files: manifestEntries.map(([file, sha256]) => ({ path: file, sha256 })),
+        omittedFiles: files.filter((file) => !viewFiles.includes(file)),
       }, null, 2), { mode: 0o444 });
       await chmodReadonlyTree(path.join(root, 'source'));
       await chmodReadonlyTree(root);
@@ -694,6 +849,72 @@ export class CodeIntelligenceHost {
       throw error;
     }
 }
+
+  /** Merge 1–3 user-selected modules; each retains the existing per-module budget. */
+  async createHistoryModulesView(input: {
+    workspaceRoot?: string;
+    candidates: readonly HistoryModuleSelection[];
+  }): Promise<WorkspaceHistoryView> {
+    if (input.candidates.length < 1 || input.candidates.length > MAX_SELECTED_HISTORY_MODULES ||
+        new Set(input.candidates.map(item => JSON.stringify([item.repositoryId, item.analysisRevision, item.projectId, item.moduleId]))).size !== input.candidates.length) {
+      throw new Error('请选择 1～3 个不同的历史模块。');
+    }
+    // Preserve the established layout for a single selected module.
+    if (input.candidates.length === 1) return this.createHistoryModuleView({ ...input.candidates[0]!, workspaceRoot: input.workspaceRoot });
+    const views: Array<{ selection: HistoryModuleSelection; view: WorkspaceHistoryView; prefix: string }> = [];
+    const skippedCandidates: Array<{ moduleId: string; repositoryId: string; reason: string }> = [];
+    let root: string | undefined;
+    try {
+      for (const [index, selection] of input.candidates.entries()) {
+        try {
+          const view = await this.createHistoryModuleView({ ...selection, workspaceRoot: input.workspaceRoot });
+          views.push({ selection, view, prefix: `candidate-${index + 1}` });
+        } catch (error) {
+          skippedCandidates.push({ moduleId: selection.moduleId, repositoryId: selection.repositoryId,
+            reason: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (!views.length) throw new Error(`历史候选没有可读取的 source files：${skippedCandidates.map(item => item.reason).join('; ')}`);
+      const primary = views[0]!.view;
+      const runId = randomUUID();
+      root = primary.root.startsWith(path.join(tmpdir(), 'forexplore-history-view-'))
+        ? await mkdtemp(path.join(tmpdir(), 'forexplore-history-view-'))
+        : path.join(path.dirname(primary.root), runId);
+      await mkdir(path.join(root, 'source'), { recursive: true });
+      const entries: Array<[string, string]> = [];
+      const candidates: WorkspaceHistoryCandidate[] = [];
+      const omittedFiles: string[] = [];
+      for (const { selection, view, prefix } of views) {
+        candidates.push({ prefix, repositoryId: view.repositoryId, analysisRevision: view.analysisRevision,
+          ...(view.projectId ? { projectId: view.projectId } : {}), moduleId: view.moduleId,
+          ...(selection.name ? { name: selection.name } : {}), ...(selection.language ? { language: selection.language } : {}) });
+        for (const file of view.files) {
+          const bytes = await readFile(path.join(view.root, 'source', ...file.split('/')));
+          const relative = `${prefix}/${file}`;
+          const destination = path.join(root, 'source', ...relative.split('/'));
+          await mkdir(path.dirname(destination), { recursive: true });
+          await writeFile(destination, bytes, { mode: 0o444 });
+          entries.push([relative, createHash('sha256').update(bytes).digest('hex')]);
+        }
+        const manifest = JSON.parse(await readFile(path.join(view.root, 'manifest.json'), 'utf8'));
+        omittedFiles.push(...(manifest.omittedFiles ?? []).map((file: string) => `${prefix}/${file}`));
+      }
+      entries.sort(([a], [b]) => a.localeCompare(b));
+      const manifestHash = createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+      const generatedAt = new Date().toISOString();
+      const identity = { repositoryId: primary.repositoryId, analysisRevision: primary.analysisRevision,
+        ...(primary.projectId ? { projectId: primary.projectId } : {}), moduleId: primary.moduleId };
+      await writeFile(path.join(root, 'manifest.json'), JSON.stringify({ ...identity, runId, generatedAt, candidates,
+        files: entries.map(([file, sha256]) => ({ path: file, sha256 })), omittedFiles, skippedCandidates }, null, 2), { mode: 0o444 });
+      await chmodReadonlyTree(root);
+      return { root, ...identity, files: entries.map(([file]) => file), manifestHash, runId, generatedAt, candidates };
+    } catch (error) {
+      if (root) await removeHistoryView(root);
+      throw error;
+    } finally {
+      for (const { view } of views) await removeHistoryView(view.root);
+    }
+  }
 
   /** Returns the active structural index for trusted host-side presentation. */
   async structuralIndexForPath(localPath: string): Promise<StructuralIndex | null> {
@@ -729,7 +950,7 @@ export class CodeIntelligenceHost {
       return await this.presentationFor(runtime);
     } catch (error) {
       this.logFailure('read code intelligence status', error);
-      return this.emptyPresentation('error', genericRuntimeFailure());
+      return this.unavailablePresentation();
     }
   }
 
@@ -876,6 +1097,7 @@ export class CodeIntelligenceHost {
     this.#disposed = true;
     this.#selectedRevisions.clear();
     this.#selectedProjects.clear();
+    this.#readOnlyReadyRevisions.clear();
     const semanticQueryServer = this.#semanticQueryServer;
     this.#semanticQueryServer = undefined;
     this.#semanticQueryEndpoint = undefined;
@@ -924,23 +1146,48 @@ export class CodeIntelligenceHost {
     for (const input of preferredInputs) {
       request.signal?.throwIfAborted();
       try {
-        const repositoryId = await this.repositoryIdFor(input.localPath, persistedByPath.get(stableIdentityKey(input.localPath)));
-        const repository = await runtime.registry.register({
-          repositoryId,
-          localPath: input.localPath,
-          role: input.role,
-          ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
-        }).catch(async (error: unknown) => {
-          // Re-registering a checkout that a persisted row already owns is idempotent:
-          // the identity is unchanged, so the existing record is the registration.
-          // Treating it as a failure emptied the visible set and left every history
-          // repository invisible to retrieval ("Module search requires between 1 and
-          // 32 historical repositories").
-          if (!/already registered/i.test(String((error as Error)?.message ?? error))) throw error;
-          const existing = await runtime.registry.get(repositoryId);
-          if (!existing) throw error;
-          return existing;
-        });
+        const repositoryId = await this.repositoryIdFor(
+          input.localPath,
+          input.repositoryId ?? persistedByPath.get(stableIdentityKey(input.localPath)),
+        );
+        const explicitlyBound = input.repositoryId ? await runtime.registry.get(repositoryId) : null;
+        let repository: RepositoryRecord;
+        if (request.scan === false && explicitlyBound) {
+          // The ignored preloaded manifest binds a local path to a persisted
+          // repository ID across Windows/WSL. Keep the SeekDB row untouched:
+          // writing this platform's localPath back would make the ordinary
+          // entry create duplicate identities when opened from the other OS.
+          if (explicitlyBound.role !== input.role) {
+            throw new Error('The preloaded repository role does not match its persisted repository record.');
+          }
+          repository = explicitlyBound;
+        } else {
+          repository = await runtime.registry.register({
+            repositoryId,
+            localPath: input.localPath,
+            role: input.role,
+            ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
+          }).catch(async (error: unknown) => {
+            // Re-registering a checkout that a persisted row already owns is idempotent:
+            // the identity is unchanged, so the existing record is the registration.
+            // Treating it as a failure emptied the visible set and left every history
+            // repository invisible to retrieval ("Module search requires between 1 and
+            // 32 historical repositories").
+            if (!/already registered/i.test(String((error as Error)?.message ?? error))) throw error;
+            const existing = await runtime.registry.get(repositoryId);
+            if (!existing) throw error;
+            return existing;
+          });
+        }
+        if (request.repairStaleIndexing && repository.analysisStatus === 'indexing' && repository.activeRevision) {
+          const revision = await runtime.store.getRevision({
+            repositoryId: repository.repositoryId,
+            analysisRevision: repository.activeRevision,
+          });
+          if (revision?.status === 'ready') {
+            this.#readOnlyReadyRevisions.set(repository.repositoryId, repository.activeRevision);
+          } else this.#readOnlyReadyRevisions.delete(repository.repositoryId);
+        } else this.#readOnlyReadyRevisions.delete(repository.repositoryId);
         registered.set(repository.repositoryId, repository);
       } catch (error) {
         request.signal?.throwIfAborted();
@@ -958,14 +1205,21 @@ export class CodeIntelligenceHost {
 
     const scannedRepositoryIds: RepositoryId[] = [];
     if (request.scan !== false) {
-      for (const repository of registered.values()) {
-        request.signal?.throwIfAborted();
-        if (request.scanRepositoryIds && !request.scanRepositoryIds.includes(repository.repositoryId)) continue;
+      const pending = [...registered.values()].filter(repository => {
+        if (request.scanRepositoryIds && !request.scanRepositoryIds.includes(repository.repositoryId)) return false;
         // A path explicitly configured as history can also be a workspace
         // target. Role precedence must not suppress that requested scan.
-        if (requestedScanPaths && !requestedScanPaths.has(repositoryInputKey(repository))) continue;
+        if (requestedScanPaths && !requestedScanPaths.has(repositoryInputKey(repository))) return false;
         if (request.scanNewOnly && previouslyVisible.has(repository.repositoryId) && repository.activeRevision &&
-          repository.analysisStatus !== 'failed') continue;
+          repository.analysisStatus !== 'failed') return false;
+        return true;
+      });
+      pending.forEach((repository, index) => this.#indexingProgress.set(repository.repositoryId,
+        { stage: 'queued', position: index + 1, count: pending.length }));
+      this.#onChange?.();
+      try {
+      for (const [index, repository] of pending.entries()) {
+        request.signal?.throwIfAborted();
         try {
           this.#output?.appendLine(`[forexplore] indexing ${repository.role} repository: ${repository.displayName}.`);
           // The coordinator flips the registry to 'indexing' inside its own
@@ -975,8 +1229,9 @@ export class CodeIntelligenceHost {
           await runtime.registry.setAnalysisStatus?.(repository.repositoryId, 'indexing');
           this.#onChange?.();
           const onProgress = createIndexingProgressReporter(progress => {
+            this.#indexingProgress.set(repository.repositoryId, { ...progress, position: index + 1, count: pending.length });
             this.#output?.appendLine(`[RECAST] ${indexingProgressMessage(progress)}`);
-            request.onProgress?.(progress);
+            request.onProgress?.({ ...progress, position: index + 1, count: pending.length });
           });
           await runtime.coordinator.run({
             repositoryId: repository.repositoryId,
@@ -992,16 +1247,7 @@ export class CodeIntelligenceHost {
           // cancellation must not relabel that success or skip its projects.
           scannedRepositoryIds.push(repository.repositoryId);
           const current = await runtime.registry.get(repository.repositoryId);
-          if (current?.activeRevision) {
-            const scope = { repositoryId: current.repositoryId, analysisRevision: current.activeRevision };
-            const projects = runtime.store.listProjects
-              ? await runtime.store.listProjects(scope)
-              : (await runtime.queryPort.listProjects(scope)).projects.map((project) => project.value);
-            const chosen = this.resolveProjectChoice(repository, projects).projectId;
-            for (const project of projects) {
-              if (repository.role === 'history' || project.projectId === chosen) this.scheduleProject(project);
-            }
-          }
+          if (current?.activeRevision) await this.scheduleRepositoryProjects(runtime, current);
         } catch (error) {
           failedRepositoryIds.push(repository.repositoryId);
           await this.markIndexFailure(runtime, repository.repositoryId);
@@ -1013,8 +1259,29 @@ export class CodeIntelligenceHost {
           }
           this.logFailure(`index repository ${repository.repositoryId}`, error);
         } finally {
+          this.#indexingProgress.delete(repository.repositoryId);
           this.#onChange?.();
         }
+      }
+      } finally {
+        this.#indexingProgress.clear();
+        this.#onChange?.();
+      }
+    }
+
+    // Startup and credential saves can resume modelling without rescanning source.
+    // Ordinary registration-only refreshes remain read-only. A target models only
+    // its selected project; completed artifacts are reused by ensureProjectAnalysis.
+    for (const repository of registered.values()) {
+      if (!repository.activeRevision || scannedRepositoryIds.includes(repository.repositoryId) ||
+          failedRepositoryIds.includes(repository.repositoryId) ||
+          !['ready', 'degraded'].includes(this.presentationAnalysisStatus(repository))) continue;
+      const scanRequested = request.scan !== false &&
+        (!request.scanRepositoryIds || request.scanRepositoryIds.includes(repository.repositoryId)) &&
+        (!requestedScanPaths || requestedScanPaths.has(repositoryInputKey(repository)));
+      if (request.resumeProjectAnalysis || scanRequested) {
+        request.signal?.throwIfAborted();
+        await this.scheduleRepositoryProjects(runtime, repository);
       }
     }
 
@@ -1023,9 +1290,8 @@ export class CodeIntelligenceHost {
     try {
       presentation = await this.presentationFor(runtime);
     } catch (error) {
-      this.#lastFailure = true;
       this.logFailure('read synchronized code intelligence status', error);
-      presentation = this.emptyPresentation('error', genericRuntimeFailure());
+      presentation = this.unavailablePresentation();
     }
     this.#output?.appendLine(
       `[forexplore] code intelligence synchronization complete: ${scannedRepositoryIds.length} scanned, ${failedRepositoryIds.length} failed.`,
@@ -1059,9 +1325,21 @@ export class CodeIntelligenceHost {
       store: runtime.store,
       ...(this.#planProject ? { plan: (scope: ProjectAnalysisScope & { objective: string }) => this.#planProject!(scope) } : {}),
       hierarchyPlanner: this.#hierarchyPlanner,
+      allowLargeAgentPlan: this.#allowLargeAgentPlan,
       onChange: this.#onChange,
     });
     return this.#projectAnalysis;
+  }
+
+  private async scheduleRepositoryProjects(runtime: CodeIntelligenceRuntime, repository: RepositoryRecord): Promise<void> {
+    if (!repository.activeRevision) return;
+    const scope = { repositoryId: repository.repositoryId, analysisRevision: repository.activeRevision };
+    const projects = runtime.store.listProjects ? await runtime.store.listProjects(scope)
+      : (await runtime.queryPort.listProjects(scope)).projects.map(project => project.value);
+    const chosen = this.resolveProjectChoice(repository, projects).projectId;
+    for (const project of projects) {
+      if (repository.role === 'history' || project.projectId === chosen) this.scheduleProject(project);
+    }
   }
 
   /**
@@ -1102,8 +1380,13 @@ export class CodeIntelligenceHost {
 
   private scheduleProject(scope: ProjectAnalysisScope, force = false): void {
     if (this.#disposed) return;
-    void this.ensureProjectAnalysis(scope, force)
-      .catch((error) => this.logFailure('project module analysis', error));
+    const task = this.ensureProjectAnalysis(scope, force)
+      .catch((error) => {
+        this.logFailure('project module analysis', error);
+        this.#onProjectAnalysisError?.(scope, error);
+      })
+      .finally(() => this.#projectTasks.delete(task));
+    this.#projectTasks.add(task);
   }
 
   async retryProject(scope: ProjectAnalysisScope, force = false): Promise<void> {
@@ -1118,7 +1401,42 @@ export class CodeIntelligenceHost {
     this.scheduleProject(scope, force);
   }
 
-  async waitForProjects(): Promise<void> { await this.#projectAnalysis?.idle(); }
+  /** A pipeline start owns this wait, but shares the existing modelling job. */
+  async ensureProjectModel(scope: ProjectAnalysisScope, signal?: AbortSignal): Promise<ProjectAnalysisRecord> {
+    signal?.throwIfAborted();
+    const runtime = await this.runtime();
+    const repository = await runtime.registry.get(scope.repositoryId);
+    if (repository?.activeRevision !== scope.analysisRevision) throw new Error('目标项目版本已更新，请重新选择目标项目。');
+    const index = await runtime.store.getStructuralIndex(scope);
+    if (!index?.projects.some(project => project.projectId === scope.projectId)) throw new Error('项目不存在。');
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => reject(signal!.reason);
+      signal?.addEventListener('abort', abort, { once: true });
+      // Cancelling one pipeline must not cancel shared repository modelling.
+      void this.ensureProjectAnalysis(scope, false).then(() => {
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      }, error => {
+        signal?.removeEventListener('abort', abort);
+        reject(error);
+      });
+    });
+    signal?.throwIfAborted();
+    if ((await runtime.registry.get(scope.repositoryId))?.activeRevision !== scope.analysisRevision) {
+      throw new Error('建模期间目标项目版本已更新，请重新选择目标项目。');
+    }
+    const record = await (await this.projectAnalysis()).read(scope);
+    if (record.state !== 'ready' || record.projection !== 'ready' || !record.proposal) {
+      throw new Error(record.error || record.modelingSkippedReason || '目标项目建模未完成，请重试模块建模。');
+    }
+    return record;
+  }
+
+  async waitForProjects(): Promise<void> {
+    while (this.#projectTasks.size) await Promise.all([...this.#projectTasks]);
+    await this.#projectAnalysis?.idle();
+  }
 
   /** Trusted presentation bridge: no filesystem fallback and no local JSON summaries. */
   async explorerData(): Promise<Array<{
@@ -1239,6 +1557,14 @@ export class CodeIntelligenceHost {
     void Promise.resolve(this.#identityStore?.update(selectedProjectKey(repositoryId), '')).catch(() => undefined);
   }
 
+  private presentationAnalysisStatus(
+    repository: Pick<RepositoryRecord, 'repositoryId' | 'activeRevision' | 'analysisStatus'>,
+  ): RepositoryAnalysisStatus {
+    return this.#readOnlyReadyRevisions.get(repository.repositoryId) === repository.activeRevision
+      ? 'ready'
+      : repository.analysisStatus;
+  }
+
   private async presentationFor(runtime: CodeIntelligenceRuntime): Promise<CodeIntelligencePresentation> {
     const listed = await runtime.queryPort.listRepositories();
     const repositories = await Promise.all(listed.repositories
@@ -1264,7 +1590,8 @@ export class CodeIntelligenceHost {
           repositoryId: repository.repositoryId,
           displayName: safeRepositoryDisplayName(repository.displayName),
           role: repository.role,
-          analysisStatus: repository.analysisStatus,
+          analysisStatus: this.presentationAnalysisStatus(repository),
+          ...(this.#indexingProgress.has(repository.repositoryId) ? { indexing: this.#indexingProgress.get(repository.repositoryId)! } : {}),
           activeRevision,
           selectedRevision: null,
           revisions,
@@ -1300,14 +1627,15 @@ export class CodeIntelligenceHost {
         repositoryId: repository.repositoryId,
         displayName: safeRepositoryDisplayName(repository.displayName),
         role: repository.role,
-        analysisStatus: repository.analysisStatus,
+        analysisStatus: this.presentationAnalysisStatus(repository),
+        ...(this.#indexingProgress.has(repository.repositoryId) ? { indexing: this.#indexingProgress.get(repository.repositoryId)! } : {}),
         activeRevision,
         selectedRevision: selectedRevision.analysisRevision,
         revisions,
         languages: overview.overview.value.languages.map((language) => ({ ...language })),
         projects,
         selectedProjectId,
-        summary: projectAnalysis?.proposal || projectAnalysis?.state === 'stale' ? {
+        summary: projectAnalysis?.modelingSkippedReason ? { status: 'missing' } : projectAnalysis?.proposal || projectAnalysis?.state === 'stale' ? {
           status: projectAnalysis?.state === 'stale' ? 'stale' : projectAnalysis?.proposal ? 'current' : 'missing',
           analysisRevision: selectedRevision.analysisRevision,
           ...(projectAnalysis?.planHash ? { planHash: projectAnalysis.planHash } : {}),
@@ -1325,12 +1653,14 @@ export class CodeIntelligenceHost {
       : this.#storageKind === 'memory'
         ? memoryStorageNotice()
         : undefined;
-    return {
-      status: this.#lastFailure ? 'error' : 'ready',
+    const presentation: CodeIntelligencePresentation = {
+      status: this.#lastFailure ? 'error' : 'ready', runtimeStatus: 'ready',
       storage: this.#storageKind,
       repositories: repositories.sort((left, right) => left.repositoryId.localeCompare(right.repositoryId)),
       ...(message ? { message } : {}),
     };
+    this.#lastPresentation = structuredClone(presentation);
+    return presentation;
   }
 
   private async revisionPresentations(
@@ -1427,6 +1757,20 @@ export class CodeIntelligenceHost {
     return { status: 'missing' };
   }
 
+  private unavailablePresentation(): CodeIntelligencePresentation {
+    if (!this.#lastPresentation) return this.emptyPresentation('error', genericRuntimeFailure());
+    const previous = structuredClone(this.#lastPresentation);
+    return {
+      ...previous, status: 'error', runtimeStatus: 'error',
+      message: '状态更新暂时失败，显示上次读取的结果；请稍后刷新或查看扩展输出。',
+      repositories: previous.repositories.filter(repository => this.#visibleRepositoryIds.has(repository.repositoryId)).map(repository => {
+        const { indexing: _previousProgress, ...snapshot } = repository;
+        const indexing = this.#indexingProgress.get(repository.repositoryId);
+        return { ...snapshot, ...(indexing ? { analysisStatus: 'indexing' as const, indexing: { ...indexing } } : {}) };
+      }),
+    };
+  }
+
   private emptyPresentation(
     status: Extract<CodeIntelligencePresentation['status'], 'initializing' | 'error'>,
     message?: string,
@@ -1478,6 +1822,16 @@ export function codeIntelligenceRuntimeOptionsFromEnvironment(
   if (!Number.isInteger(vectorDimension) || vectorDimension <= 0) {
     throw new Error('CODE_INTELLIGENCE_SEEKDB_VECTOR_DIMENSION must be a positive integer.');
   }
+  const connectionLimitValue = environment.CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT?.trim();
+  const connectionLimit = connectionLimitValue ? Number(connectionLimitValue) : undefined;
+  if (connectionLimit !== undefined && (!Number.isInteger(connectionLimit) || connectionLimit < 1 || connectionLimit > 64)) {
+    throw new Error('CODE_INTELLIGENCE_SEEKDB_CONNECTION_LIMIT must be an integer in 1..64.');
+  }
+  const searchQueryConcurrencyValue = environment.CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY?.trim();
+  const searchQueryConcurrency = searchQueryConcurrencyValue ? Number(searchQueryConcurrencyValue) : undefined;
+  if (searchQueryConcurrency !== undefined && (!Number.isInteger(searchQueryConcurrency) || searchQueryConcurrency < 0 || searchQueryConcurrency > 32)) {
+    throw new Error('CODE_INTELLIGENCE_SEARCH_SQL_CONCURRENCY must be an integer in 0..32.');
+  }
   const embeddingUrl = environment.CODE_INTELLIGENCE_EMBEDDING_URL?.trim();
   const embeddingModel = environment.CODE_INTELLIGENCE_EMBEDDING_MODEL?.trim();
   if (Boolean(embeddingUrl) !== Boolean(embeddingModel)) throw new Error('Configure both CODE_INTELLIGENCE_EMBEDDING_URL and CODE_INTELLIGENCE_EMBEDDING_MODEL.');
@@ -1494,6 +1848,8 @@ export function codeIntelligenceRuntimeOptionsFromEnvironment(
       password: environment.CODE_INTELLIGENCE_SEEKDB_PASSWORD ?? '',
       database,
       vectorDimension,
+      ...(connectionLimit !== undefined ? { connectionLimit } : {}),
+      ...(searchQueryConcurrency !== undefined ? { searchQueryConcurrency } : {}),
       ...(embeddingUrl && embeddingModel ? { embedding: {
         url: embeddingUrl, model: embeddingModel, apiKey: environment.CODE_INTELLIGENCE_EMBEDDING_API_KEY ?? '',
         supportsDimensions: environment.CODE_INTELLIGENCE_EMBEDDING_SUPPORTS_DIMENSIONS !== 'false',

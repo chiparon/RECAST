@@ -1,0 +1,25 @@
+{
+  "caseId": "case-043",
+  "source": {
+    "repository": "nopcommerce",
+    "repositoryId": "repo-871f5b49-b638-4c60-a9f2-e4ad8fd09645",
+    "revision": "analysis-99f515f8-22bb-4829-8eff-e94b6ac9d18d",
+    "projectId": "project-3f8d4dae11493c04fe598a8d",
+    "artifactId": "project-summary:project-3f8d4dae11493c04fe598a8d:code-understanding/v1",
+    "planHash": "sha256:ad07bf424737d2f63d9fce9d04ba1a182154a46db4c5b1a1fc62845e0d80b16c",
+    "analysisHash": "a8c7ea6e94606080f342a5c24ba8e893a8f5aee05bba7633526a74dd67e6d071",
+    "moduleId": "module-b59488f1ecedb88eb34bbb7d"
+  },
+  "excerpts": [
+    {
+      "path": "src/Libraries/Nop.Services/Shipping/GetShippingOptionRequest.cs",
+      "excerpt": "﻿using Nop.Core.Domain.Catalog;\nusing Nop.Core.Domain.Common;\nusing Nop.Core.Domain.Customers;\nusing Nop.Core.Domain.Directory;\nusing Nop.Core.Domain.Orders;\nusing Nop.Core.Domain.Shipping;\n\nnamespace Nop.Services.Shipping;\n\n/// <summary>\n/// Represents a request for getting shipping rate options\n/// </summary>\npublic partial class GetShippingOptionRequest\n{\n    #region Ctor\n\n    public GetShippingOptionRequest()\n    {\n        Items = new List<PackageItem>();\n    }\n\n    #endregion\n\n    #region Properties\n\n    /// <summary>\n    /// Gets or sets a customer\n    /// </summary>\n    public virtual Customer Customer { get; set; }\n\n    /// <summary>\n    /// Gets or sets a shopping cart items\n    /// </summary>\n    public IList<PackageItem> Items { get; set; }\n\n    /// <summary>\n    /// Gets or sets a shipping address (where we ship to)\n    /// </summary>\n    public Address ShippingAddress { get; set; }\n\n    /// <summary>\n    /// Shipped from warehouse\n    /// </summary>\n    public Warehouse WarehouseFrom { get; set; }\n\n    /// <summary>\n    /// Shipped from country\n    /// </summary>\n    public Country CountryFrom { get; set; }\n\n    /// <summary>\n    /// Shipped from state/province\n    /// </summary>\n    public StateProvince StateProvinceFrom { get; set; }\n\n    /// <summary>\n    /// Shipped from zip/postal code\n    /// </summary>\n    public string ZipPostalCodeFrom { get; set; }\n\n    /// <summary>\n    /// Shipped from county\n    /// </summary>\n    public string CountyFrom { get; set; }\n\n    /// <summary>\n    /// Shipped from city\n    /// </summary>\n    public string CityFrom { get; set; }\n\n    /// <summary>\n    /// Shipped from address\n    /// </summary>\n    public string AddressFrom { get; set; }\n\n    /// <summary>\n    /// Limit to store (identifier)\n    /// </summary>\n    public int StoreId { get; set; }\n\n    #endregion\n\n    #region Nested classes\n\n    /// <summary>\n    /// Package item\n    /// </summary>\n    public partial class PackageItem\n    {\n        /// <summary>\n        /// Constructor\n        /// </summary>\n        /// <param name=\"sci\">Shopping cart item</param>\n        /// <param name=\"product\">Product</param>\n        /// <param name=\"qty\">Override \"Quantity\" property of shopping cart item</param>\n        public PackageItem(ShoppingCartItem sci, Product product, int? qty = null)\n        {\n            ShoppingCartItem = sci;\n            Product = product;\n            OverriddenQuantity = qty;\n        }\n\n        /// <summary>\n        /// Shopping cart item\n        /// </summary>\n        public ShoppingCartItem ShoppingCartItem { get; set; }\n\n        /// <summary>\n        /// Product\n        /// </summary>\n        public Product Product { get; set; }\n\n        /// <summary>\n        /// If specified, override \"Quantity\" property of \"ShoppingCartItem\n        /// </summary>\n        public int? OverriddenQuantity { get; set; }\n\n        /// <summary>\n        /// Get quantity\n        /// </summary>\n        /// <returns></returns>\n        public int GetQuantity()\n        {\n            if (OverriddenQuantity.HasValue)\n                return OverriddenQuantity.Value;\n\n            return ShoppingCartItem.Quantity;\n        }\n    }\n\n    #endregion\n}",
+      "truncated": false
+    },
+    {
+      "path": "src/Libraries/Nop.Services/Shipping/GetShippingOptionResponse.cs",
+      "excerpt": "﻿using Nop.Core.Domain.Shipping;\n\nnamespace Nop.Services.Shipping;\n\n/// <summary>\n/// Represents a response of getting shipping rate options\n/// </summary>\npublic partial class GetShippingOptionResponse : BaseNopResult\n{\n    public GetShippingOptionResponse()\n    {\n        ShippingOptions = new List<ShippingOption>();\n    }\n\n    /// <summary>\n    /// Gets or sets a list of shipping options\n    /// </summary>\n    public IList<ShippingOption> ShippingOptions { get; set; }\n\n    /// <summary>\n    /// Gets or sets a value indicating whether shipping is done from multiple locations (warehouses)\n    /// </summary>\n    public bool ShippingFromMultipleLocations { get; set; }\n}",
+      "truncated": false
+    }
+  ]
+}

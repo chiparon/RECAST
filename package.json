@@ -34,6 +34,7 @@
     "claude:translator": "bash scripts/run-claude-deepseek.sh --agent forexplore-translator",
     "claude:reranker": "bash scripts/run-claude-deepseek.sh --agent forexplore-reranker",
     "dev:extension": "node scripts/run-vscode-extension.mjs",
+    "dev:extension:preloaded": "node scripts/run-vscode-extension.mjs --preloaded",
     "build": "npm run build:extension",
     "build:extension": "npm run build --workspace forexplore-vscode",
     "package:extension": "npm run package --workspace forexplore-vscode",

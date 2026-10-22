@@ -6,6 +6,15 @@ import {
 } from "./agent.js";
 
 describe("AgentRunBudget", () => {
+  it('propagates project cancellation to model and test tool budgets', () => {
+    const controller = new AbortController();
+    const budget = createAgentRunBudget({}, Date.now(), controller.signal);
+    try {
+      controller.abort(new Error('project cancelled'));
+      expect(budget.signal.aborted).toBe(true);
+      expect(() => budget.assertActive()).toThrow('project cancelled');
+    } finally { budget.dispose(); }
+  });
   it("counts turns and tool calls within the configured limits", () => {
     const budget = createAgentRunBudget({
       maxDurationMs: 10_000,

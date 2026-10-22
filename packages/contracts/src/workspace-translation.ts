@@ -25,6 +25,20 @@ export interface WorkspaceEvidenceScope {
  * Only the listed repository-relative files may be copied into an Agent
  * staging workspace.
  */
+export const MAX_SELECTED_HISTORY_MODULES = 3;
+
+/** One selected module within a merged direct-read history view. */
+export interface WorkspaceHistoryCandidate {
+  /** Directory under history-view/source, e.g. candidate-1. */
+  prefix: string;
+  repositoryId: string;
+  analysisRevision: string;
+  projectId?: string;
+  moduleId: string;
+  name?: string;
+  language?: string;
+}
+
 export interface WorkspaceHistoryView {
   root: string;
   files: string[];
@@ -36,10 +50,19 @@ export interface WorkspaceHistoryView {
   /** Host-created manifest identity for the direct-read history hand-off. */
   runId?: string;
   generatedAt?: string;
+  /** Multi-module views retain primary identity above for single-view callers. */
+  candidates?: WorkspaceHistoryCandidate[];
 }
 
 /** Shared ceiling for revision-scoped history evidence queries. */
 export const MAX_RETRIEVAL_SCOPES = 64;
+
+/** How the host asks the workspace Agent to implement a translation. */
+export type WorkspaceTranslationMode = "analyzer-translator" | "direct-translator";
+
+/** The ordinary module workflow and the additive project integration pass use
+ * the same Analyzer/Translator runtime but different task instructions. */
+export type WorkspaceTranslationTaskKind = "module" | "project-integration";
 
 export interface WorkspaceTranslationRequest {
   spec: string;
@@ -58,6 +81,14 @@ export interface WorkspaceTranslationRequest {
   evidenceScopes?: WorkspaceEvidenceScope[];
   /** Optional host-created source snapshot for direct Agent inspection. */
   historyView?: WorkspaceHistoryView;
+  /** Host-selected fallback when no usable historical implementation exists. */
+  translationMode?: WorkspaceTranslationMode;
+  /** Optional host-owned task kind; omitted requests remain module tasks. */
+  taskKind?: WorkspaceTranslationTaskKind;
+  /** Optional bounded protocol view. It is task metadata, never target source. */
+  moduleProtocol?: import('./global-protocol.js').ModuleProtocol;
+  /** Full protocol is supplied only to the project integration task. */
+  globalProtocol?: import('./global-protocol.js').GlobalProtocol;
 }
 
 /** One on-demand evidence query, recorded so the run stays auditable. */
@@ -71,10 +102,39 @@ export interface WorkspaceEvidenceQuery {
 }
 
 export interface WorkspaceTranslationPlan {
+  /** Analyzer prose preserved verbatim; legacy structured plans remain readable. */
+  markdown?: string;
   summary: string;
   mappings: Array<{ source: string; targetPath: string; targetSymbol: string }>;
   dependencies: Array<{ name: string; strategy: "reuse" | "replace" | "adapt" | "translate"; detail: string }>;
   steps: Array<{ id: string; description: string; files: string[]; dependsOn: string[] }>;
+  protocolRulesUsed?: string[];
+  boundaryAssumptions?: string[];
+  semanticRisks?: string[];
+  protocolCandidates?: Array<{
+    scope?: string[];
+    topic: "state" | "identity" | "ordering" | "failure" | "retry" | "scope";
+    rule: string;
+    note?: string;
+  }>;
+}
+
+/** Host-observed verifier feedback handed back to the same Translator run. */
+export interface WorkspaceVerificationFeedback {
+  attempt: number;
+  status: "failure";
+  reason?: string;
+  issue?: { kind: "translation" | "test" | "environment" | "unknown"; description: string };
+  functions?: Array<{
+    source?: { path: string; name: string; signature?: string };
+    target: { path: string; name: string; signature?: string };
+    status: "passed" | "unverified";
+    executed: boolean;
+    lineCoverage: number | null;
+    branchCoverage: number | null;
+    reason?: string;
+  }>;
+  unmatchedFunctions?: Array<{ path: string; name: string; signature?: string }>;
 }
 
 /** Owned by the backend configuration, never by the model or HTTP payload. */
@@ -128,6 +188,16 @@ export interface WorkspaceTranslationRun {
   error?: string;
   /** A passing fixed test suite is evidence, not a proof of all behaviors. */
   acceptance: "compilation-only" | "behavior-verified";
+  /** Latest host verifier failure awaiting repair by this same Translator. */
+  latestVerificationFeedback?: WorkspaceVerificationFeedback;
+  verificationRepairs?: Array<{
+    at: string;
+    attempt: number;
+    feedback: WorkspaceVerificationFeedback;
+    status: "requested" | "completed" | "failed";
+    /** Host-observed distinction: a repaired test fixture is not a production-code repair. */
+    disposition?: "production-code" | "test-environment";
+  }>;
   verification?: {
     command: WorkspaceCompileCommand;
     criteria: Array<{ path: string; hash: string }>;
@@ -144,7 +214,7 @@ export interface WorkspaceTranslationRun {
     inputChars?: number;
     outputChars?: number;
     usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number };
-    historyView?: { repositoryId: string; analysisRevision: string; moduleId: string; files: number; manifestHash: string; runId?: string; generatedAt?: string };
+    historyView?: { repositoryId: string; analysisRevision: string; moduleId: string; files: number; manifestHash: string; runId?: string; generatedAt?: string; candidates?: WorkspaceHistoryCandidate[] };
     /** Per-stage provenance. Prompts and source contents are intentionally omitted. */
     stages?: Array<{
       stage: "analyzer" | "translator";
@@ -158,6 +228,26 @@ export interface WorkspaceTranslationRun {
       outputChars?: number;
       usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number };
       readFiles?: string[];
+      /** Bounded command metadata from Codex JSONL; command output is omitted. */
+      commands?: Array<{ command: string; exitCode?: number | null }>;
+      /** Fixed patch entry results. Patch source and environment are never recorded. */
+      patchTool?: { attempts: number; failures: number; durationMs: number; errors: string[] };
+      /** Host-checked Analyzer excerpts handed to this stage; stale sources require fresh reads. */
+      analysisEvidence?: { entries: number; stalePaths: string[]; excerptChars: number };
+      /** Bounded Analyzer final output retained for invalid-plan diagnosis. */
+      analyzerOutput?: string;
+      /** Final coding-agent report; observed commands/compilation remain the facts. */
+      finalMessage?: string;
+      /** Bounded Agent-authored integration artifacts, not a verification verdict. */
+      integrationEvidence?: {
+        files: Array<{ path: string; content: string; truncated: boolean }>;
+        omissions: string[];
+      };
+      analyzerOutputTruncated?: boolean;
+      analyzerOutputError?: string;
+      /** How the host resolved the Analyzer stage. */
+      analyzerStatus?: "accepted" | "fallback";
+      analyzerFallbackReason?: string;
     }>;
     /** Number of changed source lines across the accepted diff. */
     incrementalLines?: number;

@@ -33,6 +33,8 @@ describe("Agent trace logger", () => {
     expect(content).toContain("visible output");
     expect(content).toContain("[REDACTED]");
     expect(content).not.toContain("secret-key");
-    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+    // Windows does not expose POSIX mode bits; the logger still requests
+    // restrictive creation flags there, while Unix verifies the exact mode.
+    if (process.platform !== "win32") expect((await stat(filePath)).mode & 0o777).toBe(0o600);
   });
 });

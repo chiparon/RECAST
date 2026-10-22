@@ -1,5 +1,7 @@
 namespace AssetUpgradeGateway;
 
+using AssetUpgradeGateway.Domain;
+
 // These contracts reserve the seams needed by a production-sized solution.
 // They are intentionally infrastructure-neutral; the evaluated Agent decides
 // whether to use an in-memory, database, broker, or hosted-service adapter.
@@ -11,15 +13,16 @@ public enum ValidationSeverity { Info, Warning, Error }
 
 public sealed record ValidationIssue(string Code, string Message, ValidationSeverity Severity)
 {
-    public bool BlocksOperation => throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent.");
+    public bool BlocksOperation => Severity == ValidationSeverity.Error;
 }
 
 public sealed record PolicyResult(
     bool Allowed,
     IReadOnlyList<ValidationIssue> Issues)
 {
-    public static PolicyResult Allow() { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
-    public static PolicyResult Deny(params ValidationIssue[] issues) { throw new global::System.NotImplementedException("Implementation belongs to the evaluated Agent."); }
+    public static PolicyResult Allow() => new(true, Array.Empty<ValidationIssue>());
+    public static PolicyResult Deny(params ValidationIssue[] issues)
+        => new(false, issues ?? Array.Empty<ValidationIssue>());
 }
 
 public sealed record OperationContext(
@@ -129,4 +132,25 @@ public interface IRetryPolicy
 {
     bool CanRetry(int attempts);
     DateTimeOffset NextAttempt(DateTimeOffset now, int attempts);
+}
+
+/// <summary>
+/// Deterministic translation from the domain inspection vocabulary to the
+/// infrastructure-neutral contract vocabulary. An attachment that has not
+/// passed scanning always maps to <see cref="AttachmentState.Quarantined"/> so
+/// it can never enter the approval workflow.
+/// </summary>
+public static class AttachmentStateMapping
+{
+    public static AttachmentState ToAttachmentState(this AttachmentInspectionState state)
+        => state switch
+        {
+            AttachmentInspectionState.Clean => AttachmentState.Scanned,
+            AttachmentInspectionState.Released => AttachmentState.Released,
+            AttachmentInspectionState.Rejected => AttachmentState.Rejected,
+            _ => AttachmentState.Quarantined,
+        };
+
+    public static AttachmentState Map(AttachmentInspectionState state)
+        => state.ToAttachmentState();
 }

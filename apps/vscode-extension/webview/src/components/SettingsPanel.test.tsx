@@ -11,7 +11,7 @@ describe('SettingsPanel', () => {
         repositoryStatuses={[]}
         saving={false}
         onCheckRepositories={vi.fn()}
-        onSelectCodeIntelligenceRevision={vi.fn()}
+
         onSelectCodeIntelligenceProject={vi.fn()}
         onSave={vi.fn()}
         onCancel={vi.fn()}
@@ -34,7 +34,7 @@ describe('SettingsPanel', () => {
         repositoryStatuses={[]}
         saving={false}
         onCheckRepositories={vi.fn()}
-        onSelectCodeIntelligenceRevision={vi.fn()}
+
         onSelectCodeIntelligenceProject={vi.fn()}
         onSave={vi.fn()}
         onCancel={vi.fn()}
@@ -45,7 +45,7 @@ describe('SettingsPanel', () => {
     expect(markup).toContain('添加第一个路径');
   });
 
-  it('shows a read-only historical revision selection without hiding the active revision or stale-summary warning', () => {
+  it('hides revision internals while retaining stale model warnings', () => {
     const markup = renderToStaticMarkup(
       <SettingsPanel
         topK={4}
@@ -92,17 +92,15 @@ describe('SettingsPanel', () => {
         }}
         saving={false}
         onCheckRepositories={vi.fn()}
-        onSelectCodeIntelligenceRevision={vi.fn()}
+
         onSelectCodeIntelligenceProject={vi.fn()}
         onSave={vi.fn()}
         onCancel={vi.fn()}
       />,
     );
 
-    expect(markup).toContain('活动 revision revision-active');
-    expect(markup).toContain('查看 revision');
-    expect(markup).toContain('正在查看历史 revision（只读）；活动 revision 未变');
+    expect(markup).not.toContain('revision');
     expect(markup).toContain('Summary 已过期');
-    expect(markup).toContain('该 Summary 不属于活动 revision，不能作为当前结果使用。');
+    expect(markup).toContain('模块建模结果已过期，请重新建模后使用。');
   });
 });

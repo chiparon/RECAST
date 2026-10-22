@@ -31,6 +31,10 @@ export async function compileWorkspace(
     let stopped = false;
     const child = spawn(command.executable, command.args, {
       cwd, shell: false, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      // In a VS Code extension host process.execPath is Electron. The packaged
+      // Node compiler helper must run as Node rather than opening an IDE window.
+      env: command.executable === process.execPath ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env,
     });
     const append = (text: string) => { output = (output + text).slice(-64_000); };
     child.stdout.setEncoding("utf8").on("data", append);

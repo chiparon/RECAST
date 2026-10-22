@@ -4,7 +4,7 @@ import type { WorkflowPorts } from '@forexplore/workflow-core';
 import { checkServiceHealth } from './service-health';
 import { localFetch } from './local-fetch';
 import { loadSettings } from './settings';
-import type { ExecutionMode, ServiceStatus } from './ui-types';
+import type { CodeIntelligencePresentation, ExecutionMode, ServiceStatus } from './ui-types';
 import type { BackendProcess } from './backend-process';
 
 export interface RuntimePorts {
@@ -34,6 +34,17 @@ export class ServiceManager implements vscode.Disposable {
   get adaptationEndpoint(): string { return this.backend?.url ?? loadSettings().adaptationApiUrl; }
   setModuleSearchReady(ready: boolean): void {
     this.status = { ...this.status, moduleSearch: ready ? 'connected' : 'error' };
+  }
+
+  setIndexStatus(presentation: CodeIntelligencePresentation): void {
+    const state = presentation.runtimeStatus ?? presentation.status;
+    this.status = { ...this.status, moduleSearch: state === 'ready' ? 'connected'
+      : state === 'initializing' ? 'starting' : 'error' };
+  }
+
+  setIndexInitialization(message: string): void {
+    this.status = { ...this.status, moduleSearch: 'starting',
+      adaptation: this.status.adaptation === 'connected' ? 'connected' : 'starting', message };
   }
 
   /** Display-only provider labels that do not create or replace any port. */
@@ -70,6 +81,7 @@ export class ServiceManager implements vscode.Disposable {
   }
 
   async ensureStarted(): Promise<ServiceStatus> {
+    if (this.status.adaptation !== 'connected') this.status = { ...this.status, adaptation: 'starting' };
     try { await this.backend?.ensure(); }
     catch (error) {
       this.status = { ...this.status, adaptation: 'error', message: error instanceof Error ? error.message : String(error) };

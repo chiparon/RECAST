@@ -319,7 +319,7 @@ export class ToolCallingArchitectRuntime {
             `Proposal validation failed: ${error instanceof Error ? error.message : String(error)}`,
             'Correct the entire proposal and return only JSON. Check every ID, not just the first reported error. Do not change the supplied scope, hash or objective.',
             'Each selected-project file must appear exactly once: either in one module sourceFiles list or in unassignedFiles with a reason. Remove overlaps and duplicate declarations; do not assign files from dependency context outside the selected project. Include a nonempty project summary.',
-            'For this correction, set symbolKeys to [] in EVERY module. Symbol references are optional for this file-level module plan. Keep the module descriptions and coreApis; retain exact evidenceIds to support them. Never invent or reconstruct IDs.',
+            'For this correction, set symbolKeys to [] in EVERY module unless you can prove each symbol belongs to that same module sourceFiles list. Symbol references are optional for this file-level module plan. Keep the module descriptions and coreApis; retain exact evidenceIds to support them. Never invent or reconstruct IDs.',
             'You may use these previously supplied evidence IDs, grouped by file. Copy them exactly into evidenceIds only, choosing files relevant to each module. Preserve unresolved dependencies and list unassigned files with reasons.',
             JSON.stringify([...evidence.fileEvidence].map(([relativePath, evidenceId]) => ({ relativePath, evidenceId }))),
           ].join('\n') });
@@ -519,7 +519,7 @@ export function buildToolCallingArchitectMessages(
         "",
         "[OUTPUT_REQUIREMENTS]",
         "Copy repositoryId, analysisRevision, analysisHash, and objective exactly. Only use sourceFiles and symbolKeys supplied in preloaded evidence or a tool response. Cite supplied evidence IDs in every module and dependency. Do not add schedule, approval, source code, command, filesystem, database, legacy snapshot, legacy symbol-ID, or legacy edge-ID fields.",
-        "Copy identifiers exactly. evidenceId and symbolKey are different fields: never place evidence IDs in symbolKeys. Include at most 3 representative symbolKeys and 3 relevant evidenceIds per module; exhaustive symbol lists are unnecessary. symbolKeys may be empty. Do not reconstruct or abbreviate IDs.",
+        "Copy identifiers exactly. evidenceId and symbolKey are different fields: never place evidence IDs in symbolKeys. Include at most 3 representative symbolKeys and 3 relevant evidenceIds per module; exhaustive symbol lists are unnecessary. Every symbolKey must come from a symbol whose relativePath is listed in that same module's sourceFiles; never use a symbol from another module or from dependency context. If the file relationship is unclear, leave symbolKeys empty. Do not reconstruct or abbreviate IDs.",
         "[OUTPUT_SCHEMA]",
         JSON.stringify(revisionScopedModulePlanSchema(), null, 2),
       ].join("\n"),
@@ -959,11 +959,13 @@ interface EvidenceCatalog {
   ids: Set<string>;
   paths: Set<string>;
   symbolKeys: Set<string>;
+  /** Every symbolKey is tied to the file path carried by its evidence record. */
+  symbolPaths: Map<string, Set<string>>;
   fileEvidence: Map<string, string>;
 }
 
 function createEvidenceCatalog(): EvidenceCatalog {
-  return { ids: new Set(), paths: new Set(), symbolKeys: new Set(), fileEvidence: new Map() };
+  return { ids: new Set(), paths: new Set(), symbolKeys: new Set(), symbolPaths: new Map(), fileEvidence: new Map() };
 }
 
 function collectEvidenceFacts(value: unknown, target: EvidenceCatalog): void {
@@ -981,7 +983,22 @@ function collectEvidenceFacts(value: unknown, target: EvidenceCatalog): void {
     if (typeof value[key] === "string" && isSafeRelativePath(value[key])) target.paths.add(value[key]);
   }
   for (const key of ["symbolKey", "sourceSymbolKey", "targetSymbolKey"] as const) {
-    if (typeof value[key] === "string" && value[key].trim()) target.symbolKeys.add(value[key]);
+    if (typeof value[key] === "string" && value[key].trim()) {
+      const symbolKey = value[key];
+      target.symbolKeys.add(symbolKey);
+      // `sourceSymbolKey` and `targetSymbolKey` are dependency facts rather
+      // than declarations. They still carry useful path ownership when the
+      // query result includes it, but a symbol without a path must never be
+      // treated as belonging to an arbitrary module.
+      const pathKey = key === "symbolKey" ? "relativePath"
+        : key === "sourceSymbolKey" ? "sourceRelativePath" : "targetRelativePath";
+      const paths = new Set<string>();
+      const path = value[pathKey];
+      if (typeof path === "string" && isSafeRelativePath(path)) paths.add(path);
+      const existing = target.symbolPaths.get(symbolKey);
+      if (existing) for (const path of paths) existing.add(path);
+      else target.symbolPaths.set(symbolKey, paths);
+    }
   }
   for (const nested of Object.values(value)) collectEvidenceFacts(nested, target);
 }
@@ -1138,6 +1155,11 @@ function validateRevisionScopedModule(value: unknown, index: number, evidence: E
   for (const symbolKey of value.symbolKeys) {
     if (!evidence.symbolKeys.has(symbolKey)) {
       throw new Error(`modules[${index}].symbolKeys contains a symbol not retrieved through SemanticQueryPort: ${symbolKey}.`);
+    }
+    const symbolPaths = evidence.symbolPaths.get(symbolKey);
+    if (!symbolPaths?.size || !value.sourceFiles.some((path) => symbolPaths.has(path))) {
+      const observed = symbolPaths?.size ? ` observed in ${[...symbolPaths].join(', ')}` : ' without a file path';
+      throw new Error(`modules[${index}].symbolKeys contains a symbol that does not belong to its sourceFiles: ${symbolKey}${observed}.`);
     }
   }
   for (const evidenceId of value.evidenceIds) {

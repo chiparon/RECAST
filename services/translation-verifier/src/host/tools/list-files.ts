@@ -10,6 +10,10 @@ import {
 
 const DEFAULT_MAX_RESULTS = 100;
 const MAX_RESULTS = 500;
+const NON_SOURCE_DIRECTORIES = new Set([
+  ".git", ".forexplore", ".forexpore", ".translation-verifier-tests",
+  "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".gradle",
+]);
 
 type ListFilesInput = {
   directory: string;
@@ -23,7 +27,7 @@ type ListFilesOutput = {
 
 function normalizeDirectory(value: string): string {
   if (value === ".") return "";
-  return relativePath(value, "directory");
+  return relativePath(value.replace(/\/+$/, ""), "directory");
 }
 
 function displayDirectory(directory: string): string {
@@ -107,6 +111,7 @@ async function collectFiles(
   while (pending.length > 0) {
     const current = pending.pop()!;
     const entries = await readdir(current, { withFileTypes: true });
+    const hasDotnetProject = entries.some(entry => entry.isFile() && /\.(?:csproj|fsproj|vbproj)$/i.test(entry.name));
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       const absolutePath = join(current, entry.name);
@@ -114,6 +119,7 @@ async function collectFiles(
         throw new Error(`Linked paths are not allowed: ${entry.name}`);
       }
       if (entry.isDirectory()) {
+        if (NON_SOURCE_DIRECTORIES.has(entry.name) || (hasDotnetProject && ["bin", "obj"].includes(entry.name))) continue;
         pending.push(absolutePath);
         continue;
       }
@@ -146,8 +152,8 @@ export function createListTargetFilesTool(): HostToolFactory {
     createListFilesTool(
       "list_target_files",
       context.runtime.targetProjectPath,
-      [context.runtime.targetDirectory],
-      `List ${context.runtime.targetLanguage} target files recursively under ${context.runtime.targetDirectory} and its project-relative subdirectories. Start with dependencies of ${context.runtime.targetPath}.`,
+      ["."],
+      `List ${context.runtime.targetLanguage} target files under the authorized target project, matching read_target_file's project boundary. Use directory '.' to discover sibling contracts, policies and adapters for ${context.runtime.targetPath}; internal journals and build caches are omitted. An exact authorized test root can also be listed.`,
     );
 }
 

@@ -47,9 +47,13 @@ async function translationHandoff(reply: (target: ModuleTarget, candidate: Searc
     serviceStatus: { moduleSearch: 'connected', adaptation: 'connected', executionMode: 'real' },
     searchProvider: 'SeekDB', adaptationProvider: 'DeepSeek' } }));
   const button = (text: string) => [...container.querySelectorAll('button')].find(item => item.textContent?.includes(text))!;
-  await act(async () => button('查找 4 个候选方案').click());
-  await act(async () => button('Java limit module').click());
-  await act(async () => button('准备模块翻译与回填').click());
+  await act(async () => button('单模块调试').click());
+  await act(async () => {
+    const input = container.querySelector<HTMLTextAreaElement>('#pipeline-requirement')!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, '实现限额模块');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => button('开始执行').click());
   return { container, sent, button, post };
 }
 
@@ -62,9 +66,9 @@ it('reports a translation handoff that belongs to another selection instead of w
   expect(sent.some((message) => message.type === 'START_ADAPT')).toBe(true);
   expect(container.querySelector('.error-banner')?.textContent).toContain('不属于当前选择的模块候选');
   expect(container.querySelector('.processing-ring')).toBeNull();
-  // The panel is back on the candidate step, where the user can pick again.
+  // The failed run unlocks the inputs so the user can retry.
   expect(container.querySelector('.processing')).toBeNull();
-  expect(button('Java limit module')).toBeDefined();
+  expect(button('重新开始').disabled).toBe(false);
 });
 
 it('keeps the panel on the translation step while the host is answering', async () => {

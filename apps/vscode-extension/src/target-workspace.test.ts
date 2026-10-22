@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({
   showOpenDialog: vi.fn(), showInputBox: vi.fn(), showInformationMessage: vi.fn(), showQuickPick: vi.fn(),
-  update: vi.fn(), selectedPaths: [] as string[],
+  update: vi.fn(), selectedPaths: [] as string[], workspacePaths: undefined as string[] | undefined,
   updateWorkspaceFolders: vi.fn(), folders: [] as Array<{ uri: { scheme: string; fsPath: string } }>,
   onDidChangeWorkspaceFolders: vi.fn(), folderListeners: new Set<(event: { added: Array<{ uri: { scheme: string; fsPath: string } }> }) => void>(),
 }));
@@ -14,8 +14,9 @@ vi.mock('vscode', () => ({
   window: api,
   workspace: { get workspaceFolders() { return api.folders; }, updateWorkspaceFolders: api.updateWorkspaceFolders,
     onDidChangeWorkspaceFolders: api.onDidChangeWorkspaceFolders,
-    getConfiguration: () => ({ get: () => api.selectedPaths, update: api.update }) },
-  ConfigurationTarget: { Global: 1 },
+    getConfiguration: () => ({ get: () => api.workspacePaths ?? api.selectedPaths,
+      inspect: () => ({ globalValue: api.selectedPaths, workspaceValue: api.workspacePaths }), update: api.update }) },
+  ConfigurationTarget: { Global: 1, Workspace: 2 },
   Uri: { file: (fsPath: string) => ({ scheme: 'file', fsPath }) },
 }));
 import { addTargetWorkspace, pendingTargetImportKey, readPendingTargetImport, sameTargetPath, selectedTargetWorkspaceFolders } from './target-workspace';
@@ -23,8 +24,11 @@ import { addTargetWorkspace, pendingTargetImportKey, readPendingTargetImport, sa
 let root: string;
 const emitWorkspaceChange = (added = api.folders) => { for (const listener of api.folderListeners) listener({ added }); };
 beforeEach(async () => {
-  vi.resetAllMocks(); api.folders = []; api.selectedPaths = []; api.folderListeners.clear();
-  api.update.mockImplementation(async (_key, value) => { api.selectedPaths = value; });
+  vi.resetAllMocks(); api.folders = []; api.selectedPaths = []; api.workspacePaths = undefined; api.folderListeners.clear();
+  api.update.mockImplementation(async (_key, value, target) => {
+    if (target === 2) api.workspacePaths = value;
+    else api.selectedPaths = value;
+  });
   api.onDidChangeWorkspaceFolders.mockImplementation((listener) => {
     api.folderListeners.add(listener);
     return { dispose: () => api.folderListeners.delete(listener) };
@@ -48,6 +52,48 @@ it('adds the directory selected in the native picker', async () => {
   expect(api.updateWorkspaceFolders).toHaveBeenCalledWith(0, 0, { uri: { scheme: 'file', fsPath: root } });
   expect(api.onDidChangeWorkspaceFolders.mock.invocationCallOrder[0])
     .toBeLessThan(api.updateWorkspaceFolders.mock.invocationCallOrder[0]!);
+});
+
+it('waits for durable task feedback before a workspace mutation can restart the host', async () => {
+  api.showOpenDialog.mockResolvedValue([{ fsPath: root }]);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const onProgress = vi.fn(async (update: { phase: string; directory?: string }) => {
+    if (update.phase === 'attaching') { expect(update.directory).toBe(root); await gate; }
+  });
+  const importing = addTargetWorkspace('browse', { onProgress });
+  await vi.waitFor(() => expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'attaching' })));
+  expect(api.updateWorkspaceFolders).not.toHaveBeenCalled();
+  release();
+  expect((await importing).status).toBe('attached');
+});
+
+it('updates an empty workspace override so a remembered target is actually selected for indexing', async () => {
+  const unrelated = path.join(root, 'other-project');
+  api.selectedPaths = [unrelated];
+  api.workspacePaths = [];
+  api.folders = [{ uri: { scheme: 'file', fsPath: root } }];
+  api.showInputBox.mockResolvedValue(root);
+  expect(await addTargetWorkspace('input')).toEqual({ status: 'remembered', directory: root });
+  expect(api.update).toHaveBeenCalledExactlyOnceWith('targetRepositoryPaths', [root], 2);
+  expect(selectedTargetWorkspaceFolders()).toEqual(api.folders);
+  expect(api.selectedPaths).toEqual([unrelated]);
+});
+
+it('keeps workspace targets when attaching another directory and restores that scope if attachment fails', async () => {
+  const existing = path.join(root, 'old-project');
+  api.workspacePaths = [existing];
+  api.selectedPaths = ['global-project'];
+  api.folders = [{ uri: { scheme: 'file', fsPath: existing } }];
+  api.showOpenDialog.mockResolvedValue([{ fsPath: root }]);
+  api.updateWorkspaceFolders.mockReturnValue(false);
+  await expect(addTargetWorkspace('browse')).rejects.toThrow('VS Code 未接受该目录');
+  expect(api.update.mock.calls).toEqual([
+    ['targetRepositoryPaths', [existing, root], 2],
+    ['targetRepositoryPaths', [existing], 2],
+  ]);
+  expect(api.workspacePaths).toEqual([existing]);
+  expect(api.selectedPaths).toEqual(['global-project']);
 });
 
 it('waits for the target in a multi-root workspace before scanning, ignoring unrelated events', async () => {
@@ -168,7 +214,7 @@ it('reports a cancelled picker as an outcome instead of a silent no-op', async (
 it('reports the phases a slow selection passes through', async () => {
   const phases: string[] = [];
   api.showOpenDialog.mockResolvedValue([{ fsPath: root }]);
-  await addTargetWorkspace('browse', { onProgress: (update) => phases.push(update.phase) });
+  await addTargetWorkspace('browse', { onProgress: (update) => { phases.push(update.phase); } });
   expect(phases).toEqual(['resolving', 'attaching']);
 });
 
@@ -203,6 +249,11 @@ it('compares Windows targets case- and separator-insensitively', () => {
   const equivalent = process.platform === 'win32' ? 'c:/projects/engine' : '/projects/engine/';
   expect(sameTargetPath(target, equivalent)).toBe(true);
   expect(sameTargetPath(target, `${equivalent}-other`)).toBe(false);
+});
+
+it('matches Windows and WSL spellings of the same repository', () => {
+  expect(sameTargetPath('E:\\CS\\devsys\\weichai\\experiments\\enterprise-asset-upgrade\\target-project',
+    '/mnt/e/cs/devsys/weichai/experiments/enterprise-asset-upgrade/target-project')).toBe(true);
 });
 
 /**

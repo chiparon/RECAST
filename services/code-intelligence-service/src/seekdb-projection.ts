@@ -177,6 +177,16 @@ function summaryDocuments(
       metrics: module.metrics,
     });
     const identity = `${artifact.moduleArtifactId}\u0000${module.id}${module.nodeKind !== undefined || module.parentId !== undefined ? `\u0000${nodeKind}\u0000${depth}` : ''}`;
+    const moduleFiles = new Set(samples.files);
+    const symbolCards = (index.symbols ?? []).filter(symbol => moduleFiles.has(symbol.relativePath) &&
+      ['class', 'interface', 'record', 'struct', 'enum', 'function', 'method', 'constructor'].includes(symbol.kind))
+      .sort((left, right) => left.relativePath.localeCompare(right.relativePath) || left.sourceRange.startLine - right.sourceRange.startLine)
+      .slice(0, 64).map(symbol => ({ name: symbol.name, kind: symbol.kind, signature: symbol.signature ?? '', path: symbol.relativePath }));
+    const identityText = JSON.stringify({ projectId: record.projectId, moduleId: module.id, view: 'identity',
+      ...hierarchy, name: module.name, kind: module.kind, language: module.language,
+      description: module.description, purpose: module.purpose, domain: module.domain,
+      coreApis: module.coreApis ?? [], sourceFiles: samples.files, sourceFilesTruncated: samples.truncated,
+      dependsOn: module.dependsOn, symbolCards });
     const base: SearchDocumentRecord = {
       repositoryId: index.repositoryId,
       analysisRevision: index.analysisRevision,
@@ -188,7 +198,10 @@ function summaryDocuments(
       title: module.name,
       text,
     };
-    return [base, ...(['interface', 'dependency'] as const).map((view): SearchDocumentRecord => {
+    const identityDocument: SearchDocumentRecord = { ...base,
+      searchDocumentId: documentId(index, 'summary', `${identity}\u0000identity`),
+      text: identityText, contentHash: documentHash(module.name, identityText) };
+    return [base, identityDocument, ...(['interface', 'dependency'] as const).map((view): SearchDocumentRecord => {
       const viewText = JSON.stringify({ projectId: record.projectId, moduleId: module.id, view,
         ...hierarchy,
         name: module.name, language: module.language,
@@ -222,7 +235,9 @@ export class SeekDbProjection implements SearchProjection {
     let documents: SearchDocumentRecord[] = [];
     let bytes = 0;
     let completed = 0;
+    let filesCompleted = 0;
     let batch = 0;
+    onProgress?.({ stage: 'search-projection', completed, filesCompleted, filesTotal: index.files.length });
     const flush = async () => {
       if (!documents.length) return;
       batch++;
@@ -235,7 +250,7 @@ export class SeekDbProjection implements SearchProjection {
           `(${completed} documents saved, ${documents.length} in batch): ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
       completed += documents.length;
-      onProgress?.({ stage: 'search-projection', completed });
+      onProgress?.({ stage: 'search-projection', completed, filesCompleted, filesTotal: index.files.length });
       documents = []; bytes = 0;
     };
     const append = async (document: SearchDocumentRecord) => {
@@ -253,8 +268,10 @@ export class SeekDbProjection implements SearchProjection {
       if (text !== null && FRAGMENT_DOCUMENTS_ENABLED) {
         for (const document of sourceDocuments(index, file.relativePath, text, symbols)) await append(document);
       }
+      filesCompleted++;
     }
     await flush();
+    onProgress?.({ stage: 'search-projection', completed, filesCompleted, filesTotal: index.files.length });
   }
 
   async project(

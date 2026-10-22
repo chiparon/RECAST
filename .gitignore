@@ -12,6 +12,8 @@ coverage/
 .vscode-test-user/
 *.vsix
 .forexplore/
+.forexpore/
+.recast-preloaded/
 backups/
 
 # Local environment files
@@ -87,6 +89,12 @@ experiments/enterprise-asset-upgrade/asset-manifest.json
 # 6) 实验工程的 .NET 构建产物（本地编译产生，不属于数据集）
 experiments/**/obj/
 experiments/**/bin/
+# Verifier and other .NET fixture build intermediates
+**/obj/
+# Dated local experiment runs and machine diagnostics
+experiments/enterprise-asset-upgrade/*java*-20*/
+windows-usage.txt
+winsxs-usage.txt
 # Generated Coding Agent baseline runs (keep the checked-in README).
 experiments/enterprise-asset-upgrade/results/*
 !experiments/enterprise-asset-upgrade/results/README.md

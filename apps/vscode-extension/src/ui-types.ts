@@ -9,7 +9,7 @@ import type {
 /** Types that exist only at the extension presentation boundary. */
 export type ExecutionMode = 'real';
 
-export type ServiceConnection = 'connected' | 'unconfigured' | 'error';
+export type ServiceConnection = 'connected' | 'unconfigured' | 'starting' | 'error';
 
 export interface ServiceStatus {
   moduleSearch: ServiceConnection;
@@ -71,6 +71,15 @@ export interface CodeIntelligenceRevisionPresentation {
 }
 
 export interface CodeIntelligenceRepositoryPresentation {
+  indexing?: {
+    stage: import('./indexing-progress').IndexingProgress['stage'] | 'queued';
+    completed?: number;
+    total?: number;
+    filesCompleted?: number;
+    filesTotal?: number;
+    position: number;
+    count: number;
+  };
   repositoryId: RepositoryId;
   displayName: string;
   role: RepositoryRole;
@@ -88,6 +97,8 @@ export interface CodeIntelligenceRepositoryPresentation {
 }
 
 export interface CodeIntelligencePresentation {
+  /** Service health is independent of individual repository import failures. */
+  runtimeStatus?: 'initializing' | 'ready' | 'error';
   status: 'ready' | 'initializing' | 'error';
   storage: 'seekdb' | 'memory';
   repositories: CodeIntelligenceRepositoryPresentation[];

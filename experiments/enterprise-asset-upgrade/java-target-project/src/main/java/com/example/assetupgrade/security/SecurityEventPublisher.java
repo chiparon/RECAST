@@ -1,12 +1,17 @@
 package com.example.assetupgrade.security;
 
+import com.example.assetupgrade.common.ActorId;
+import com.example.assetupgrade.common.CorrelationId;
+import com.example.assetupgrade.common.TenantId;
+
 /**
- * Skeleton seam for SecurityEventPublisher.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Outbound seam for publishing security decisions as events.
+ *
+ * <p>Adapted from the nopCommerce permission-record cache event consumer; provider
+ * transport details belong to adapters behind this port.</p>
  */
-public final class SecurityEventPublisher {
-    public Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
-    }
+public interface SecurityEventPublisher {
+
+    /** Publishes a single authorization decision for auditing and downstream consumers. */
+    void publish(TenantId tenantId, ActorId actorId, CorrelationId correlationId, Permission permission, AuthorizationDecision decision);
 }

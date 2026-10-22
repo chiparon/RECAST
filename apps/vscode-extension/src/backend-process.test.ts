@@ -33,6 +33,28 @@ it('shares concurrent startup, uses a hidden owned process, and shuts it down ov
   manager.dispose(); expect(child.send).toHaveBeenCalledWith({ type: 'shutdown' }, expect.any(Function));
   await expect(manager.ensure()).rejects.toThrow('disposed');
 });
+it('starts planning services without a target and enables translation after target import', async () => {
+  const { manager, config, capabilities, child, launch, transport, root } = await setup();
+  config.workspaceTranslation = false;
+  capabilities.workspaceTranslation = false;
+  await manager.ensure();
+  expect((launch.mock.calls[0] as any)[2].env.ADAPTATION_WORKSPACE_TRANSLATION_ENABLED).toBe('false');
+  expect(transport.mock.calls.some(([url]) => String(url).endsWith('/configuration'))).toBe(false);
+  child.send.mockImplementation(() => queueMicrotask(() => child.emit('exit', 0, null)));
+  config.workspaceTranslation = true;
+  capabilities.workspaceTranslation = true;
+  transport.mockResolvedValueOnce(new Response('', { status: 503 }));
+  await manager.ensure();
+  expect(launch).toHaveBeenCalledTimes(2);
+  expect((launch.mock.calls[1] as any)[2].env.ADAPTATION_WORKSPACE_TRANSLATION_ENABLED).toBe('true');
+  expect(transport.mock.calls.some(([url]) => String(url).endsWith('/configuration'))).toBe(true);
+  // Real target ownership remains protected, even after service bootstrap.
+  const otherRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'recast-other-target-'))); roots.push(otherRoot);
+  config.workspaceRoot = otherRoot;
+  await expect(manager.ensure()).rejects.toThrow('另一目标');
+  config.workspaceRoot = root;
+  manager.dispose();
+});
 it('reuses a compatible external backend without killing it', async () => {
   const { manager, launch, child } = await setup(true);
   await manager.ensure(); manager.dispose(); expect(launch).not.toHaveBeenCalled(); expect(child.kill).not.toHaveBeenCalled();

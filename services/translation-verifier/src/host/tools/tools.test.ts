@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFinishTool } from "./finish.js";
-import { createListFilesTool } from "./list-files.js";
+import { createListFilesTool, createListTargetFilesTool } from "./list-files.js";
 import { createReadSourceFileTool } from "./read-source-file.js";
 import { createReadTargetFileTool } from "./read-target-file.js";
 import { createReportUncertainTool } from "./report-uncertain.js";
@@ -51,6 +51,33 @@ afterEach(async () => {
 });
 
 describe("verification host tools", () => {
+  it("discovers target dependencies across sibling directories without listing caches or journals", async () => {
+    const root = await mkdtemp(join(tmpdir(), "translation-verifier-list-dependencies-"));
+    roots.push(root);
+    for (const [path, content] of Object.entries({
+      "src/Application/Service.cs": "class Service {}",
+      "src/Application/Product.csproj": "<Project />",
+      "src/Domain/Model.cs": "class Model {}",
+      "src/Application/obj/generated.cs": "generated",
+      ".forexplore/workspace-translations/run.json": "private journal",
+      "node_modules/vendor/index.js": "dependency cache",
+      "bin/cli.js": "production CLI entry",
+      ".translation-verifier-tests/run/tests/ServiceTests.cs": "generated tests",
+    })) {
+      await mkdir(join(root, path, ".."), { recursive: true });
+      await writeFile(join(root, path), content);
+    }
+    const context = toolContext(root, root);
+    context.runtime.targetDirectory = "src/Application";
+    context.runtime.targetPath = "src/Application/Service.cs";
+    const list = createListTargetFilesTool()(context);
+    const result = await list.execute(list.parse({ directory: "." }));
+    expect(result.files.sort()).toEqual(["bin/cli.js", "src/Application/Product.csproj", "src/Application/Service.cs", "src/Domain/Model.cs"]);
+    expect((await list.execute(list.parse({ directory: "src/Domain/" }))).files).toEqual(["src/Domain/Model.cs"]);
+    expect((await list.execute(list.parse({ directory: ".translation-verifier-tests/run/tests" }))).files)
+      .toEqual([".translation-verifier-tests/run/tests/ServiceTests.cs"]);
+    expect(() => list.parse({ directory: "../other" })).toThrow("safe project-relative path");
+  });
   it("executes an injected runner without selecting a language or framework", async () => {
     const root = await mkdtemp(join(tmpdir(), "translation-verifier-bound-runner-"));
     roots.push(root);

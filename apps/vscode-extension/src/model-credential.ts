@@ -21,7 +21,8 @@ export function modelCredentialId(endpoint: string, settings?: LlmSettings): str
 
 /** Endpoint is supplied by the trusted host, never by a Webview message. */
 export function createModelCredentialProvider(storage: CredentialStorage, endpoint: () => string, settings?: () => LlmSettings,
-  runtimeEndpoint: () => string = endpoint) {
+  runtimeEndpoint: () => string = endpoint,
+  fallbackApiKey?: () => string | undefined) {
   return async (url: URL): Promise<string | ModelRequestContext | undefined> => {
     const configured = endpoint();
     const model = settings ? parseLlmSettings(settings()) : undefined;
@@ -32,7 +33,7 @@ export function createModelCredentialProvider(storage: CredentialStorage, endpoi
     if (url.origin !== base.origin || url.username || url.password || !url.pathname.startsWith(`${prefix}/`)) return undefined;
     const route = url.pathname.slice(prefix.length);
     if (!/^\/(?:module-hierarchy\/decision|v1\/(?:retrieval-rerank|adapt|module-plan|semantic-module-plan|module-generation\/turn|workspace-translations(?:\/[a-f0-9-]{36}(?:\/(?:resume|cancel|rollback))?)?))$/.test(route)) return undefined;
-    const apiKey = await storage.get(id);
+    const apiKey = (await storage.get(id))?.trim() || fallbackApiKey?.()?.trim();
     return model ? { settings: model, ...(apiKey ? { apiKey } : {}) } : apiKey;
   };
 }
@@ -50,6 +51,7 @@ export function validateModelKey(value: string): string | undefined {
  */
 export async function modelKeyRefusalReason(
   storage: CredentialStorage, endpoint: string, settings: LlmSettings,
+  fallbackApiKey?: () => string | undefined,
 ): Promise<string | undefined> {
   let id: string;
   try {
@@ -63,7 +65,7 @@ export async function modelKeyRefusalReason(
   } catch {
     return '无法读取本机凭据存储中的 API Key，已停止模块解析；请在设置中重新配置 API Key。';
   }
-  if (stored?.trim()) return undefined;
+  if (stored?.trim() || fallbackApiKey?.()?.trim()) return undefined;
   return `模块解析需要先在设置中配置 ${LLM_PRESETS[settings.provider].label} 的 API Key。`;
 }
 

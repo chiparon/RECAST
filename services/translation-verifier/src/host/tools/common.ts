@@ -2,9 +2,12 @@ import type { BoundTestRunner } from "../test-runner.js";
 import type {
   FunctionGroupVerificationInput,
   FunctionGroupFunctionResult,
+  RequirementFunctionGroupVerificationInput,
   TargetFunctionCoverage,
   VerificationFunction,
   VerificationReason,
+  VerificationTestCase,
+  VerificationTestEvidence,
 } from "../../types.js";
 import type { AgentRunBudget } from "../agent.js";
 import { readFile } from "node:fs/promises";
@@ -76,6 +79,8 @@ export type FunctionGroupTestRun = {
   stderr: string;
   exitCode: number | null;
   reason?: VerificationReason;
+  testCases?: VerificationTestCase[];
+  testEvidence?: VerificationTestEvidence;
 };
 
 export type FunctionGroupTestRunner = {
@@ -91,7 +96,7 @@ export type AgentTaskContext = {
   targetPath: string;
   targetFunction: VerificationFunction;
   /** Present only for the function-group strategy. */
-  functionGroup?: FunctionGroupVerificationInput;
+  functionGroup?: FunctionGroupVerificationInput | RequirementFunctionGroupVerificationInput;
 };
 
 export type ToolRuntimeContext = AgentTaskContext & {
@@ -100,12 +105,15 @@ export type ToolRuntimeContext = AgentTaskContext & {
   testRoots: readonly string[];
   testRunner: TestRunner;
   targetTest: TargetTest;
+  /** Host-owned cleanup for an ephemeral test harness created for this run. */
+  cleanup?: () => Promise<void>;
 };
 
 export type ToolState = {
   lastTargetTest?: TargetTestResult;
   lastFunctionGroupTest?: FunctionGroupTestRun;
   functionGroupTests?: FunctionGroupTestRun[];
+  testEvidence?: VerificationTestEvidence;
 };
 
 export type ToolContext = {
@@ -114,6 +122,8 @@ export type ToolContext = {
   runtime: ToolRuntimeContext;
   runner: BoundTestRunner;
   functionGroupRunner?: FunctionGroupTestRunner;
+  /** Trusted Host callback, never controlled by tool arguments or Agent claims. */
+  reviewTestCorrection?: import("../test-evidence.js").TestCorrectionReviewer;
 };
 
 export function relativePath(value: unknown, label = "path"): string {

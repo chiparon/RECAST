@@ -1,14 +1,24 @@
 package com.example.assetupgrade.order.port;
 
+import com.example.assetupgrade.order.OrderRequest;
+
 /**
- * Skeleton seam for OrderPricingPort.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Pricing boundary that resolves the total for an order.
+ *
+ * <p>{@link #totalMinor(OrderRequest)} returns the order total in minor currency units. The
+ * application layer falls back to summing the line prices when no pricing provider is configured.
+ * No provider type appears here.</p>
  */
 public interface OrderPricingPort {
-    long totalMinor(com.example.assetupgrade.order.OrderRequest order);
-    /** Generic compatibility seam; typed methods define the contract. */
+
+    /** @return the total for {@code order} in minor currency units. */
+    long totalMinor(OrderRequest order);
+
+    /** Compatibility seam; the typed method defines the contract. */
     default Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
+        if (input instanceof OrderRequest order) {
+            return totalMinor(order);
+        }
+        throw new IllegalArgumentException("Expected an OrderRequest");
     }
 }

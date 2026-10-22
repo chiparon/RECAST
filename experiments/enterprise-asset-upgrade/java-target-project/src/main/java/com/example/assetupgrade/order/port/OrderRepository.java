@@ -1,16 +1,37 @@
 package com.example.assetupgrade.order.port;
 
+import com.example.assetupgrade.common.TenantId;
+import com.example.assetupgrade.order.OrderSnapshot;
+
+import java.util.Optional;
+
 /**
- * Skeleton seam for OrderRepository.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Tenant-scoped persistence boundary for order snapshots.
+ *
+ * <p>{@link #find(TenantId, String)} reads only the snapshot owned by {@code tenantId};
+ * {@link #save(OrderSnapshot)} persists the current state. No provider type appears here.</p>
  */
 public interface OrderRepository {
-    java.util.Optional<com.example.assetupgrade.order.OrderSnapshot> find(
-            com.example.assetupgrade.common.TenantId tenantId, String orderId);
-    void save(com.example.assetupgrade.order.OrderSnapshot snapshot);
-    /** Generic compatibility seam; typed methods define the contract. */
+
+    /** @return the snapshot for {@code orderId} owned by {@code tenantId}, if present. */
+    Optional<OrderSnapshot> find(TenantId tenantId, String orderId);
+
+    /** Persists {@code snapshot}. */
+    void save(OrderSnapshot snapshot);
+
+    /** Compatibility seam; the typed methods define the contract. */
     default Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
+        if (input instanceof FindRequest request) {
+            return find(request.tenantId(), request.orderId());
+        }
+        if (input instanceof OrderSnapshot snapshot) {
+            save(snapshot);
+            return null;
+        }
+        throw new IllegalArgumentException("Expected a FindRequest or OrderSnapshot");
+    }
+
+    /** Request holder accepted by the compatibility seam. */
+    record FindRequest(TenantId tenantId, String orderId) {
     }
 }

@@ -59,6 +59,8 @@ export interface ProjectAnalysisRecord extends ProjectAnalysisScope {
   projection: 'pending' | 'ready' | 'failed';
   updatedAt: string;
   error?: string;
+  /** A completed job with no independently owned files; no model or module projection was run. */
+  modelingSkippedReason?: string;
   proposal?: ProjectModuleProposal;
   planHash?: string;
   coverage?: { total: number; assigned: number; unassigned: Array<{ path: string; reason: string }> };

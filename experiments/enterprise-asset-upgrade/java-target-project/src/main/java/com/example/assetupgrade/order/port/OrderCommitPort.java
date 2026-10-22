@@ -1,15 +1,29 @@
 package com.example.assetupgrade.order.port;
 
+import com.example.assetupgrade.order.OrderRequest;
+import com.example.assetupgrade.order.Reservation;
+
 /**
- * Skeleton seam for OrderCommitPort.
- * This type defines an extension boundary; implementation policy belongs to the Agent.
- * Provider-specific behavior must remain behind the declared ports and adapters.
+ * Boundary that commits an order against its reservation.
+ *
+ * <p>{@link #commit(OrderRequest, Reservation)} performs the durable order write inside the
+ * caller's transaction boundary. No provider type appears here.</p>
  */
 public interface OrderCommitPort {
-    void commit(com.example.assetupgrade.order.OrderRequest order,
-                com.example.assetupgrade.order.Reservation reservation);
-    /** Generic compatibility seam; typed methods define the contract. */
+
+    /** Commits {@code order} against {@code reservation}. */
+    void commit(OrderRequest order, Reservation reservation);
+
+    /** Compatibility seam; the typed method defines the contract. */
     default Object execute(Object input) {
-        throw new UnsupportedOperationException("Implementation belongs to the evaluated Agent");
+        if (input instanceof CommitRequest request) {
+            commit(request.order(), request.reservation());
+            return null;
+        }
+        throw new IllegalArgumentException("Expected a CommitRequest");
+    }
+
+    /** Request holder accepted by the compatibility seam. */
+    record CommitRequest(OrderRequest order, Reservation reservation) {
     }
 }

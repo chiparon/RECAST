@@ -8,7 +8,16 @@ vi.mock('vscode', () => ({ workspace: {
   getConfiguration: () => config,
   get workspaceFolders() { return workspaceFolders; },
 }, ConfigurationTarget: { Global: 1, Workspace: 2 } }));
-import { loadSettings, resolveWorkspaceConfiguredPath, savePanelSettings } from './settings';
+import { loadSettings, resolvePlatformConfiguredPath, resolveWorkspaceConfiguredPath, savePanelSettings } from './settings';
+
+it('resolves shared Windows drive paths only when running under WSL', () => {
+  const windows = 'E:\\Code Projects\\history';
+  expect(resolvePlatformConfiguredPath(windows, 'linux', true)).toBe('/mnt/e/Code Projects/history');
+  expect(resolvePlatformConfiguredPath(windows, 'win32', true)).toBe(windows);
+  expect(resolvePlatformConfiguredPath(windows, 'linux', false)).toBe(windows);
+  expect(resolvePlatformConfiguredPath('/home/team/history', 'linux', true)).toBe('/home/team/history');
+  expect(resolvePlatformConfiguredPath('/mnt/e/Code Projects/history', 'win32', false)).toBe('E:/Code Projects/history');
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -60,6 +69,7 @@ describe('AI user settings', () => {
   });
 
   it('reads quoted and empty settings entries as the directories they denote', () => {
+    vi.stubEnv('WSL_DISTRO_NAME', ''); // Path mounting is covered separately above.
     config.get.mockImplementation((key: string, fallback: unknown) => {
       if (key === 'repositoryPaths') return ['"D:/reference"', '', '   '];
       if (key === 'adaptationApiUrl') return ' "http://127.0.0.1:9999" ';

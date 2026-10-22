@@ -1,5 +1,8 @@
+import { initializeSchema, schemaInitializationError, isSchemaBusy, type SchemaInitializationOptions } from './schema-initialization.js';
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { queryRows } from './abortable-query.js';
+import { SearchQueryGate } from './search-query-gate.js';
 import { seekDbQueryTimeoutMs } from './seekdb-timeouts.js';
 import mysql, {
   type Pool,
@@ -43,6 +46,8 @@ import {
   type SourceTextReader,
   type ProjectionFactLookup,
   type RevisionStatistics,
+  type SearchDocumentQuery,
+  type SearchDocumentsByView,
 } from './index-store.js';
 import {
   HashSearchEmbeddingProvider,
@@ -63,6 +68,8 @@ const lexicalStopWords = new Set([
   'void', 'object', 'string', 'boolean', 'bool', 'int', 'long', 'double', 'float', 'byte', 'char',
   'return', 'throws', 'throw', 'new', 'null', 'true', 'false', 'async', 'await', 'this', 'base', 'get', 'set',
   'input', 'output', 'args', 'value', 'result', 'context',
+  'implement', 'define', 'provide', 'reusable', 'existing', 'must', 'through', 'into',
+  'complete', 'preserve', 'without', 'business', 'behavior', 'domain', 'application',
 ]);
 
 /**
@@ -73,7 +80,7 @@ const lexicalStopWords = new Set([
  * boilerplate tokens are removed. An empty result falls back to the original
  * bounded query.
  */
-export function compactLexicalQuery(query: string, maxChars = 4_096): string {
+export function compactLexicalQuery(query: string, maxChars = 4_096, maxTerms = 16): string {
   const seen = new Set<string>();
   const terms: string[] = [];
   for (const rawLine of query.normalize('NFKC').split(/\r?\n/)) {
@@ -89,16 +96,25 @@ export function compactLexicalQuery(query: string, maxChars = 4_096): string {
       terms.push(term);
     }
   }
-  const compacted = terms.join(' ').slice(0, maxChars).trim();
+  // Natural-language full-text matching unions every posting list before
+  // the revision filter. A long but valid requirement can therefore scan
+  // most of the corpus even after stop-word removal. Bound that lexical work;
+  // the vector channel still receives the complete unmodified requirement.
+  const compacted = terms.slice(0, maxTerms).join(' ').slice(0, maxChars).trim();
   return compacted || query.normalize('NFKC').replace(/\s+/g, ' ').trim().slice(0, maxChars);
 }
 
 export interface SeekDbIndexStoreConfig {
+  initialization?: SchemaInitializationOptions;
   host: string;
   port: number;
   user: string;
   password: string;
   database: string;
+  /** Connections shared by search, metadata reads and indexing. */
+  connectionLimit?: number;
+  /** Concurrent full-text/vector SQL; zero leaves scheduling to the pool. */
+  searchQueryConcurrency?: number;
   structuralBatchRows?: number;
   /** Kept for the vector-capable search_documents projection. */
   vectorDimension?: number;
@@ -449,6 +465,25 @@ function toSearchDocument(scope: RepositoryRevisionScope, row: SearchDocumentRow
   };
 }
 
+/** Call only for reads or writes whose committed result can be recognized on retry. */
+async function retryTransientSql<T>(operation: () => Promise<T>, signal?: AbortSignal,
+  wait: (ms: number) => Promise<unknown> = ms => delay(ms, undefined, { signal })): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
+    try { return await operation(); }
+    catch (error) {
+      signal?.throwIfAborted();
+      const failure = error as { code?: string; errno?: number; message?: string };
+      const transient = ['ER_QUERY_TIMEOUT', 'ER_LOCK_DEADLOCK', 'ER_LOCK_WAIT_TIMEOUT',
+        'PROTOCOL_CONNECTION_LOST', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE'].includes(failure?.code ?? '') ||
+        [4012, 1205, 1213].includes(failure?.errno ?? 0) || /maximum query timeout|query has reached.*timeout/i.test(failure?.message ?? '');
+      if (!transient || attempt >= 2) throw error;
+      console.warn('[forexplore] Retrying transient database operation', { attempt: attempt + 1, code: failure.code, errno: failure.errno });
+      await wait(1000 * (attempt + 1));
+    }
+  }
+}
+
 async function withTransaction<T>(pool: Pool, operation: (connection: PoolConnection) => Promise<T>): Promise<T> {
   const connection = await pool.getConnection();
   let previousTimeout: number | undefined;
@@ -535,7 +570,13 @@ function searchDocumentProjectId(document: SearchDocumentRecord, filesByPath: Re
 }
 
 /** Version of the last migration in SeekDbIndexStore.#migrate(); read-only tools compare against it. */
-export const seekDbSchemaVersion = 3;
+export const seekDbSchemaVersion = 5;
+
+function connectionLimit(config: SeekDbIndexStoreConfig): number {
+  const limit = config.connectionLimit ?? 8;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 64) throw new Error('SeekDB connection limit must be an integer in 1..64.');
+  return limit;
+}
 
 /**
  * SeekDB persistence for the authoritative revision model. It uses dedicated
@@ -554,16 +595,21 @@ export class SeekDbIndexStore implements IndexStore {
   readonly #persistEmbeddings: boolean;
   #persistentEmbeddingHits = 0;
   #embeddingProviderDocuments = 0;
+  readonly #searchQueryGate: SearchQueryGate | undefined;
 
-  constructor(config: SeekDbIndexStoreConfig, private readonly pool: Pool = mysql.createPool({
+  constructor(private readonly config: SeekDbIndexStoreConfig, private readonly pool: Pool = mysql.createPool({
     host: config.host,
     port: config.port,
     user: config.user,
     password: config.password,
-    connectionLimit: 8,
+    connectionLimit: connectionLimit(config),
     enableKeepAlive: true,
     decimalNumbers: true,
   } satisfies PoolOptions)) {
+    connectionLimit(config);
+    const concurrency = config.searchQueryConcurrency ?? 0;
+    if (!Number.isInteger(concurrency) || concurrency < 0 || concurrency > 32) throw new Error('Search SQL concurrency must be an integer in 0..32.');
+    this.#searchQueryGate = concurrency ? new SearchQueryGate(concurrency) : undefined;
     this.#structuralBatchRows = config.structuralBatchRows ?? 250;
     if (!Number.isInteger(this.#structuralBatchRows) || this.#structuralBatchRows < 1 || this.#structuralBatchRows > 2048) throw new Error('Structural batch rows must be in 1..2048.');
     this.#database = identifier(config.database);
@@ -632,11 +678,15 @@ export class SeekDbIndexStore implements IndexStore {
   }
 
   async initialize(): Promise<void> {
-    const [versions] = await this.pool.query<RowDataPacket[]>('SELECT VERSION() AS version');
+    await initializeSchema(this.pool, this.config.database, connection => this.initializeLocked(connection), this.config.initialization);
+  }
+
+  private async initializeLocked(connection: PoolConnection): Promise<void> {
+    const [versions] = await connection.query<RowDataPacket[]>('SELECT VERSION() AS version');
     const version = /seekdb-v(\d+)\.(\d+)/i.exec(String(versions[0]?.version ?? ''));
     const supportsAsyncIndex = version !== null && (Number(version[1]) > 1 || Number(version[1]) === 1 && Number(version[2]) >= 3);
-    await this.pool.query(`CREATE DATABASE IF NOT EXISTS ${this.#database}`);
-    await this.pool.query(`
+    await connection.query(`CREATE DATABASE IF NOT EXISTS ${this.#database}`);
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.repositories} (
         repository_id VARCHAR(256) PRIMARY KEY NOT NULL,
         display_name VARCHAR(1024) NOT NULL,
@@ -648,7 +698,7 @@ export class SeekDbIndexStore implements IndexStore {
         updated_at VARCHAR(64) NOT NULL
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.analysisRevisions} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -665,7 +715,7 @@ export class SeekDbIndexStore implements IndexStore {
         INDEX idx_analysis_revisions_repository (repository_id, created_at)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.projects} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -680,7 +730,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, project_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.files} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -697,7 +747,7 @@ export class SeekDbIndexStore implements IndexStore {
         INDEX idx_files_path (repository_id, analysis_revision, relative_path(512))
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.symbols} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -721,7 +771,7 @@ export class SeekDbIndexStore implements IndexStore {
         UNIQUE KEY uq_symbols_key (repository_id, analysis_revision, symbol_key)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.dependencyEdges} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -741,7 +791,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, dependency_edge_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.diagnostics} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -757,7 +807,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, diagnostic_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.moduleArtifacts} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -773,7 +823,7 @@ export class SeekDbIndexStore implements IndexStore {
         PRIMARY KEY (repository_id, analysis_revision, module_artifact_id)
       ) ORGANIZATION = HEAP
     `);
-    await this.pool.query(`
+    await connection.query(`
       CREATE TABLE IF NOT EXISTS ${this.#tables.searchDocuments} (
         repository_id VARCHAR(256) NOT NULL,
         analysis_revision VARCHAR(256) NOT NULL,
@@ -794,27 +844,27 @@ export class SeekDbIndexStore implements IndexStore {
           WITH (DISTANCE=cosine, TYPE=hnsw, LIB=vsag${supportsAsyncIndex ? ', SYNC_MODE=immediate' : ''})
       ) ORGANIZATION = HEAP
     `);
-    await this.#migrate();
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingConfiguration} (
+    await this.#migrate(connection);
+    await connection.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingConfiguration} (
       slot INT PRIMARY KEY, config_hash CHAR(64) NOT NULL
     ) ORGANIZATION = HEAP`);
-    const [configured] = await this.pool.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
+    const [configured] = await connection.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
     if (!configured.length && !this.#legacyHashCompatible) {
-      const [existing] = await this.pool.query<RowDataPacket[]>(`SELECT search_document_id FROM ${this.#tables.searchDocuments} LIMIT 1`);
+      const [existing] = await connection.query<RowDataPacket[]>(`SELECT search_document_id FROM ${this.#tables.searchDocuments} LIMIT 1`);
       if (existing.length) throw new Error('Existing vectors have no model identity. Use a separate database and rebuild projections for this embedding model.');
     }
-    await this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingConfiguration} (slot, config_hash) VALUES (1, ?)`, [this.#embeddingIdentity]);
-    const [identity] = await this.pool.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
+    await connection.query(`INSERT IGNORE INTO ${this.#tables.embeddingConfiguration} (slot, config_hash) VALUES (1, ?)`, [this.#embeddingIdentity]);
+    const [identity] = await connection.query<RowDataPacket[]>(`SELECT config_hash FROM ${this.#tables.embeddingConfiguration} WHERE slot = 1`);
     if (String(identity[0]?.config_hash) !== this.#embeddingIdentity) {
       throw new Error('Embedding model/configuration does not match stored vectors. Use a separate database and rebuild projections.');
     }
     if (supportsAsyncIndex) {
-      const [definitions] = await this.pool.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
+      const [definitions] = await connection.query<RowDataPacket[]>(`SHOW CREATE TABLE ${this.#tables.searchDocuments}`);
       if (!/sync_mode\s*=\s*'?immediate'?/i.test(String(definitions[0]?.['Create Table'] ?? ''))) {
         throw new Error('Existing search index uses an incompatible asynchronous configuration. If the old analysis data is disposable, run scripts/reset-code-intelligence-index.ts --database <database> --apply, then reload the extension and reanalyze the selected repositories.');
       }
     }
-    if (this.#persistEmbeddings) await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingCache} (
+    if (this.#persistEmbeddings) await connection.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.embeddingCache} (
       content_hash CHAR(64) PRIMARY KEY, embedding JSON NOT NULL
     ) ORGANIZATION = HEAP`);
   }
@@ -824,11 +874,11 @@ export class SeekDbIndexStore implements IndexStore {
    * changes are appended here and never edited. Each step is probe-guarded, so a crash
    * between a change and its record only re-runs an idempotent step.
    */
-  async #migrate(): Promise<void> {
+  async #migrate(connection: PoolConnection): Promise<void> {
     const migrations: ReadonlyArray<readonly [version: number, name: string, up: () => Promise<void>]> = [
       [1, 'search_documents.source_range and path/project/symbol lookup indexes', async () => {
-        const [sourceRangeColumns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'source_range'`);
-        if (!sourceRangeColumns.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN source_range JSON NULL`);
+        const [sourceRangeColumns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'source_range'`);
+        if (!sourceRangeColumns.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN source_range JSON NULL`);
         for (const [table, name, columns] of [
           [this.#tables.files, 'idx_files_project', 'repository_id, analysis_revision, project_id'],
           [this.#tables.symbols, 'idx_symbols_path', 'repository_id, analysis_revision, relative_path(512)'],
@@ -837,26 +887,49 @@ export class SeekDbIndexStore implements IndexStore {
           [this.#tables.dependencyEdges, 'idx_dependencies_source_symbol', 'repository_id, analysis_revision, source_symbol_key'],
           [this.#tables.dependencyEdges, 'idx_dependencies_target_symbol', 'repository_id, analysis_revision, target_symbol_key'],
         ]) {
-          const [indexes] = await this.pool.query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
-          if (!indexes.length) await this.pool.query(`ALTER TABLE ${table} ADD INDEX ${name} (${columns})`);
+          const [indexes] = await connection.query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
+          if (!indexes.length) await connection.query(`ALTER TABLE ${table} ADD INDEX ${name} (${columns})`);
         }
       }],
       [2, 'search_documents.project_id backfill and scope index', async () => {
-        const [projectColumns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'project_id'`);
-        if (!projectColumns.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN project_id VARCHAR(256) NULL`);
-        await this.backfillSearchDocumentProjects();
-        const [indexes] = await this.pool.query<RowDataPacket[]>(`SHOW INDEX FROM ${this.#tables.searchDocuments} WHERE Key_name = 'idx_search_documents_scope'`);
-        if (!indexes.length) await this.pool.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD INDEX idx_search_documents_scope (repository_id, analysis_revision, kind, project_id)`);
+        const [projectColumns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'project_id'`);
+        if (!projectColumns.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD COLUMN project_id VARCHAR(256) NULL`);
+        await this.backfillSearchDocumentProjects(connection);
+        const [indexes] = await connection.query<RowDataPacket[]>(`SHOW INDEX FROM ${this.#tables.searchDocuments} WHERE Key_name = 'idx_search_documents_scope'`);
+        if (!indexes.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments} ADD INDEX idx_search_documents_scope (repository_id, analysis_revision, kind, project_id)`);
       }],
       [3, 'analysis_revisions.failure_stage for safe parse reuse', async () => {
-        const [columns] = await this.pool.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.analysisRevisions} LIKE 'failure_stage'`);
-        if (!columns.length) await this.pool.query(`ALTER TABLE ${this.#tables.analysisRevisions} ADD COLUMN failure_stage VARCHAR(32) NULL`);
+        const [columns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.analysisRevisions} LIKE 'failure_stage'`);
+        if (!columns.length) await connection.query(`ALTER TABLE ${this.#tables.analysisRevisions} ADD COLUMN failure_stage VARCHAR(32) NULL`);
+      }],
+      [4, 'stored source-fragment eligibility for bounded search', async () => {
+        const [columns] = await connection.query<RowDataPacket[]>(`SHOW COLUMNS FROM ${this.#tables.searchDocuments} LIKE 'implementation_eligible'`);
+        // A stored generated column applies the same predicate to existing,
+        // newly indexed and restored documents. Reading long source text and
+        // evaluating REGEXP in each lookup can force a full scope scan instead
+        // of the full-text index; eligibility is computed only when a row changes.
+        if (!columns.length) await connection.query(`ALTER TABLE ${this.#tables.searchDocuments}
+          ADD COLUMN implementation_eligible TINYINT GENERATED ALWAYS AS
+            (CASE WHEN kind = 'source-fragment'
+              THEN LENGTH(document_text) >= 24 AND document_text REGEXP '[^[:space:]]'
+              ELSE 1 END) STORED`);
+      }],
+      [5, 'covering indexes for revision language statistics', async () => {
+        // Status polling must not scan the full symbols table or fetch source
+        // rows through a secondary index on every refresh of a large corpus.
+        for (const [table, name, columns] of [
+          [this.#tables.files, 'idx_files_language_statistics', 'repository_id, analysis_revision, language_id'],
+          [this.#tables.symbols, 'idx_symbols_language_statistics', 'repository_id, analysis_revision, language_id, provider'],
+        ]) {
+          const [indexes] = await connection.query<RowDataPacket[]>(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [name]);
+          if (!indexes.length) await connection.query(`ALTER TABLE ${table} ADD INDEX ${name} (${columns})`);
+        }
       }],
     ];
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.schemaMigrations} (
+    await connection.query(`CREATE TABLE IF NOT EXISTS ${this.#tables.schemaMigrations} (
       version INT PRIMARY KEY, name VARCHAR(256) NOT NULL, applied_at VARCHAR(64) NOT NULL
     ) ORGANIZATION = HEAP`);
-    const [rows] = await this.pool.query<RowDataPacket[]>(`SELECT version FROM ${this.#tables.schemaMigrations}`);
+    const [rows] = await connection.query<RowDataPacket[]>(`SELECT version FROM ${this.#tables.schemaMigrations}`);
     const applied = new Set(rows.map((row) => Number(row.version)));
     const supported = migrations.at(-1)![0];
     if (supported !== seekDbSchemaVersion) throw new Error('seekDbSchemaVersion must equal the last migration version.');
@@ -866,8 +939,13 @@ export class SeekDbIndexStore implements IndexStore {
     }
     for (const [version, name, up] of migrations) {
       if (applied.has(version)) continue;
-      await up();
-      await this.pool.query(`INSERT IGNORE INTO ${this.#tables.schemaMigrations} (version, name, applied_at) VALUES (?, ?, ?)`,
+      this.config.initialization?.onProgress?.({ stage: 'migrating', migration: version, message: `正在升级索引数据库（第 ${version} 项），完成后自动继续；请勿关闭窗口…` });
+      try { await up(); }
+      catch (error) {
+        if (isSchemaBusy(error)) throw error;
+        throw schemaInitializationError(error, `结构升级 ${version}: ${name}`);
+      }
+      await connection.query(`INSERT IGNORE INTO ${this.#tables.schemaMigrations} (version, name, applied_at) VALUES (?, ?, ?)`,
         [version, name, new Date().toISOString()]);
     }
   }
@@ -876,11 +954,11 @@ export class SeekDbIndexStore implements IndexStore {
    * Derive search_documents.project_id for rows written without it: rows that predate
    * migration 2, and rows restored from such a backup. Idempotent; touches NULLs only.
    */
-  async backfillSearchDocumentProjects(): Promise<void> {
-    await this.pool.query(`UPDATE ${this.#tables.searchDocuments} d JOIN ${this.#tables.files} f
+  async backfillSearchDocumentProjects(connection: Pick<PoolConnection, 'query'> = this.pool): Promise<void> {
+    await connection.query(`UPDATE ${this.#tables.searchDocuments} d JOIN ${this.#tables.files} f
       ON f.repository_id = d.repository_id AND f.analysis_revision = d.analysis_revision AND f.relative_path = d.relative_path
       SET d.project_id = f.project_id WHERE d.kind <> 'summary' AND d.project_id IS NULL`);
-    await this.pool.query(`UPDATE ${this.#tables.searchDocuments}
+    await connection.query(`UPDATE ${this.#tables.searchDocuments}
       SET project_id = JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(document_text), document_text, '{}'), '$.projectId'))
       WHERE kind = 'summary' AND project_id IS NULL`);
   }
@@ -904,8 +982,8 @@ export class SeekDbIndexStore implements IndexStore {
     for (let offset = 0; offset < unique.length; offset += 128) {
       signal?.throwIfAborted();
       const batch = unique.slice(offset, offset + 128);
-      const [cached] = await this.pool.query<RowDataPacket[]>(`SELECT content_hash, embedding FROM ${this.#tables.embeddingCache}
-        WHERE content_hash IN (${batch.map(() => '?').join(',')})`, batch.map(([key]) => key));
+      const [cached] = await retryTransientSql(() => this.pool.query<RowDataPacket[]>(`SELECT content_hash, embedding FROM ${this.#tables.embeddingCache}
+        WHERE content_hash IN (${batch.map(() => '?').join(',')})`, batch.map(([key]) => key)), signal);
       for (const row of cached) {
         const vector = typeof row.embedding === 'string' ? JSON.parse(row.embedding) : row.embedding;
         if (!Array.isArray(vector)) throw new Error('Invalid persisted embedding.');
@@ -925,8 +1003,8 @@ export class SeekDbIndexStore implements IndexStore {
           vectors.set(key, vector);
           return [key, JSON.stringify(vector)];
         });
-        await this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingCache} (content_hash, embedding)
-          VALUES ${inputs.map(() => '(?, ?)').join(',')}`, parameters);
+        await retryTransientSql(() => this.pool.query(`INSERT IGNORE INTO ${this.#tables.embeddingCache} (content_hash, embedding)
+          VALUES ${inputs.map(() => '(?, ?)').join(',')}`, parameters), signal);
       }
     }
     return keys.map((key) => [...vectors.get(key)!]);
@@ -1222,16 +1300,32 @@ export class SeekDbIndexStore implements IndexStore {
     signal?.throwIfAborted();
     const embeddings = await this.embedDocuments(texts, signal);
     if (embeddings.length !== documents.length) throw new Error('Embedding provider returned an unexpected document count.');
-    await this.#writeBuilding(index, (connection) => insertBatches(connection, `INSERT INTO ${this.#tables.searchDocuments} (
+    if (!documents.length) return;
+    await retryTransientSql(() => this.#writeBuilding(index, async connection => {
+      // A COMMIT acknowledgement can be lost even though the rows are durable.
+      // The revision lock serializes retries; matching immutable rows are reused.
+      const [existing] = await connection.query<RowDataPacket[]>(`SELECT search_document_id, content_hash, kind FROM ${this.#tables.searchDocuments}
+        WHERE repository_id = ? AND analysis_revision = ? AND search_document_id IN (${documents.map(() => '?').join(',')})`,
+      [...scopeParams(index), ...documents.map(document => document.searchDocumentId)]);
+      const saved = new Map(existing.map(row => [String(row.search_document_id), row]));
+      const pending = documents.flatMap((document, position) => {
+        const prior = saved.get(document.searchDocumentId);
+        if (prior && (prior.content_hash !== document.contentHash || prior.kind !== document.kind)) {
+          throw new Error('Persisted search document conflicts with the immutable projection batch.');
+        }
+        return prior ? [] : [{ document, position }];
+      });
+      await insertBatches(connection, `INSERT INTO ${this.#tables.searchDocuments} (
       repository_id, analysis_revision, search_document_id, kind, relative_path, symbol_key, source_range,
       module_artifact_id, content_hash, title, document_text, search_text, project_id, embedding
-    )`, insertRows(documents, (document, position) => {
+    )`, insertRows(pending, ({ document, position }) => {
       const embedding = embeddings[position]!;
       assertEmbedding(embedding, this.#vectorDimension);
       return { vector: vectorHex(embedding), values: [document.repositoryId, document.analysisRevision, document.searchDocumentId,
         document.kind, document.relativePath, document.symbolKey ?? null, document.sourceRange ? JSON.stringify(document.sourceRange) : null,
         null, document.contentHash, document.title, document.text, texts[position]!, searchDocumentProjectId(document, facts.filesByPath)] };
-    })), signal);
+      }));
+    }, signal), signal);
   }
 
   async getSourceText(scope: RepositoryRevisionScope, relativePath: string): Promise<string | null> {
@@ -1549,14 +1643,9 @@ export class SeekDbIndexStore implements IndexStore {
   /**
    * Batched recall over several views at once.
    *
-   * One view costs one embedding, two candidate statements and one hydration
-   * statement.  A module search asks for three views per reference repository,
-   * which used to mean nine statements and three identical embeddings per
-   * repository: 20 repositories against a pool of eight connections, racing the
-   * indexing transaction, is what pushed single queries past the SeekDB session
-   * timeout.  Batching issues one embedding, two candidates (both views share
-   * the kind filter) and one hydration for the whole request.  Project scope is
-   * a plain project_id column for every kind, so it batches the same way.
+   * Views sharing a question reuse one embedding and one hydration statement.
+   * Each view retains its own text/vector lookup and top-N budget so fragments
+   * cannot displace symbols or summaries before module aggregation.
    */
   async searchSearchDocumentsByViews(
     scope: RepositoryRevisionScope & { projectId?: string },
@@ -1575,89 +1664,153 @@ export class SeekDbIndexStore implements IndexStore {
     views: readonly SearchDocumentRecord['kind'][],
     signal?: AbortSignal,
   ): Promise<Partial<Record<SearchDocumentRecord['kind'], SearchDocumentRecord[]>>> {
-    signal?.throwIfAborted();
-    const text = query.trim();
-    if (!text) return {};
-    const lexicalText = compactLexicalQuery(text);
-    const planned = views.flatMap((view) => {
-      const limit = limits[view];
-      if (!Number.isInteger(limit) || (limit ?? 0) < 1) return [];
-      const boundedLimit = Math.min(limit!, 200);
-      return [{ view, boundedLimit, candidateLimit: Math.min(Math.max(boundedLimit * 4, 24), 800) }];
-    });
-    if (!planned.length) return {};
-
-    const embedding = this.#embeddingProvider.embedQuery
-      ? await this.#embeddingProvider.embedQuery(text, signal)
-      : (await this.#embeddingProvider.embed([text], signal))[0];
-    if (!embedding) throw new Error('Search embedding provider omitted a query vector.');
-    assertEmbedding(embedding, this.#vectorDimension);
-
-    const batched = planned.length > 1;
-    const selected = new Map<SearchDocumentRecord['kind'], Array<[string, RankedScores]>>();
-    if (batched) {
-      // The union limit keeps the same head-room per view; kinds that produce no
-      // hit above the union cut simply return fewer rows, exactly as a per-view
-      // query with too small a limit would.
-      const candidateLimit = Math.min(2_400, planned.reduce((sum, item) => sum + item.candidateLimit, 0) * 2);
-      const candidates = await this.#recallCandidates({ scope, text: lexicalText, embedding,
-        kinds: planned.map((item) => item.view), candidateLimit, signal });
-      for (const item of planned) {
-        selected.set(item.view, this.#fuseCandidates(candidates.textRows, candidates.vectorRows, item.view, item.boundedLimit));
-      }
-    } else {
-      for (const item of planned) {
-        const candidates = await this.#recallCandidates({ scope, text: lexicalText, embedding,
-          kinds: [item.view], candidateLimit: item.candidateLimit, signal });
-        selected.set(item.view, this.#fuseCandidates(candidates.textRows, candidates.vectorRows, item.view, item.boundedLimit));
-      }
-    }
-
-    const wanted = [...new Set([...selected.values()].flatMap((entries) => entries.map(([id]) => id)))];
-    const documents = await this.#hydrateDocuments(scope, wanted, signal);
-    const result: Partial<Record<SearchDocumentRecord['kind'], SearchDocumentRecord[]>> = {};
-    for (const [view, entries] of selected) {
-      result[view] = entries.flatMap(([searchDocumentId, scores]) => {
-        const document = documents.get(searchDocumentId);
-        return document ? [{ ...document, retrievalScore: scores.retrievalScore }] : [];
-      });
-    }
-    return result;
+    return (await this.searchSearchDocumentsBatch([{ scope, query, limits, views }], signal))[0]!;
   }
 
-  /** The two ranked candidate sets of one hybrid lookup. */
-  async #recallCandidates(input: {
+  /** One full-text scan per lexical question, with independent scope/view
+   * top-Ns. All shared state lives in this invocation, never across revisions. */
+  async searchSearchDocumentsBatch(requests: readonly SearchDocumentQuery[], signal?: AbortSignal, concurrency = 4): Promise<SearchDocumentsByView[]> {
+    signal?.throwIfAborted();
+    if (requests.length > 256) throw new Error('Search batches require at most 256 queries.');
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error('Search concurrency must be in 1..32.');
+    const outputs: SearchDocumentsByView[] = requests.map(() => ({}));
+    const prepared = requests.flatMap((request, index) => {
+      const text = request.query.trim();
+      const planned = [...new Set(request.views)].flatMap(view => {
+        if (!['summary', 'symbol', 'source-fragment'].includes(view)) throw new Error('Invalid search view.');
+        const limit = request.limits[view];
+        if (!Number.isInteger(limit) || (limit ?? 0) < 1) return [];
+        const boundedLimit = Math.min(limit!, 200);
+        return [{ view, boundedLimit, candidateLimit: Math.min(Math.max(boundedLimit * 4, 24), 800) }];
+      });
+      return text && planned.length ? [{ ...request, index, text, lexicalText: compactLexicalQuery(text), planned }] : [];
+    });
+    const scopeKey = (scope: SearchDocumentQuery['scope']) => JSON.stringify([scope.repositoryId, scope.analysisRevision, scope.projectId ?? null]);
+    const lexicalKey = (item: typeof prepared[number]) => JSON.stringify([item.lexicalText, item.scope.projectId ?? null]);
+    const lexicalGroups = new Map<string, typeof prepared>();
+    const scopes = new Map<string, typeof prepared>();
+    for (const item of prepared) {
+      lexicalGroups.set(lexicalKey(item), [...(lexicalGroups.get(lexicalKey(item)) ?? []), item]);
+      scopes.set(scopeKey(item.scope), [...(scopes.get(scopeKey(item.scope)) ?? []), item]);
+    }
+    const lexical = new Map([...lexicalGroups].map(([key, items]) => [key, this.#lexicalCandidatesBatch(items.flatMap(item =>
+      item.planned.map(plan => ({ scope: item.scope, view: plan.view, candidateLimit: plan.candidateLimit }))), items[0]!.lexicalText, signal)]));
+    // Observe rejected scans immediately, even when their scope is still waiting
+    // for a worker. The original promises are awaited below and still reject.
+    for (const promise of lexical.values()) void promise.catch(() => undefined);
+    const work = [...scopes.values()];
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, async () => {
+      while (next < work.length) {
+        const items = work[next++]!;
+        await Promise.all(items.map(async item => {
+          signal?.throwIfAborted();
+          const embedding = this.#embeddingProvider.embedQuery
+            ? await this.#embeddingProvider.embedQuery(item.text, signal)
+            : (await this.#embeddingProvider.embed([item.text], signal))[0];
+          if (!embedding) throw new Error('Search embedding provider omitted a query vector.');
+          assertEmbedding(embedding, this.#vectorDimension);
+          const selected = new Map<SearchDocumentRecord['kind'], Array<[string, RankedScores]>>();
+          await Promise.all(item.planned.map(async plan => {
+            const [allTextRows, vectorRows] = await Promise.all([
+              lexical.get(lexicalKey(item))!,
+              this.#vectorCandidates({ scope: item.scope, embedding, kinds: [plan.view], candidateLimit: plan.candidateLimit, signal }),
+            ]);
+            const textRows = allTextRows.filter(row => row.repository_id === item.scope.repositoryId &&
+              row.analysis_revision === item.scope.analysisRevision && row.kind === plan.view).slice(0, plan.candidateLimit);
+            selected.set(plan.view, this.#fuseCandidates(textRows, vectorRows, plan.view, plan.boundedLimit));
+          }));
+          const wanted = [...new Set([...selected.values()].flatMap(entries => entries.map(([id]) => id)))];
+          const documents = await this.#hydrateDocuments(item.scope, wanted, signal);
+          outputs[item.index] = Object.fromEntries(item.planned.map(({ view }) => [view, (selected.get(view) ?? []).flatMap(([id, scores]) => {
+            const document = documents.get(id);
+            if (document && document.kind !== view) throw new Error('Search returned a document from another view.');
+            return document ? [{ ...document, retrievalScore: scores.retrievalScore }] : [];
+          })]));
+        }));
+      }
+    }));
+    return outputs;
+  }
+
+  async #lexicalCandidatesBatch(entries: readonly { scope: SearchDocumentQuery['scope']; view: SearchDocumentRecord['kind']; candidateLimit: number }[],
+    text: string, signal?: AbortSignal): Promise<RowDataPacket[]> {
+    const units = new Map<string, typeof entries[number]>();
+    for (const entry of entries) {
+      const key = JSON.stringify([entry.scope.repositoryId, entry.scope.analysisRevision, entry.view]);
+      const previous = units.get(key);
+      if (!previous || previous.candidateLimit < entry.candidateLimit) units.set(key, entry);
+    }
+    if (!units.size) return [];
+    const planned = [...units.values()];
+    const match = 'MATCH(search_text) AGAINST (? IN NATURAL LANGUAGE MODE)';
+    const projectId = planned[0]!.scope.projectId;
+    const projectFilter = projectId ? ' AND project_id = ?' : '';
+    if (planned.length === 1) {
+      const { scope, view, candidateLimit } = planned[0]!;
+      const rows = await this.#searchQuery(`
+        SELECT search_document_id, kind, ${match} AS text_score FROM ${this.#tables.searchDocuments}
+        WHERE repository_id = ? AND analysis_revision = ? AND kind = ?${projectFilter}${view === 'source-fragment' ? ' AND implementation_eligible = 1' : ''} AND ${match}
+        ORDER BY text_score DESC LIMIT ?
+      `, [text, ...scopeParams(scope), view, ...(projectId ? [projectId] : []), text, candidateLimit], signal);
+      return rows.map(row => ({ ...row, repository_id: scope.repositoryId, analysis_revision: scope.analysisRevision, kind: row.kind ?? view }));
+    }
+    const scopes = new Map<string, { scope: SearchDocumentQuery['scope']; views: SearchDocumentRecord['kind'][] }>();
+    for (const { scope, view } of planned) {
+      const key = JSON.stringify(scopeParams(scope));
+      const entry = scopes.get(key) ?? { scope, views: [] };
+      entry.views.push(view);
+      scopes.set(key, entry);
+    }
+    const where = [...scopes.values()].map(({ views }) => `(repository_id = ? AND analysis_revision = ? AND kind IN (${views.map(() => '?').join(',')}))`).join(' OR ');
+    const values = [...scopes.values()].flatMap(({ scope, views }) => [...scopeParams(scope), ...views]);
+    const cutoff = planned.map(() => '(repository_id = ? AND analysis_revision = ? AND kind = ? AND view_rank <= ?)').join(' OR ');
+    const cutoffs = planned.flatMap(({ scope, view, candidateLimit }) => [...scopeParams(scope), view, candidateLimit]);
+    const rows = await this.#searchQuery(`
+      SELECT repository_id, analysis_revision, search_document_id, kind, text_score FROM (
+        SELECT repository_id, analysis_revision, search_document_id, kind, ${match} AS text_score,
+          ROW_NUMBER() OVER (PARTITION BY repository_id, analysis_revision, kind ORDER BY ${match} DESC, search_document_id) AS view_rank
+        FROM ${this.#tables.searchDocuments}
+        WHERE (${where})${projectFilter} AND (kind <> 'source-fragment' OR implementation_eligible = 1) AND ${match}
+      ) ranked WHERE ${cutoff}
+      ORDER BY repository_id, analysis_revision, kind, view_rank
+    `, [text, text, ...values, ...(projectId ? [projectId] : []), text, ...cutoffs], signal);
+    for (const row of rows) if (!units.has(JSON.stringify([row.repository_id, row.analysis_revision, row.kind]))) {
+      throw new Error('Full-text batch returned a row outside its requested scopes.');
+    }
+    return rows;
+  }
+
+  async #vectorCandidates(input: {
     scope: RepositoryRevisionScope & { projectId?: string };
-    text: string;
     embedding: number[];
     kinds: readonly SearchDocumentRecord['kind'][];
     candidateLimit: number;
     signal?: AbortSignal;
-  }): Promise<{ textRows: RowDataPacket[]; vectorRows: RowDataPacket[] }> {
-    const { scope, text, embedding, kinds, candidateLimit, signal } = input;
+  }): Promise<RowDataPacket[]> {
+    const { scope, embedding, kinds, candidateLimit, signal } = input;
     const kindFilter = kinds.length === 1 ? 'kind = ?' : `kind IN (${kinds.map(() => '?').join(',')})`;
-    const textMatch = 'MATCH(search_text) AGAINST (? IN NATURAL LANGUAGE MODE)';
     // project_id sits in idx_search_documents_scope, so the vector pre-filter applies it before the top-N cut.
     const projectFilter = scope.projectId ? ' AND project_id = ?' : '';
+    // Filter whitespace-only and very short fragments before top-N without
+    // reading their long source text. The stored flag uses the original byte
+    // length/non-whitespace predicate, including for pre-migration documents.
+    const implementationFilter = kinds.includes('source-fragment')
+      ? ' AND implementation_eligible = 1' : '';
     const filterValues = [...scopeParams(scope), ...kinds, ...(scope.projectId ? [scope.projectId] : [])];
-    const [textRows, vectorRows] = await Promise.all([
-      queryRows<RowDataPacket[]>(this.pool, `
-        SELECT search_document_id, kind, ${textMatch} AS text_score
-        FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter} AND ${textMatch}
-        ORDER BY text_score DESC
-        LIMIT ?
-      `, [text, ...filterValues, text, candidateLimit], signal),
-      queryRows<RowDataPacket[]>(this.pool, `
+    return this.#searchQuery(`
         SELECT search_document_id, kind, GREATEST(0, 1 - cosine_distance(embedding, ${vectorHex(embedding)})) AS semantic_score
         FROM ${this.#tables.searchDocuments}
-        WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter}
+        WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter}${implementationFilter}
         ORDER BY cosine_distance(embedding, ${vectorHex(embedding)})
         APPROXIMATE
         LIMIT ?
-      `, [...filterValues, candidateLimit], signal),
-    ]);
-    return { textRows, vectorRows };
+      `, [...filterValues, candidateLimit], signal);
+  }
+
+  #searchQuery(sql: string, values: unknown[], signal?: AbortSignal): Promise<RowDataPacket[]> {
+    const execute = () => queryRows<RowDataPacket[]>(this.pool, sql, values, signal);
+    return this.#searchQueryGate ? this.#searchQueryGate.run(execute, signal) : execute();
   }
 
   /** Reciprocal-rank fusion of both candidate sets, for one view. */
@@ -1847,6 +2000,7 @@ export class SeekDbIndexStore implements IndexStore {
 }
 
 export const seekDbIndexStoreInternals = {
+  retryTransientSql,
   compactLexicalQuery,
   withTransaction,
   insertBatches,

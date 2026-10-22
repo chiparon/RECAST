@@ -1,0 +1,20 @@
+{
+  "caseId": "case-032",
+  "source": {
+    "repository": "keycloak",
+    "repositoryId": "repo-1884f841-e687-4f8f-bd00-ac8ac622492d",
+    "revision": "analysis-672ea4d0-5284-407c-be1e-f4260f3804f4",
+    "projectId": "project-1133a0288d95fd93d6132ebf",
+    "artifactId": "project-summary:project-1133a0288d95fd93d6132ebf:code-understanding/v1",
+    "planHash": "sha256:ecdde7f65f5d516c38c218a6b8bd308323fa35d27ff9cce43f43cc49e221461d",
+    "analysisHash": "c47cadcf02a425b7d1fa6ac9b7c83d9322b369fbd8c85ec43cf4199f4aadd6da",
+    "moduleId": "module-9a69f96d1af6fb9c54a26fe6"
+  },
+  "excerpts": [
+    {
+      "path": "services/src/main/resources/scripts/authenticator-template.js",
+      "excerpt": "/*\n * Template for JavaScript based authenticator's.\n * See org.keycloak.authentication.authenticators.browser.ScriptBasedAuthenticatorFactory\n */\n\n// import enum for error lookup\nAuthenticationFlowError = Java.type(\"org.keycloak.authentication.AuthenticationFlowError\");\n\n/**\n * An example authenticate function.\n *\n * The following variables are available for convenience:\n * user - current user {@see org.keycloak.models.UserModel}\n * realm - current realm {@see org.keycloak.models.RealmModel}\n * session - current KeycloakSession {@see org.keycloak.models.KeycloakSession}\n * httpRequest - current HttpRequest {@see org.keycloak.http.HttpRequest}\n * script - current script {@see org.keycloak.models.ScriptModel}\n * authenticationSession - current authentication session {@see org.keycloak.sessions.AuthenticationSessionModel}\n * LOG - current logger {@see org.jboss.logging.Logger}\n *\n * You one can extract current http request headers via:\n * httpRequest.getHttpHeaders().getHeaderString(\"Forwarded\")\n *\n * @param context {@see org.keycloak.authentication.AuthenticationFlowContext}\n */\nfunction authenticate(context) {\n\n    var username = user ? user.username : \"anonymous\";\n    LOG.info(script.name + \" trace auth for: \" + username);\n\n    var authShouldFail = false;\n    if (authShouldFail) {\n\n        context.failure(AuthenticationFlowError.INVALID_USER);\n        return;\n    }\n\n    context.success();\n}",
+      "truncated": false
+    }
+  ]
+}
