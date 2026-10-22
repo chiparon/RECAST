@@ -7,7 +7,6 @@ import type {
   VerificationFunction,
   VerificationReason,
   VerificationTestCase,
-  VerificationTestEvidence,
 } from "../../types.js";
 import type { AgentRunBudget } from "../agent.js";
 import { readFile } from "node:fs/promises";
@@ -23,6 +22,13 @@ export type HostTool<Input, Output> = {
   inputSchema: Record<string, unknown>;
   parse(input: unknown): Input;
   execute(input: Input): Promise<Output>;
+  /** A terminal tool can return feedback and keep the Agent running. */
+  isTerminal?(output: Output): boolean;
+};
+
+export type FinishFeedback = {
+  outcome: "continue";
+  feedback: string[];
 };
 
 export type HostToolFactory = (context: ToolContext) => HostTool<any, any>;
@@ -61,14 +67,24 @@ export type TargetTestResult = {
   stdout: string;
   stderr: string;
   durationMs: number;
+  /** Host-selected executable test files included in this run. */
+  testPaths?: string[];
   tests?: TestSummary;
+  /** Compilation, collection, or runner errors, distinct from failed assertions. */
+  executionErrors?: number;
+  testCases?: VerificationTestCase[];
   coverage?: TargetCoverageResult;
+  /** Fresh report files, relative to the target project, readable with read_target_file. */
+  reportPaths?: string[];
 };
 
 export type FunctionGroupTestRun = {
   status: "success" | "failure";
+  /** True when the Host terminated the test process after its deadline. */
+  timedOut?: boolean;
   testPaths: string[];
   tests: TestSummary;
+  executionErrors?: number;
   functions: FunctionGroupFunctionResult[];
   failures: Array<{
     message: string;
@@ -80,7 +96,8 @@ export type FunctionGroupTestRun = {
   exitCode: number | null;
   reason?: VerificationReason;
   testCases?: VerificationTestCase[];
-  testEvidence?: VerificationTestEvidence;
+  /** Fresh report files, relative to the target project, readable with read_target_file. */
+  reportPaths?: string[];
 };
 
 export type FunctionGroupTestRunner = {
@@ -112,8 +129,6 @@ export type ToolRuntimeContext = AgentTaskContext & {
 export type ToolState = {
   lastTargetTest?: TargetTestResult;
   lastFunctionGroupTest?: FunctionGroupTestRun;
-  functionGroupTests?: FunctionGroupTestRun[];
-  testEvidence?: VerificationTestEvidence;
 };
 
 export type ToolContext = {
@@ -122,8 +137,6 @@ export type ToolContext = {
   runtime: ToolRuntimeContext;
   runner: BoundTestRunner;
   functionGroupRunner?: FunctionGroupTestRunner;
-  /** Trusted Host callback, never controlled by tool arguments or Agent claims. */
-  reviewTestCorrection?: import("../test-evidence.js").TestCorrectionReviewer;
 };
 
 export function relativePath(value: unknown, label = "path"): string {

@@ -6,7 +6,6 @@ import {
   type ToolContext,
 } from "./common.js";
 import { type FinishIssue } from "./finish.js";
-import { testEvidence } from "../test-evidence.js";
 
 export type ReportUncertainInput = {
   issue: FinishIssue;
@@ -24,12 +23,7 @@ type FunctionGroupReportUncertainResult = {
   testExecutionStatus: FunctionGroupTestRun["status"];
   issue: FinishIssue;
   functionGroupTest: FunctionGroupTestRun;
-  testEvidence?: import("../../types.js").VerificationTestEvidence;
 };
-
-function latestFunctionGroupTest(context: ToolContext): FunctionGroupTestRun | undefined {
-  return context.state.functionGroupTests?.at(-1) ?? context.state.lastFunctionGroupTest;
-}
 
 export type ReportUncertainResult = FunctionReportUncertainResult | FunctionGroupReportUncertainResult;
 
@@ -99,7 +93,7 @@ export function createReportUncertainTool(): HostToolFactory {
     parse: parseReportUncertainInput,
     async execute(input) {
       if (context.runtime.functionGroup !== undefined) {
-        const functionGroupTest = latestFunctionGroupTest(context);
+        const functionGroupTest = context.state.lastFunctionGroupTest;
         if (functionGroupTest === undefined) {
           throw new Error("Run run_function_group_tests before report_uncertain.");
         }
@@ -108,7 +102,6 @@ export function createReportUncertainTool(): HostToolFactory {
           testExecutionStatus: functionGroupTest.status,
           issue: { ...input.issue },
           functionGroupTest,
-          testEvidence: structuredClone(testEvidence(context)),
         };
       }
       const targetTest = context.state.lastTargetTest;

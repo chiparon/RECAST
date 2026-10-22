@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentHost } from "./runtime.js";
@@ -8,7 +8,9 @@ import type { AgentCompletion, AgentMessage, AgentModelClient } from "./model.js
 import type { AgentWorkLogEvent } from "./work-log.js";
 import type { AgentTraceEvent } from "./trace-log.js";
 import type { AgentTask, AgentToolFactory } from "./agent.js";
-import type { HostTool, ToolRuntimeContext } from "./tools/common.js";
+import type { HostTool, TargetTestResult, ToolRuntimeContext } from "./tools/common.js";
+import { createFinishTool } from "./tools/finish.js";
+import { createWriteTargetTestTool } from "./tools/write-target-test.js";
 
 const subject = {
   sourceFunction: { path: "src/source.py", name: "source_fn" },
@@ -79,6 +81,67 @@ function clientFor(
 }
 
 describe("AgentHost runtime", () => {
+  it("returns full-suite feedback to the Agent, lets it repair a test, then finishes on a fresh passing suite", async () => {
+    const root = await mkdtemp(join(tmpdir(), "verifier-host-feedback-"));
+    try {
+      const path = "tests/agent/test_existing.py";
+      await mkdir(join(root, "tests/agent"), { recursive: true });
+      await writeFile(join(root, path), "stale fixture");
+      const runtime = { ...await resolveToolContext(), sourceProjectPath: root, targetProjectPath: root };
+      const calls: string[][] = [], observed: AgentMessage[][] = [], events: AgentTraceEvent[] = [];
+      const observe = async (paths: readonly string[]): Promise<TargetTestResult> => {
+        calls.push([...paths]);
+        const passed = await readFile(join(root, path), "utf8") === "repaired fixture";
+        return {
+          status: passed ? "success" : "failure", timedOut: false, exitCode: passed ? 0 : 1,
+          stdout: passed ? "" : `BEGIN ${"x".repeat(200_000)} END`, stderr: passed ? "" : "Expected current API fixture", durationMs: 1,
+          tests: { executed: 1, passed: passed ? 1 : 0, failed: passed ? 0 : 1, skipped: 0 },
+          coverage: { status: "available", targetFunction: { name: "target_fn", executed: true, lineCoverage: 100, branchCoverage: null } },
+          reportPaths: ["tests.xml"],
+        };
+      };
+      const host = createAgentHost({ resolveToolContext: async () => runtime, traceLogger: event => events.push(event),
+        limits: { maxContextCharacters: 40_000 },
+        modelClient: clientFor([
+          { toolCalls: [{ id: "first-finish", name: "finish", arguments: '{"testExecutionStatus":"success","translationStatus":"success"}' }] },
+          { toolCalls: [{ id: "repair", name: "write_target_test", arguments: JSON.stringify({ path, content: "repaired fixture" }) }] },
+          { toolCalls: [{ id: "retry-finish", name: "finish", arguments: '{"testExecutionStatus":"success","translationStatus":"success"}' }] },
+        ], observed),
+      });
+      const result = await host.run(task([
+        context => createFinishTool()({ ...context, runner: { run: path => observe([path]), runSuite: observe } }),
+        createWriteTargetTestTool(),
+      ]));
+      expect(result).toMatchObject({ testExecutionStatus: "success", translationStatus: "success", targetTest: { tests: { passed: 1 } } });
+      const feedback = JSON.parse(observed[1]!.find(message => message.role === "tool" && message.toolCallId === "first-finish")!.content);
+      expect(feedback).toMatchObject({ outcome: "continue", targetTest: { status: "failure", tests: { failed: 1 },
+        coverage: { status: "available", targetFunction: { executed: true } }, reportPaths: ["tests.xml"] } });
+      expect(feedback.feedback).toContainEqual(expect.stringContaining("does not match the Host result"));
+      expect(feedback).not.toHaveProperty("error");
+      expect(feedback.targetTest.stdout).toContain("BEGIN");
+      expect(feedback.targetTest.stdout).toContain("END");
+      expect(JSON.stringify(feedback).length).toBeLessThan(20_000);
+      expect(calls).toEqual([[path], [path]]);
+      expect(events.filter(event => event.event === "tool.completed" && event.toolName === "finish").map(event => event.terminal)).toEqual([false, true]);
+      expect(events.some(event => event.event === "tool.failed")).toBe(false);
+      expect(await readdir(root)).toEqual(["tests"]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("ignores legacy failure metadata supplied by a caller", async () => {
+    const legacy = { runs: [], revisions: [], failures: [{ id: "old-failure", runId: "old-run", testId: "old-test",
+      message: "stale expected value", versions: [], status: "unresolved" as const }] };
+    const input = { ...task([context => {
+      expect(context.state).toEqual({});
+      return tool("finish", async () => ({ status: "success" }))(context);
+    }]), functionGroup: { schemaVersion: "3.1" as const, mode: "requirement" as const, sourceLanguage: "Python", targetLanguage: "Python",
+      targetProjectPath: "/tmp/target", requirement: "Preserve behavior", functions: [{ target: subject.targetFunction }], testEvidence: legacy } };
+    const host = createAgentHost({ resolveToolContext, modelClient: clientFor([
+      { toolCalls: [{ id: "finish", name: "finish", arguments: "{}" }] },
+    ]) });
+    expect(await host.run(input)).toEqual({ status: "success" });
+    expect(legacy.failures[0]!.status).toBe("unresolved");
+  });
   it("bounds model diagnostics while preserving the complete Host trace and test facts", async () => {
     const output = { status: "success", tests: { executed: 23, passed: 23, failed: 0, skipped: 0 },
       stdout: `BEGIN ${"x".repeat(200_000)} END`, stderr: "y".repeat(100_000),
@@ -99,7 +162,7 @@ describe("AgentHost runtime", () => {
     expect(response.content.length).toBeLessThan(20_000);
     expect(events.find(event => event.event === "tool.completed" && event.toolName === "run_function_group_tests")?.output).toEqual(output);
   });
-  it.each([false, true])("cleans a Host-created C# harness after a run (failure=%s)", async (fail) => {
+  it.each([false, true])("retains a Host-created C# harness after a run (failure=%s)", async (fail) => {
     const root = await mkdtemp(join(tmpdir(), "verifier-host-cleanup-"));
     try {
       await writeFile(join(root, "Product.csproj"), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>');
@@ -114,7 +177,7 @@ describe("AgentHost runtime", () => {
         taskContext: { ...taskContext, targetLanguage: "C#", targetProjectPath: root } };
       if (fail) await expect(host.run(input)).rejects.toThrow("model unavailable");
       else await expect(host.run(input)).resolves.toEqual({ status: "success" });
-      expect(await readdir(root)).toEqual(["Product.csproj"]);
+      expect(await readdir(root)).toEqual(expect.arrayContaining(["Product.csproj", ".translation-verifier-tests"]));
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it("executes tool calls and returns a terminal tool result", async () => {

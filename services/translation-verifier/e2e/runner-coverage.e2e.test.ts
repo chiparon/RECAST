@@ -23,7 +23,7 @@ suite("real target runner coverage", () => {
       let language: string, sourcePath: string, testPath: string, functionName: string;
       let good: string, unrelated: string, failing: string, skipped: string;
       if (runner === "pytest") {
-        language = "Python"; sourcePath = "price.py"; testPath = "tests/test_price.py"; functionName = "calculate";
+        language = "Python"; sourcePath = "price.py"; testPath = "tests/translation-verifier/test_price.py"; functionName = "calculate";
         await put("pytest.ini", "[pytest]\ntestpaths=tests\npythonpath=.\n");
         await symlink(join(dependencies, "python"), join(root, ".venv"));
         await put(sourcePath, "def calculate(value):\n    if value > 0:\n        return value * 2\n    return 0\n");
@@ -32,18 +32,18 @@ suite("real target runner coverage", () => {
         failing = good.replace("== 6", "== 7");
         skipped = "import pytest\n@pytest.mark.skip\ndef test_price():\n    assert False\n";
       } else if (runner === "jest" || runner === "vitest") {
-        language = "JavaScript"; sourcePath = "price.js"; testPath = "tests/price.test.js"; functionName = "calculate";
+        language = "JavaScript"; sourcePath = "price.js"; testPath = "tests/translation-verifier/price.test.js"; functionName = "calculate";
         await symlink(join(dependencies, "node/node_modules"), join(root, "node_modules"));
         await put("package.json", JSON.stringify({ ...(runner === "vitest" ? { type: "module" } : {}), scripts: { test: runner === "jest" ? "jest" : "vitest run" }, devDependencies: { [runner]: "*" }, ...(runner === "jest" ? { jest: { roots: ["<rootDir>/tests"], coverageProvider: "babel" } } : {}) }));
-        if (runner === "vitest") await put("vitest.config.js", "export default {test: {include: ['tests/*.test.js']}};");
+        if (runner === "vitest") await put("vitest.config.js", "export default {test: {include: ['tests/**/*.test.js']}};");
         await put(sourcePath, `${runner === "vitest" ? "export " : ""}function calculate(value) {\n if (value > 0) return value * 2;\n return 0;\n}\n${runner === "jest" ? "module.exports = { calculate };" : ""}\n`);
-        const imports = runner === "jest" ? "const {calculate} = require('../price.js');\n" : "import {test, expect} from 'vitest';\nimport {calculate} from '../price.js';\n";
+        const imports = runner === "jest" ? "const {calculate} = require('../../price.js');\n" : "import {test, expect} from 'vitest';\nimport {calculate} from '../../price.js';\n";
         good = imports + "test('price', () => expect(calculate(3)).toBe(6));\n";
         unrelated = (runner === "vitest" ? "import {test, expect} from 'vitest';\n" : "") + "test('other', () => expect(true).toBe(true));\n";
         failing = good.replace("toBe(6)", "toBe(7)");
         skipped = good.replace("test(", "test.skip(");
       } else if (runner === "gradle") {
-        language = "Java"; sourcePath = "src/main/java/demo/Price.java"; testPath = "src/test/java/demo/PriceTest.java"; functionName = "calculate";
+        language = "Java"; sourcePath = "src/main/java/demo/Price.java"; testPath = "src/test/java/translation-verifier/demo/PriceTest.java"; functionName = "calculate";
         await put("settings.gradle", "rootProject.name = 'coverage-fixture'\n");
         await put("build.gradle", "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies { testImplementation 'junit:junit:4.13.2' }\n");
         await put("gradlew", `#!/bin/sh\nexec '${dependencies}/gradle-8.14.3/bin/gradle' "$@"\n`);
@@ -55,7 +55,7 @@ suite("real target runner coverage", () => {
         failing = good.replace("assertEquals(6,", "assertEquals(7,");
         skipped = good.replace("@Test", "@org.junit.Ignore @Test");
       } else {
-        language = "C#"; sourcePath = "src/Price.cs"; testPath = "tests/PriceTest.cs"; functionName = "Calculate";
+        language = "C#"; sourcePath = "src/Price.cs"; testPath = "tests/translation-verifier/PriceTest.cs"; functionName = "Calculate";
         await put("src/Price.csproj", '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>');
         await put(sourcePath, "namespace Demo; public static class Price { public static int Calculate(int value) { if (value > 0) return value * 2; return 0; } }\n");
         await put("tests/PriceTests.csproj", '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsTestProject>true</IsTestProject></PropertyGroup><ItemGroup><ProjectReference Include="../src/Price.csproj"/><PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1"/><PackageReference Include="xunit" Version="2.9.3"/><PackageReference Include="xunit.runner.visualstudio" Version="3.1.4"/><PackageReference Include="coverlet.collector" Version="6.0.4"/></ItemGroup></Project>');
@@ -79,16 +79,19 @@ suite("real target runner coverage", () => {
         expect(positive.coverage.targetFunction.lineCoverage).toBeGreaterThan(0);
         expect(positive.coverage.targetFunction.branchCoverage).toBe(50);
       }
-      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" })).resolves.toBeDefined();
+      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" }))
+        .resolves.toMatchObject({ testExecutionStatus: "success", translationStatus: "success" });
       await put(testPath, unrelated);
       const negative = await tool.execute({ path: testPath });
       expect(negative, JSON.stringify(negative) + negative.stderr + negative.stdout).toMatchObject({ status: "success", tests: { executed: 1 }, coverage: { status: "available", targetFunction: { executed: false, lineCoverage: 0 } } });
-      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" })).rejects.toThrow();
+      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" }))
+        .resolves.toMatchObject({ outcome: "continue", targetTest: { coverage: { status: "available", targetFunction: { executed: false } } } });
       await put(testPath, failing);
       expect(await tool.execute({ path: testPath })).toMatchObject({ status: "failure", tests: { failed: 1 } });
       await put(testPath, skipped);
       expect(await tool.execute({ path: testPath })).toMatchObject({ tests: { executed: 0, skipped: 1 } });
-      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" })).rejects.toThrow();
+      await expect(finish.execute({ testExecutionStatus: "success", translationStatus: "success" }))
+        .resolves.toMatchObject({ outcome: "continue", targetTest: { tests: { executed: 0, skipped: 1 } } });
     } finally { if (process.env.TRANSLATION_VERIFIER_RUNNER_KEEP === "1") console.log("Fixture:", root); else await rm(root, { recursive: true, force: true }); }
   }, 300_000);
 });

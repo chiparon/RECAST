@@ -50,6 +50,27 @@ export function parseNodeTests(json: string): TestSummary {
   return summary(report.numTotalTests, report.numFailedTests, counter(report.numPendingTests ?? 0) + counter(report.numTodoTests ?? 0));
 }
 
+export function parseExecutionErrors(format: "junit" | "node" | "trx", content: string): number {
+  if (format === "node") {
+    const report = jsonReport(content);
+    const files = report.testResults ?? [];
+    const errors = files.filter((file: any) => file.testExecError ||
+      (file.status === "failed" && !(file.assertionResults?.length))).length;
+    return Math.max(counter(report.numRuntimeErrorTestSuites ?? 0), errors);
+  }
+  const report = xmlReport(content);
+  if (format === "trx") {
+    const counters = report.TestRun?.ResultSummary?.Counters;
+    return ["error", "timeout", "aborted", "notRunnable"].reduce((total, key) => total + counter(counters?.[key] ?? 0), 0);
+  }
+  const visit = (suite: any): number => {
+    const children: any[] = suite.testsuite ?? [];
+    const cases = (suite.testcase ?? []).filter((test: any) => test.error !== undefined).length;
+    return Math.max(counter(suite.errors ?? 0), cases + children.reduce((total, child) => total + visit(child), 0));
+  };
+  return (report.testsuite ?? report.testsuites?.testsuite ?? []).reduce((total: number, suite: any) => total + visit(suite), 0);
+}
+
 function reportMessage(value: any): string | undefined {
   if (value === undefined) return undefined;
   const items = Array.isArray(value) ? value : [value];
@@ -157,39 +178,83 @@ export function parseTrx(xml: string): TestSummary {
   const skipped = counts.executed !== undefined ? total - counter(counts.executed) : counter(counts.notExecuted);
   return summary(total, total - skipped - passed, skipped);
 }
-export function parseCobertura(xml: string, subject: VerificationFunction, root?: string): TargetFunctionCoverage {
+/** Source enables overload-safe C# state-machine attribution; three-argument calls retain legacy name-only async matching. */
+export function parseCobertura(xml: string, subject: VerificationFunction, root?: string, source?: string): TargetFunctionCoverage {
   const report = xmlReport(xml).coverage;
   const packages = report?.packages?.package;
   const packageList = Array.isArray(packages) ? packages : packages ? [packages] : [];
-  const methods: any[] = [];
-  const declaringType = functionDeclaringType(subject);
+  const methods: { method: any; owner: string; kind: "method" | "state" | "accessor"; declaration?: CsharpMethodRange }[] = [];
+  const declaringType = csharpDeclaringType(subject);
+  const stateOwners = new Set<string>();
+  const declarations = source === undefined ? undefined : csharpMethodRanges(source, subject.name);
   for (const pkg of packageList) for (const cls of pkg.classes?.class ?? []) {
     const className = String(cls.name ?? "").replaceAll("&lt;", "<").replaceAll("&gt;", ">");
     // Coverlet attributes async/iterator bodies to the compiler-generated
     // state machine's MoveNext, rather than the source method. Use the
     // original declaring type and method encoded in that class identity.
-    const stateMachine = className.match(/^(.*)\/<([^<>]+)>d__\d+$/);
+    const stateMachine = className.match(/^(.*)\/<([^<>]+)>d__\d+(?:`\d+)?$/);
     const path = String(cls.filename ?? "").replaceAll("\\", "/");
     if (root) {
       const sources: string[] = report.sources?.source ?? [];
       const candidates = isAbsolute(path) ? [path] : sources.length ? sources.map(source => resolve(source, path)) : [resolve(root, path)];
       if (!candidates.some(candidate => fileIdentity(root, candidate) === fileIdentity(root, subject.path))) continue;
     } else if (path !== subject.path) continue;
-    if (declaringType) {
-      const owner = stateMachine?.[1] ?? className;
-      const simpleName = owner.split(/[.:/]/).filter(Boolean).at(-1) ?? owner;
-      if (simpleName !== declaringType && owner !== declaringType) continue;
-    }
+    const owner = normalizeCsharpOwner(stateMachine?.[1] ?? className);
+    if (declaringType && !matchesCsharpOwner(owner, declaringType)) continue;
     for (const method of cls.methods?.method ?? []) {
       if (stateMachine) {
-        if (stateMachine[2] === subject.name && method.name === "MoveNext") methods.push(method);
-      } else if (method.name === subject.name && (!subject.signature || matchesCsharpSignature(method.signature, subject.signature, subject.name))) methods.push(method);
+        if (stateMachine[2] !== subject.name || method.name !== "MoveNext") continue;
+        stateOwners.add(owner);
+        if (source !== undefined) {
+          const ranges = declarations?.filter(declaration => declaration.owner === owner) ?? [];
+          const matching = ranges.filter(declaration => !subject.signature || matchesCsharpSignature(declaration.parameters, subject.signature, subject.name));
+          if (matching.length !== 1) continue;
+          const declaration = matching[0]!;
+          const points = method.lines?.line ?? [];
+          // Every sequence point must belong exclusively to the selected source
+          // declaration. Two overloads on one line cannot be distinguished here.
+          if (!points.length || !points.every((point: any) => {
+            const line = counter(point.number);
+            return line > 0 && line >= declaration.start && line <= declaration.end &&
+              !ranges.some(other => other !== declaration && line >= other.start && line <= other.end);
+          })) continue;
+          methods.push({ method, owner, kind: "state", declaration });
+        } else methods.push({ method, owner, kind: "state" });
+      } else if (method.name === subject.name && (!subject.signature || matchesCsharpSignature(method.signature, subject.signature, subject.name))) {
+        methods.push({ method, owner, kind: "method" });
+      } else if (!/^(?:get_|set_)/.test(subject.name) && !subject.signature?.includes("(") && ["get_", "set_"].some(prefix => method.name === prefix + subject.name)) {
+        methods.push({ method, owner, kind: "accessor" });
+      }
     }
   }
-  if (methods.length !== 1) throw new Error(`Cannot uniquely locate target function ${subject.signature ?? subject.name} in Cobertura report (${methods.length} matches).`);
-  const lines = methods[0].lines?.line ?? [];
+  // Some producers emit both the async kickoff method and MoveNext. Prefer
+  // body evidence only after source proves they represent the same declaration.
+  const selected = methods.filter(candidate => {
+    if (candidate.kind !== "method") return true;
+    const states = methods.filter(state => state.kind === "state" && state.owner === candidate.owner);
+    const matchingStates = states.filter(state => state.declaration &&
+      matchesCsharpSignature(candidate.method.signature, `${subject.name}${state.declaration.parameters}`, subject.name));
+    if (matchingStates.length) return false;
+    if (source !== undefined && stateOwners.has(candidate.owner)) {
+      const ranges = declarations?.filter(declaration => declaration.owner === candidate.owner &&
+        matchesCsharpSignature(candidate.method.signature, `${subject.name}${declaration.parameters}`, subject.name)) ?? [];
+      // Do not let an unmapped async kickoff stub stand in for its body.
+      return ranges.length === 1 && !ranges[0]!.stateful;
+    }
+    return true;
+  });
+  const property = selected.length > 0 && selected.every(candidate => candidate.kind === "accessor" && candidate.owner === selected[0]!.owner) &&
+    new Set(selected.map(candidate => candidate.method.name)).size === selected.length;
+  if (selected.length !== 1 && !property) throw new Error(`Cannot uniquely locate target function ${subject.signature ?? subject.name} in Cobertura report (${selected.length} matches).`);
+  const lines = selected.flatMap(candidate => candidate.method.lines?.line ?? []);
   if (lines.length === 0) throw new Error("Missing method sequence points in Cobertura report.");
-  const hits = lines.map((line: any) => counter(line.hits));
+  const hits = property
+    ? [...lines.reduce((byLine: Map<number, number>, line: any) => {
+      const number = counter(line.number), hits = counter(line.hits);
+      byLine.set(number, Math.max(byLine.get(number) ?? 0, hits));
+      return byLine;
+    }, new Map<number, number>()).values()]
+    : lines.map((line: any) => counter(line.hits));
   let coveredBranches = 0, totalBranches = 0;
   for (const line of lines) if (String(line.branch).toLowerCase() === "true") {
     const match = String(line["condition-coverage"]).match(/\((\d+)\/(\d+)\)/);
@@ -200,6 +265,168 @@ export function parseCobertura(xml: string, subject: VerificationFunction, root?
     totalBranches += total;
   }
   return { name: subject.name, executed: hits.some((n: number) => n > 0), lineCoverage: percent(hits), branchCoverage: totalBranches === 0 ? null : Math.round(coveredBranches / totalBranches * 10_000) / 100 };
+}
+
+function normalizeCsharpOwner(owner: string): string {
+  return owner.replace(/global::/g, "").replace(/[+/]|::/g, ".").replace(/@/g, "");
+}
+
+function matchesCsharpOwner(actual: string, requested: string): boolean {
+  return actual === requested || !requested.includes(".") && actual.split(".").at(-1) === requested;
+}
+
+function csharpDeclaringType(subject: VerificationFunction): string | undefined {
+  const head = subject.signature?.split("(", 1)[0]?.trim();
+  if (!head) return undefined;
+  const escaped = subject.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = head.match(new RegExp(`([\\w.@+\\x60:/]+)(?:\\.|::)${escaped}$`));
+  return match ? normalizeCsharpOwner(match[1]!) : undefined;
+}
+
+type CsharpMethodRange = { owner: string; parameters: string; start: number; end: number; stateful: boolean };
+
+// This is a conservative declaration locator, not a C# compiler. It only
+// associates member bodies whose delimiters and parameter identities are known.
+// Unsupported syntax and remapped line numbers leave coverage unavailable.
+function csharpMethodRanges(source: string, name: string): CsharpMethodRange[] | undefined {
+  const masked = maskCsharpSource(source);
+  if (masked === undefined || /^\s*#\s*line\b/m.test(masked)) return undefined;
+  const pairs = new Map<number, number>(), braces: { open: number; close: number }[] = [], stack: number[] = [];
+  for (let index = 0; index < masked.length; index++) {
+    const char = masked[index]!;
+    if ("({[".includes(char)) stack.push(index);
+    else if (")}]".includes(char)) {
+      const open = stack.pop();
+      if (open === undefined || masked[open] !== ({ ")": "(", "}": "{", "]": "[" }[char])) return undefined;
+      pairs.set(open, index);
+      if (char === "}") braces.push({ open, close: index });
+    }
+  }
+  if (stack.length) return undefined;
+  const scopes: { open: number; close: number; name: string; type: boolean }[] = [];
+  let fileNamespace = "";
+  const scopePattern = /\b(namespace|class|struct|interface|record)\s+(?:(?:class|struct)\s+)?(@?\w+(?:\s*\.\s*@?\w+)*)/g;
+  for (const match of masked.matchAll(scopePattern)) {
+    let index = match.index + match[0].length;
+    for (; index < masked.length && !"{};=".includes(masked[index]!); index++) {
+      if (pairs.has(index) && masked[index] !== "{") index = pairs.get(index)!;
+    }
+    const scopeName = match[2]!.replace(/\s|@/g, "");
+    if (masked[index] === "{" && pairs.has(index)) scopes.push({ open: index, close: pairs.get(index)!, name: scopeName, type: match[1] !== "namespace" });
+    else if (masked[index] === ";" && match[1] === "namespace") {
+      if (fileNamespace) return undefined;
+      fileNamespace = scopeName;
+    }
+  }
+  scopes.sort((a, b) => a.open - b.open);
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const ranges: CsharpMethodRange[] = [];
+  const lineAt = (offset: number) => source.slice(0, offset).split("\n").length;
+  for (const match of masked.matchAll(new RegExp(`\\b@?${escaped}\\s*\\(`, "g"))) {
+    const containing = scopes.filter(scope => scope.open < match.index && scope.close > match.index);
+    const parent = containing.at(-1);
+    if (!parent?.type || braces.some(brace => brace.open > parent.open && brace.open < match.index && brace.close > match.index)) continue;
+    let boundary = match.index - 1;
+    while (boundary > parent.open && !";{}".includes(masked[boundary]!)) boundary--;
+    const prefix = masked.slice(boundary + 1, match.index).replace(/\[[^\]]*\]/g, " ").trim();
+    // A member invocation in a field initializer is not a declaration.
+    if (!prefix || /[=(){};]/.test(prefix)) continue;
+    const open = match.index + match[0].lastIndexOf("("), close = pairs.get(open);
+    if (close === undefined) return undefined;
+    const params = splitCsharpTypes(source.slice(open + 1, close));
+    if (!params) continue;
+    const types = params.map(csharpParameterType);
+    if (types.some(type => type === undefined)) continue;
+    let body = close + 1;
+    while (/\s/.test(masked[body] ?? "") && body < masked.length) body++;
+    if (masked.slice(body, body + 5) === "where") {
+      while (body < parent.close && masked[body] !== "{" && masked.slice(body, body + 2) !== "=>" && masked[body] !== ";") body++;
+    }
+    let end: number | undefined;
+    if (masked[body] === "{") end = pairs.get(body);
+    else if (masked.slice(body, body + 2) === "=>") {
+      for (let index = body + 2; index < parent.close; index++) {
+        if (masked[index] === ";") { end = index; break; }
+        if (pairs.has(index)) index = pairs.get(index)!;
+      }
+    }
+    if (end === undefined) continue;
+    const owner = [fileNamespace, ...containing.map(scope => scope.name)].filter(Boolean).join(".");
+    const start = boundary + 1 + masked.slice(boundary + 1, match.index).search(/\S/);
+    ranges.push({ owner, parameters: `(${types.join(",")})`, start: lineAt(start), end: lineAt(end),
+      stateful: /\basync\b/.test(prefix) || /\byield\s+(?:return|break)\b/.test(masked.slice(body, end)) });
+  }
+  return ranges;
+}
+
+// Erase comments and literal contents while preserving offsets and line numbers.
+// Interpolation expressions may contain nested literals and balanced braces.
+function maskCsharpSource(source: string): string | undefined {
+  const literalEnd = (start: number): number => {
+    if (source.startsWith("//", start)) {
+      const end = source.indexOf("\n", start + 2);
+      return end < 0 ? source.length : end;
+    }
+    if (source.startsWith("/*", start)) {
+      const end = source.indexOf("*/", start + 2);
+      return end < 0 ? -1 : end + 2;
+    }
+    const prefix = source.slice(start).match(/^(?:\$@|@\$|@|\$+)?["']/)?.[0];
+    if (!prefix) return start;
+    const quote = prefix.at(-1)!;
+    if (quote === "'" && prefix.length !== 1) return -1;
+    const verbatim = prefix.includes("@"), interpolated = prefix.includes("$");
+    let index = start + prefix.length;
+    if (quote === '"' && source.startsWith('""', index)) {
+      let count = 1;
+      while (source[start + prefix.length - 1 + count] === '"') count++;
+      // Interpolated raw strings need the full language grammar to interpret
+      // delimiter and interpolation brace counts safely.
+      if (interpolated || verbatim) return -1;
+      const end = source.indexOf('"'.repeat(count), start + count);
+      return end < 0 ? -1 : end + count;
+    }
+    while (index < source.length) {
+      if (!verbatim && source[index] === "\\") { index += 2; continue; }
+      if (source[index] === quote) {
+        if (verbatim && source[index + 1] === quote) { index += 2; continue; }
+        return index + 1;
+      }
+      if (interpolated && source[index] === "{") {
+        if (source[index + 1] === "{") { index += 2; continue; }
+        let depth = 1;
+        index++;
+        while (index < source.length && depth) {
+          const end = literalEnd(index);
+          if (end < 0) return -1;
+          if (end > index) { index = end; continue; }
+          if (source[index] === "{") depth++;
+          else if (source[index] === "}") depth--;
+          index++;
+        }
+        if (depth) return -1;
+      } else index++;
+    }
+    return -1;
+  };
+  const masked = source.split("");
+  for (let index = 0; index < source.length;) {
+    const end = literalEnd(index);
+    if (end < 0) return undefined;
+    if (end === index) { index++; continue; }
+    while (index < end) {
+      if (masked[index] !== "\n" && masked[index] !== "\r") masked[index] = " ";
+      index++;
+    }
+  }
+  return masked.join("");
+}
+
+function csharpParameterType(parameter: string): string | undefined {
+  const declaration = parameter.split("=", 1)[0]!.trim().replace(/^(?:\[[^\]]*\]\s*)+/, "");
+  const byRef = /^(?:(?:this|scoped)\s+)*(?:ref|out|in)\s/.test(declaration);
+  const type = declaration.replace(/^(?:(?:this|params|ref|out|in|scoped|readonly)\s+)+/, "").replace(/\s+@?[\w]+$/, "").trim();
+  return type && !/[=;{}]/.test(type) ? type + (byRef ? "&" : "") : undefined;
 }
 
 function functionDeclaringType(subject: VerificationFunction): string | undefined {
@@ -229,12 +456,8 @@ function matchesCsharpSignature(actual: string, requested: string, name: string)
   const actualTypes = splitCsharpTypes(actual.slice(1, -1).replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"));
   if (!params || !actualTypes || params.length !== actualTypes.length) return false;
   return params.every((param, index) => {
-    const declaration = param.split("=", 1)[0]!.trim();
-    const byRef = /^(?:(?:this|scoped)\s+)*(?:ref|out|in)\s/.test(declaration);
-    const type = declaration
-      .replace(/^(?:(?:this|params|ref|out|in|scoped|readonly)\s+)+/, "")
-      .replace(/\s+[\w]+$/, "").trim();
-    return matchesCsharpType(actualTypes[index]!, type + (byRef ? "&" : ""));
+    const type = csharpParameterType(param);
+    return type !== undefined && matchesCsharpType(actualTypes[index]!, type);
   });
 }
 
@@ -265,8 +488,10 @@ const csharpAliases: Record<string, string> = {
   float: "System.Single", decimal: "System.Decimal", object: "System.Object", nint: "System.IntPtr", nuint: "System.UIntPtr",
 };
 function matchesCsharpType(actual: string, requested: string): boolean {
-  actual = actual.replace(/\s+|global::/g, "");
-  requested = requested.replace(/\s+|global::/g, "");
+  const normalize = (type: string) => type.replace(/\s+|global::/g, "").replace(/\b\w+\b/g, name => csharpAliases[name] ?? name);
+  actual = normalize(actual);
+  requested = normalize(requested);
+  if (actual === requested) return true;
   if (requested.endsWith("?")) {
     const underlying = requested.slice(0, -1);
     const nullable = actual.match(/^System\.Nullable`?1?<(.+)>$/);
