@@ -18,7 +18,7 @@ export const TARGET_AFTER_ROOT = join(FIXTURE_ROOT, "target-project-after");
 export const TARGET_FUNCTION_PATH =
   "src/main/java/org/apache/commons/fileupload/MultipartStream.java";
 export const GENERATED_TEST_PATH =
-  "src/test/java/org/apache/commons/fileupload/TranslationVerifierReadBodyDataTest.java";
+  "src/test/java/translation-verifier/org/apache/commons/fileupload/TranslationVerifierReadBodyDataTest.java";
 
 const FIXTURE_INPUT_PATH = join(FIXTURE_ROOT, "input.json");
 

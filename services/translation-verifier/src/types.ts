@@ -58,7 +58,7 @@ export type FunctionGroupVerificationInput = {
   unmatchedFunctions?: VerificationFunction[];
   /** Bounded shared protocol view; advisory context only. */
   moduleProtocol?: ModuleProtocol;
-  /** Host facts carried across verifier attempts; never inferred from terminal claims. */
+  /** @deprecated Legacy caller metadata; ignored by verification and never emitted. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -71,6 +71,7 @@ export type RequirementFunctionGroupVerificationInput = {
   requirement: string;
   functions: RequirementFunctionGroupVerificationFunction[];
   moduleProtocol?: ModuleProtocol;
+  /** @deprecated Legacy caller metadata; ignored by verification and never emitted. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -138,6 +139,7 @@ export type FunctionGroupVerificationResult = {
   functions: FunctionGroupFunctionResult[];
   reason?: VerificationReason;
   protocolChecks?: ProtocolCheck[];
+  /** @deprecated Retained for callers reading older results; current runs never emit history. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -161,6 +163,7 @@ export type VerificationTestCorrection = {
   requirementEvidence: string;
 };
 
+/** @deprecated Shape of previously stored failure history; no longer produced or consumed by the verifier. */
 export type VerificationTestEvidence = {
   runs: Array<{
     id: string;
@@ -179,7 +182,7 @@ export type VerificationTestEvidence = {
     versions: VerificationTestVersion[];
     status: "unresolved" | "resolved";
     resolution?: {
-      kind: "unchanged-test-replayed" | "reviewed-test-correction";
+      kind: "unchanged-test-replayed" | "reviewed-test-correction" | "suite-revalidated";
       runId: string;
       reason: string;
       requirementEvidence?: string;

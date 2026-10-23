@@ -1,4 +1,5 @@
-import type { BoundTestRunner } from "../test-runner.js";
+import type { BoundTestRunner } from "../testing/test-runner.js";
+import type { StructuredToolInterface } from "@langchain/core/tools";
 import type {
   FunctionGroupVerificationInput,
   FunctionGroupFunctionResult,
@@ -7,9 +8,8 @@ import type {
   VerificationFunction,
   VerificationReason,
   VerificationTestCase,
-  VerificationTestEvidence,
 } from "../../types.js";
-import type { AgentRunBudget } from "../agent.js";
+import type { AgentRunBudget } from "../agent/run-budget.js";
 import { readFile } from "node:fs/promises";
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -17,15 +17,8 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 export const MAX_TEXT_FILE_CHARS = 256_000;
 export const MAX_TEST_OUTPUT_CHARS = 64_000;
 
-export type HostTool<Input, Output> = {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  parse(input: unknown): Input;
-  execute(input: Input): Promise<Output>;
-};
-
-export type HostToolFactory = (context: ToolContext) => HostTool<any, any>;
+/** A strategy-selected native LangChain tool bound to this run's Host context. */
+export type HostToolFactory = (context: ToolContext) => StructuredToolInterface;
 
 export type TestRunner =
   | "maven"
@@ -61,14 +54,24 @@ export type TargetTestResult = {
   stdout: string;
   stderr: string;
   durationMs: number;
+  /** Host-selected executable test files included in this run. */
+  testPaths?: string[];
   tests?: TestSummary;
+  /** Compilation, collection, or runner errors, distinct from failed assertions. */
+  executionErrors?: number;
+  testCases?: VerificationTestCase[];
   coverage?: TargetCoverageResult;
+  /** Fresh report files, relative to the target project, readable with read_target_file. */
+  reportPaths?: string[];
 };
 
 export type FunctionGroupTestRun = {
   status: "success" | "failure";
+  /** True when the Host terminated the test process after its deadline. */
+  timedOut?: boolean;
   testPaths: string[];
   tests: TestSummary;
+  executionErrors?: number;
   functions: FunctionGroupFunctionResult[];
   failures: Array<{
     message: string;
@@ -80,7 +83,8 @@ export type FunctionGroupTestRun = {
   exitCode: number | null;
   reason?: VerificationReason;
   testCases?: VerificationTestCase[];
-  testEvidence?: VerificationTestEvidence;
+  /** Fresh report files, relative to the target project, readable with read_target_file. */
+  reportPaths?: string[];
 };
 
 export type FunctionGroupTestRunner = {
@@ -109,21 +113,11 @@ export type ToolRuntimeContext = AgentTaskContext & {
   cleanup?: () => Promise<void>;
 };
 
-export type ToolState = {
-  lastTargetTest?: TargetTestResult;
-  lastFunctionGroupTest?: FunctionGroupTestRun;
-  functionGroupTests?: FunctionGroupTestRun[];
-  testEvidence?: VerificationTestEvidence;
-};
-
 export type ToolContext = {
-  state: ToolState;
   budget?: AgentRunBudget;
   runtime: ToolRuntimeContext;
   runner: BoundTestRunner;
   functionGroupRunner?: FunctionGroupTestRunner;
-  /** Trusted Host callback, never controlled by tool arguments or Agent claims. */
-  reviewTestCorrection?: import("../test-evidence.js").TestCorrectionReviewer;
 };
 
 export function relativePath(value: unknown, label = "path"): string {
