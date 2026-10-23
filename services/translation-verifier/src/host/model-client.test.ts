@@ -63,6 +63,54 @@ function clientWith(
 }
 
 describe("translation verifier model client", () => {
+  it('discards truncated tool calls and retries from the last valid transcript with smaller outputs', async () => {
+    const observed = vi.fn();
+    const original = structuredClone(messages);
+    const request = vi.fn<FakeRequest>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: {
+        content: 'PARTIAL_UNTRUSTED_OUTPUT', tool_calls: [{ id: 'never-execute', function: { name: 'finish', arguments: '{' } }],
+      } }] })))
+      .mockResolvedValueOnce(successfulResponse());
+    const client = clientWith(request, { onOutputLimitRetry: observed });
+    await expect(client.complete(messages, [tool])).resolves.toEqual({ content: 'done' });
+    const body = JSON.parse(String(request.mock.calls[1]![1]!.body));
+    expect(body.messages.slice(0, -1)).toEqual(JSON.parse(String(request.mock.calls[0]![1]!.body)).messages);
+    expect(body.messages.at(-1).content).toContain('None of its tool calls were executed');
+    expect(body.messages.at(-1).content).toContain('one focused tool call');
+    expect(JSON.stringify(body)).not.toMatch(/PARTIAL_UNTRUSTED_OUTPUT|never-execute/);
+    expect(body.max_tokens).toBe(16384);
+    expect(messages).toEqual(original);
+    expect(observed).toHaveBeenCalledWith(1, 3);
+  });
+
+  it('bounds repeated truncation and never interprets a null incomplete message', async () => {
+    const request = vi.fn<FakeRequest>(async () => new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: null }] })));
+    const client = clientWith(request, { maxOutputLimitRetries: 2 });
+    await expect(client.complete(messages, [tool])).rejects.toMatchObject({ code: 'output-limit', message: expect.stringContaining('2 次') });
+    expect(request).toHaveBeenCalledTimes(3);
+    const body = JSON.parse(String(request.mock.calls[2]![1]!.body));
+    expect(body.messages).toHaveLength(messages.length + 1);
+    expect(body.messages.at(-1).content).toContain('2000 characters');
+  });
+
+  it('does not retry after the owning run is cancelled', async () => {
+    const controller = new AbortController();
+    const request = vi.fn<FakeRequest>(async () => {
+      controller.abort(new Error('cancelled by user'));
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: {} }] }));
+    });
+    await expect(clientWith(request).complete(messages, [tool], controller.signal)).rejects.toThrow('cancelled by user');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an incompatible output parameter without retrying or leaking provider diagnostics', async () => {
+    const request = vi.fn<FakeRequest>(async () => new Response(JSON.stringify({ error: {
+      message: 'max_tokens must be less than or equal to 8192; PRIVATE_PROMPT',
+    } }), { status: 400 }));
+    await expect(clientWith(request).complete(messages, [tool])).rejects.toThrow('输出参数超过服务商支持范围');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it("resolves the key at request time and keeps it out of the prompt body", async () => {
     const request = vi.fn<FakeRequest>(async () => successfulResponse());
     let currentKey = "secret-test-key";

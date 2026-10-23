@@ -16,6 +16,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import type { Language } from "@forexplore/contracts";
+import { nativeCmakeSettings } from '../../../scripts/native-cmake.mjs';
 
 export interface CompileResult {
   success: boolean;
@@ -39,6 +40,7 @@ export function compileTargetStandalone(
     case "Python": return compilePythonStandalone(code, targetName);
     case "Rust": return compileRustStandalone(code, targetName);
     case "Go": return compileGoStandalone(code, targetName);
+    case "C": case "C++": return compileNativeStandalone(language, code);
   }
 }
 
@@ -55,6 +57,7 @@ export function compileTargetIntegrated(
     case "Python": return compilePythonIntegrated(code, projectPath, targetFilePath);
     case "Rust": return compileRustIntegrated(code, projectPath, targetFilePath);
     case "Go": return compileGoIntegrated(code, projectPath, targetFilePath);
+    case "C": case "C++": return compileNativeIntegrated(code, projectPath, targetFilePath);
   }
 }
 
@@ -66,6 +69,8 @@ export function compilerCommand(language: Language): string {
     case "Python": return "python -m py_compile";
     case "Rust": return "rustc";
     case "Go": return "go test";
+    case "C": return "gcc -fsyntax-only";
+    case "C++": return "g++ -fsyntax-only";
   }
 }
 
@@ -185,6 +190,7 @@ function findDotnet(): string | null {
       // temporary project. Treat it as unavailable evidence instead of a
       // compiler failure with an empty diagnostic stream.
       const sdks = execFileSync(candidate, ["--list-sdks"], {
+        windowsHide: true,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -198,7 +204,7 @@ function findDotnet(): string | null {
 
 export function isCompilerUnavailable(result: CompileResult): boolean {
   return result.errors.some((error) =>
-    /(?:\.NET SDK|C# compiler|JDK|javac|TypeScript compiler|Python|Rust compiler|Go compiler).*(?:not installed|not available)/i.test(error),
+    /(?:\.NET SDK|C# compiler|JDK|javac|TypeScript compiler|Python|Rust compiler|Go compiler|C\/C\+\+ compiler|CMake).*(?:not installed|not available)/i.test(error),
   );
 }
 
@@ -229,6 +235,7 @@ function compileWithDotnet(
 
   try {
     const stdout = execFileSync(dotnet, ["build", "--nologo", "-v", "q"], {
+      windowsHide: true,
       cwd: dir,
       encoding: "utf-8",
       maxBuffer: 10 * 1024 * 1024,
@@ -249,7 +256,7 @@ function compileWithCsc(csc: string, dir: string, csFile: string): CompileResult
     const stdout = execFileSync(
       csc,
       ["/target:library", `/out:${dllPath}`, "/nologo", csFile],
-      { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000, stdio: "pipe" },
+      { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000, stdio: "pipe", windowsHide: true },
     );
     return { success: true, errors: [], output: stdout };
   } catch (e: unknown) {
@@ -513,7 +520,7 @@ function findJavac(): string | null {
 
   for (const candidate of candidates) {
     try {
-      execFileSync(candidate, ["-version"], { stdio: "ignore" });
+      execFileSync(candidate, ["-version"], { stdio: "ignore", windowsHide: true });
       return candidate;
     } catch {
       // Continue to next candidate.
@@ -533,7 +540,7 @@ function findMaven(): string | null {
 
   for (const candidate of candidates) {
     try {
-      execFileSync(candidate, ["--version"], { stdio: "ignore" });
+      execFileSync(candidate, ["--version"], { stdio: "ignore", windowsHide: true });
       return candidate;
     } catch {
       // Continue to the next known installation location.
@@ -572,6 +579,7 @@ export function compileJavaStandalone(
 
   try {
     const stdout = execFileSync(javac, [javaFile], {
+      windowsHide: true,
       encoding: "utf-8",
       maxBuffer: 10 * 1024 * 1024,
       timeout: 30_000,
@@ -649,6 +657,7 @@ export function compileJavaIntegrated(
     if (maven) {
       try {
         const stdout = execFileSync(maven, ["-q", "-DskipTests", "compile"], {
+          windowsHide: true,
           cwd: temporaryProject,
           encoding: "utf-8",
           maxBuffer: 10 * 1024 * 1024,
@@ -665,6 +674,7 @@ export function compileJavaIntegrated(
     const javaFiles = collectJavaFilesRecursive(temporaryProject);
     try {
       const stdout = execFileSync(javac, ["-d", join(temporaryProject, "out"), ...javaFiles], {
+        windowsHide: true,
         encoding: "utf-8",
         maxBuffer: 10 * 1024 * 1024,
         timeout: 60_000,
@@ -832,7 +842,7 @@ function compileIntegratedProject(
   code: string,
   projectPath: string,
   targetFilePath: string,
-  language: "typescript" | "python" | "rust" | "go",
+  language: "typescript" | "python" | "rust" | "go" | "native",
   compile: (temporaryProject: string, temporaryTarget: string) => CompileResult,
 ): CompileResult {
   const projectRoot = resolve(projectPath);
@@ -844,13 +854,13 @@ function compileIntegratedProject(
   try {
     cpSync(projectRoot, temporaryProject, {
       recursive: true,
-      filter: (source) => !["bin", "obj", "build", "dist", "target", "out", "node_modules", "__pycache__"].includes(source.split(/[\\/]/).at(-1) ?? ""),
+      filter: (source) => ![".git", ".recast-build", ".translation-verifier-tests", ".translation-verifier-coverage", "bin", "obj", "build", "dist", "target", "out", "node_modules", "__pycache__"].includes(source.split(/[\\/]/).at(-1) ?? ""),
     });
     const temporaryTarget = join(temporaryProject, resolvedTarget.relativePath);
     const original = readFileSync(temporaryTarget, "utf8");
     writeFileSync(
       temporaryTarget,
-      language === "python" ? replacePythonTargetCode(original, code) : replaceTargetCode(original, code),
+      language === 'native' ? stripGeneratedFence(code) : language === "python" ? replacePythonTargetCode(original, code) : replaceTargetCode(original, code),
       "utf8",
     );
     return compile(temporaryProject, temporaryTarget);
@@ -860,6 +870,23 @@ function compileIntegratedProject(
   } finally {
     rmSync(temporaryProject, { recursive: true, force: true });
   }
+}
+
+function compileNativeStandalone(language: 'C' | 'C++', code: string): CompileResult {
+  const command = findExecutable([language === 'C' ? process.env.CC : process.env.CXX, language === 'C' ? 'gcc' : 'g++']);
+  if (!command) return missingCompiler('C/C++ compiler', 'Install GCC/G++ and add its bin directory to PATH.');
+  return compileTemporary('.forexplore-native-', language === 'C' ? 'subject.c' : 'subject.cpp', code, command, ['-fsyntax-only']);
+}
+
+function compileNativeIntegrated(code: string, projectPath: string, targetFilePath: string): CompileResult {
+  const settings = nativeCmakeSettings(projectPath);
+  if (!findExecutable([settings.command])) return missingCompiler('CMake', 'Install CMake 3.21+ and a native compiler.');
+  if (!existsSync(join(projectPath, 'CMakeLists.txt'))) return { success: false, errors: ['C/C++ integrated compilation requires CMakeLists.txt.'], output: '' };
+  return compileIntegratedProject(code, projectPath, targetFilePath, 'native', dir => {
+    const build = join(dir, '.recast-build');
+    const configured = runCompiler(settings.command, ['-S', dir, '-B', build, ...settings.configureArgs]);
+    return configured.success ? runCompiler(settings.command, ['--build', build, '--config', 'Debug', '--parallel', '4']) : configured;
+  });
 }
 
 function compileTemporary(
@@ -885,6 +912,7 @@ function compileTemporary(
 function runCompiler(command: string, args: string[], cwd?: string): CompileResult {
   try {
     const output = execFileSync(command, args, {
+      windowsHide: true,
       cwd,
       encoding: "utf8",
       maxBuffer: 10 * 1024 * 1024,
@@ -902,7 +930,7 @@ function findExecutable(candidates: Array<string | undefined>): string | null {
   for (const candidate of candidates) {
     if (!candidate) continue;
     try {
-      execFileSync(candidate, ["--version"], { stdio: "ignore" });
+      execFileSync(candidate, ["--version"], { stdio: "ignore", windowsHide: true });
       return candidate;
     } catch {
       // Continue to the next configured executable.

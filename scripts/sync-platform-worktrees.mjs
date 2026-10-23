@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const stateFile = '.recast-platform-sync.json';
 const areas = ['apps', 'packages', 'services', 'scripts', 'docs', 'tests', 'tooling', 'fixtures', 'experiments', 'web', '.github', '.claude'];
-const excluded = new Set(['node_modules', 'dist', 'bin', 'obj', 'target', 'coverage', 'results', 'results_副本', 'output', 'tmp', '__pycache__', '.git', '.forexplore', '.forexpore', '.vscode-test', '.vscode-test-user', '.apikey', '.codex', 'source-repositories', 'reference-sources']);
+const excluded = new Set(['node_modules', 'dist', 'bin', 'obj', 'target', 'coverage', 'results', 'results_副本', 'output', 'tmp', '__pycache__', '.git', '.forexplore', '.forexpore', '.recast-build', '.translation-verifier-tests', '.translation-verifier-coverage', '.vscode-test', '.vscode-test-user', '.apikey', '.codex', 'source-repositories', 'reference-sources']);
 
 function included(file) {
   const parts = file.split('/');

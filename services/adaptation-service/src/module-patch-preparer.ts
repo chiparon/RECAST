@@ -80,7 +80,7 @@ const languageByExtension: Readonly<Record<string, string>> = {
   ".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin", ".ets": "ArkTS",
   ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
   ".py": "Python", ".cs": "C#", ".rs": "Rust", ".go": "Go",
-  ".cc": "C++", ".cpp": "C++", ".cxx": "C++", ".hpp": "C++", ".h": "C", ".c": "C",
+  ".cc": "C++", ".cpp": "C++", ".cxx": "C++", ".hpp": "C++", ".hh": "C++", ".hxx": "C++", ".h": "C", ".c": "C",
 };
 
 export class WorkspaceModulePatchPreparer implements ModulePatchPreparer {

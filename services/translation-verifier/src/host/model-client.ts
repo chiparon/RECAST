@@ -23,6 +23,9 @@ export type TranslationVerifierModelOptions = {
   temperature?: number;
   request?: typeof globalThis.fetch;
   requestRetry?: TranslationVerifierRequestRetry;
+  /** Retry a truncated completion with smaller tool calls, never partial JSON. */
+  maxOutputLimitRetries?: number;
+  onOutputLimitRetry?: (attempt: number, maxRetries: number) => void;
 };
 
 export type TranslationVerifierModelErrorKind =
@@ -36,6 +39,7 @@ export class TranslationVerifierModelError extends Error {
   constructor(
     readonly kind: TranslationVerifierModelErrorKind,
     message: string,
+    readonly code?: 'output-limit',
   ) {
     super(message);
   }
@@ -69,21 +73,32 @@ export function createTranslationVerifierModelClient(
   const temperature = numberOption(options.temperature, "temperature");
   const retry = normalizeRequestRetry(options.requestRetry);
   const request = options.request ?? globalThis.fetch.bind(globalThis);
+  const maxOutputLimitRetries = options.maxOutputLimitRetries ?? 3;
+  if (!Number.isInteger(maxOutputLimitRetries) || maxOutputLimitRetries < 0 || maxOutputLimitRetries > 8) {
+    throw new Error('Invalid verifier output-limit recovery budget.');
+  }
 
   return {
-    complete(messages, tools, signal) {
-      return completeRequest({
-        apiBase,
-        apiKey: options.apiKey,
-        model,
-        maxOutputTokens,
-        temperature,
-        retry,
-        request,
-        messages,
-        tools,
-        signal,
-      });
+    async complete(messages, tools, signal) {
+      for (let recovery = 0; ; recovery++) {
+        signal?.throwIfAborted();
+        // Discard the entire truncated response, including apparently complete
+        // tool calls. Only the last valid transcript is replayed.
+        const nextMessages: readonly AgentMessage[] = recovery ? [...messages, { role: 'user', content:
+          `The previous response exceeded its output token limit and was discarded. None of its tool calls were executed. Continue from the last valid tool results above. Recovery ${recovery}/${maxOutputLimitRetries}: emit one focused tool call at a time, keep arguments below ${recovery > 1 ? 2000 : 4000} characters, and split large test suites into smaller test files. Do not weaken assertions, omit required behaviors or report success before running the tests. Keep prose concise.`,
+        }] : messages;
+        try {
+          return await completeRequest({ apiBase, apiKey: options.apiKey, model, maxOutputTokens,
+            temperature, retry, request, messages: nextMessages, tools, signal });
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (!(error instanceof TranslationVerifierModelError) || error.code !== 'output-limit') throw error;
+          if (recovery >= maxOutputLimitRetries) throw new TranslationVerifierModelError('response',
+            `Verifier model output limit: ${maxOutputLimitRetries} 次小步重试后仍被截断，未执行不完整的工具调用；请重试失败模块。`, 'output-limit');
+          try { options.onOutputLimitRetry?.(recovery + 1, maxOutputLimitRetries); }
+          catch { /* Observability cannot interrupt a verifier run. */ }
+        }
+      }
     },
   };
 }
@@ -155,6 +170,16 @@ async function completeRequest(
     ) {
       await delay(options.retry.delayMs, options.signal);
       continue;
+    }
+    if (response.status === 400 || response.status === 422) {
+      // Inspect only to classify the failure. Never copy a provider error body,
+      // which may contain prompts or secrets, into a user-facing diagnostic.
+      let diagnostic = '';
+      try { diagnostic = (await response.text()).slice(0, 65_536); } catch { /* Keep the status error. */ }
+      if (/(?:max_tokens|max_output_tokens|max_completion_tokens)/i.test(diagnostic) &&
+          /must|maximum|supported|range|too (?:large|high)|exceed/i.test(diagnostic)) {
+        throw requestError('Verifier model 输出参数超过服务商支持范围；请检查模型、API 地址和允许的单次输出上限。');
+      }
     }
     throw requestError(
       `Translation verifier model request failed with status ${response.status}.`,
@@ -243,11 +268,14 @@ function parseCompletion(value: unknown): AgentCompletion {
     throw responseError("Translation verifier model returned an invalid completion.");
   }
   const choice = value.choices[0];
-  if (!isRecord(choice) || !isRecord(choice.message)) {
+  if (!isRecord(choice)) {
     throw responseError("Translation verifier model returned an invalid completion.");
   }
   if (choice.finish_reason === "length") {
-    throw responseError("Translation verifier model response reached its output limit.");
+    throw new TranslationVerifierModelError('response', 'Translation verifier model response reached its output token limit.', 'output-limit');
+  }
+  if (!isRecord(choice.message)) {
+    throw responseError("Translation verifier model returned an invalid completion.");
   }
 
   const message = choice.message;

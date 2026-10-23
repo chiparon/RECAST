@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { access, mkdir, readdir, readFile, writeFile, realpath, rm } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { promisify } from "node:util";
 import { parseJacocoReport, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx, parseJUnitTestCases, parseNodeTestCases, parseTrxTestCases, jsonReport, type PythonFunction } from "./coverage-reports.js";
 import { MAX_TEST_OUTPUT_CHARS, readProjectFile, resolveSafePath, type FunctionGroupTestRun, type FunctionGroupTestRunner, type ToolContext, type TargetTestResult, type TargetCoverageResult, type TestSummary } from "./tools/common.js";
 import type { TargetFunctionCoverage, VerificationFunction, VerificationReason, VerificationTestCase } from "../types.js";
+import { prepareNativeTests, parseGcovReports } from './native-test.js';
 
 const JACOCO = "org.jacoco:jacoco-maven-plugin:0.8.13";
 export const MAVEN_COVERAGE_GOALS = [`${JACOCO}:prepare-agent`, "test", `${JACOCO}:report`] as const;
@@ -21,6 +22,16 @@ type CoverageRun = {
   jacocoReportPath?: string;
 };
 type RunnerContext = Omit<ToolContext, "runner" | "state">;
+function terminateTestProcess(child: ChildProcess, native: boolean): void {
+  if (!native || !child.pid) { child.kill('SIGTERM'); return; }
+  // The native command owns CMake, compiler and test processes. A timeout must
+  // terminate that tree before its isolated build directory is removed.
+  if (process.platform === 'win32') {
+    execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, error => { if (error) child.kill('SIGKILL'); });
+  } else {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+  }
+}
 export type BoundTestRunner = {
   run(testPath: string): Promise<TargetTestResult>;
 };
@@ -124,6 +135,8 @@ async function runTests(context: RunnerContext, testPath: string): Promise<Targe
       const child = spawn(executable, args, {
         cwd: context.runtime.targetProjectPath,
         shell: false,
+        windowsHide: true,
+        detached: context.runtime.testRunner === 'cmake' && process.platform !== 'win32',
         env: { ...process.env, ...coverageRun.env },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -160,7 +173,7 @@ async function runTests(context: RunnerContext, testPath: string): Promise<Targe
       });
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
+        terminateTestProcess(child, context.runtime.testRunner === 'cmake');
       }, timeoutMs);
     });
 
@@ -211,7 +224,7 @@ async function runTestsForSubjects(
     }
     const startedAt = Date.now();
     const processResult = await new Promise<{ exitCode: number | null; signal?: string; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
-      const child = spawn(executable, args, { cwd: context.runtime.targetProjectPath, shell: false, env: { ...process.env, ...coverageRun.env }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(executable, args, { cwd: context.runtime.targetProjectPath, shell: false, windowsHide: true, detached: context.runtime.testRunner === 'cmake' && process.platform !== 'win32', env: { ...process.env, ...coverageRun.env }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "", timedOut = false, settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const append = (current: string, chunk: Buffer | string) => {
@@ -228,7 +241,7 @@ async function runTestsForSubjects(
       child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
       child.once("error", (error) => { stderr = append(stderr, error.message); finish({ exitCode: null }); });
       child.once("close", (exitCode, signal) => { finish({ exitCode, signal: signal ?? undefined }); });
-      timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
+      timer = setTimeout(() => { timedOut = true; terminateTestProcess(child, context.runtime.testRunner === 'cmake'); }, timeoutMs);
     });
     const evidence = await collectCoverage(context, coverageRun, subjects);
     const status = processResult.timedOut || processResult.exitCode !== 0 || (evidence.tests?.failed ?? 0) > 0 ? "failure" as const : "success" as const;
@@ -327,12 +340,13 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
     };
   }
   const tests = join(dataDirectory, "tests.json");
+  if (runner === 'cmake') return { dataDirectory, args: await prepareNativeTests(context.runtime, testPaths, dataDirectory), env: { ELECTRON_RUN_AS_NODE: '1' } };
   if (runner === "jest") return { dataDirectory, args: ["--runTestsByPath", ...testPaths, `--roots=${await realpath(root)}`, "--coverage", ...subjects.map((subject) => `--collectCoverageFrom=${subject.path}`), "--coverageReporters=json", `--coverageDirectory=${dataDirectory}`, "--json", `--outputFile=${tests}`] };
   if (runner === "vitest") return { dataDirectory, args: ["--run", ...testPaths, "--coverage", `--coverage.include=${subjects.map((subject) => subject.path).join(",")}`, "--coverage.reporter=json", `--coverage.reportsDirectory=${dataDirectory}`, "--reporter=json", `--outputFile=${tests}`] };
   if (runner === "pytest") {
     const pythonFunctions: Array<{ path: string; functions: PythonFunction[] }> = [];
     for (const subject of subjects) {
-      const { stdout } = await runFile(context.runtime.targetTest.executable, ["-c", PYTHON_FUNCTIONS, resolveSafePath(root, subject.path)], { cwd: root, timeout: Math.min(10_000, context.budget?.remainingMs() ?? 10_000), maxBuffer: 1_000_000 });
+      const { stdout } = await runFile(context.runtime.targetTest.executable, ["-c", PYTHON_FUNCTIONS, resolveSafePath(root, subject.path)], { cwd: root, windowsHide: true, timeout: Math.min(10_000, context.budget?.remainingMs() ?? 10_000), maxBuffer: 1_000_000 });
       pythonFunctions.push({ path: subject.path, functions: jsonReport(stdout) });
     }
     return { dataDirectory, pythonFunctions, env: { COVERAGE_FILE: join(dataDirectory, ".coverage") },
@@ -413,7 +427,13 @@ async function collectCoverage(context: RunnerContext, run: CoverageRun, subject
   };
   try {
     let targetFunctions: TargetCoverageResult[] = [];
-    if (runner === "jest" || runner === "vitest") {
+    if (runner === 'cmake') {
+      const testReport = await read('tests.xml');
+      tests = parseJUnit(testReport);
+      testCases.push(...parseJUnitTestCases(testReport));
+      const coverage = await read('gcov.json');
+      targetFunctions = await parseSubjects(subject => parseGcovReports(coverage, root, subject));
+    } else if (runner === "jest" || runner === "vitest") {
       const testReport = await read("tests.json");
       tests = parseNodeTests(testReport);
       testCases.push(...parseNodeTestCases(testReport));

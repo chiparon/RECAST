@@ -3,11 +3,31 @@ import type { AnalysisReport, FilePatch, ModuleProtocol } from "@forexplore/cont
 export type JsonValue =
   string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+export type RetainedTestSuite = {
+  schemaVersion: 1;
+  id: string;
+  directory: string;
+  framework: 'maven' | 'gradle' | 'pytest' | 'jest' | 'vitest' | 'cmake' | 'dotnet';
+  testRoots: string[];
+  testPaths: string[];
+  files: Array<{ path: string; sha256: string }>;
+  status: 'not-run' | 'passed' | 'failed' | 'unverified';
+  command: string;
+};
+
+export type TestRetention = {
+  /** Stable caller-owned identity, normally a pipeline module ID. */
+  id: string;
+  onUpdate?(root: string, suite: RetainedTestSuite, evidence?: VerificationTestEvidence): Promise<void>;
+};
+
 export type VerificationFunction = {
   /** Project-relative file path containing the function. */
   path: string;
   name: string;
   signature?: string;
+  /** Host-discovered declaration location, used to distinguish C++ overloads. */
+  startLine?: number;
 };
 
 export type VerificationSubject = {

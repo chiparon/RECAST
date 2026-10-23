@@ -16,7 +16,7 @@ describe('project integration inputs', () => {
   it('exposes all current production and complete public requirements while excluding prior module records', async () => {
     const root = await mkdtemp(join(tmpdir(), 'recast-public-inputs-'));
     try {
-      for (const file of ['src/Entry.java', 'src/adapter/Store.java', 'requirements/public.md', 'pom.xml', 'evaluation/hidden.md', 'tests/Hidden.java', '.env', '.forexplore/journal.json']) {
+      for (const file of ['src/Entry.java', 'src/adapter/Store.java', 'requirements/public.md', 'pom.xml', 'evaluation/hidden.md', 'tests/Hidden.java', '.env', '.forexplore/journal.json', '.recast-tests/module/Generated.java', '.recast-tests-delivery/module/Generated.java', 'src/recast/123456789012345678901234/Generated.java']) {
         await mkdir(join(root, file, '..'), { recursive: true });
         await writeFile(join(root, file), file.startsWith('requirements/') ? 'PUBLIC BEHAVIOR' : 'CODE OR PRIVATE');
       }
@@ -48,7 +48,15 @@ describe('integration independent checks and Host audit', () => {
       await writeFile(join(scratch, 'coverage.md'), 'PUBLIC SOURCE -> EXPECTATION -> CASE');
       await writeFile(join(scratch, 'execution.log'), 'x'.repeat(70_000));
       await writeFile(join(root, 'outside.txt'), 'MUST NOT FOLLOW');
-      await symlink(join(root, 'outside.txt'), join(scratch, 'linked.txt'));
+      if (process.platform === 'win32') {
+        // Junctions exercise the same lstat boundary without requiring Windows
+        // Developer Mode or administrator privileges for a file symlink.
+        await mkdir(join(root, 'outside-directory'));
+        await writeFile(join(root, 'outside-directory', 'private.txt'), 'MUST NOT FOLLOW');
+        await symlink(join(root, 'outside-directory'), join(scratch, 'linked.txt'), 'junction');
+      } else {
+        await symlink(join(root, 'outside.txt'), join(scratch, 'linked.txt'));
+      }
       const checkSource = 'assert(result === expected);\n'.repeat(2_500);
       await writeFile(join(scratch, 'Check.ts'), checkSource);
       await writeFile(join(scratch, 'binary.class'), 'ignore binary');

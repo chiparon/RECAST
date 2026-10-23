@@ -140,7 +140,7 @@ export class AnalysisCoordinator {
     // unchanged source hash used to short-circuit the whole run (see the early
     // return below), so an index built by the previous projection kept its old
     // vectors forever and no operator action could refresh them.
-    this.#indexerVersion = options.indexerVersion ?? 'forexplore-code-intelligence/2.2';
+    this.#indexerVersion = options.indexerVersion ?? 'forexplore-code-intelligence/2.3';
   }
 
   async run(request: RunAnalysisRequest): Promise<AnalysisRunResult> {

@@ -250,6 +250,7 @@ function assertWorktreeClean(root: string): void {
 function git(root: string, args: string[]): string {
   try {
     return execFileSync("git", args, {
+      windowsHide: true,
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

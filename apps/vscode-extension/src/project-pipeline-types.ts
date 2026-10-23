@@ -1,6 +1,7 @@
 import type { PipelineModuleVerification } from './project-module-verifier';
 import type { ImplementationReferenceSelection } from '../../../services/adaptation-service/src/reference-selection-policy';
 import type { ModuleTarget, SearchCandidate, WorkspaceCompilation, WorkspaceCompileCommand, WorkspaceTranslationPlan, WorkspaceTranslationRun } from '@forexplore/contracts';
+import type { RetainedTestSuite } from '../../../services/translation-verifier/src/types';
 
 export type ProjectPipelineStage = 'modeling' | 'retrieving' | 'analyzing' | 'generating' | 'verifying' | 'publishing' | 'complete';
 export interface ProjectPipelineModule {
@@ -16,6 +17,7 @@ export interface ProjectPipelineModule {
   taskKind?: 'project-integration';
   authorizedFiles?: string[];
   moduleVerification?: PipelineModuleVerification;
+  retainedTests?: RetainedTestSuite;
   plan?: WorkspaceTranslationPlan;
   translation?: Pick<WorkspaceTranslationRun, 'id' | 'status' | 'compilations' | 'verification' | 'acceptance' | 'modelTurns' | 'error' | 'events' | 'evidenceQueries' | 'agent' | 'verificationRepairs'>;
   changedFiles?: string[];
@@ -30,6 +32,8 @@ export interface ProjectPipelineCheckpoint {
 export interface ProjectPipelineValidation {
   compilation: WorkspaceCompilation; verification?: WorkspaceCompilation; protectedFilesUnchanged: boolean; sourceHash: string; coverage: null;
   modules?: Array<{ id: string; verification: PipelineModuleVerification }>;
+  retainedTests?: WorkspaceCompilation;
+  retainedTestFailures?: string[];
 }
 export interface ProjectPipelineRun {
   id: string;

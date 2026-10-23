@@ -834,6 +834,7 @@ function ensureManagedArtifactParents(root: string, files: readonly FilePatch[])
 function git(root: string, args: string[]): string {
   try {
     return execFileSync("git", args, {
+      windowsHide: true,
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -856,6 +857,7 @@ function tryGit(root: string, args: string[]): string | null {
 function gitExitStatus(root: string, args: string[]): number {
   try {
     execFileSync("git", args, {
+      windowsHide: true,
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

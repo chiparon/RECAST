@@ -78,6 +78,31 @@ function clientFor(
   };
 }
 
+it('continues a real model adapter after truncation without executing partial tool calls or losing completed tools', async () => {
+  let requests = 0, inspections = 0, finishes = 0;
+  const client = createTranslationVerifierModelClient({ apiKey: 'test-key', request: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); requests++;
+    if (requests === 1) return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [
+      { id: 'inspect', function: { name: 'inspect', arguments: '{}' } },
+    ] } }] }));
+    if (requests === 2) return new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { tool_calls: [
+      { id: 'partial-finish', function: { name: 'finish', arguments: '{' } },
+    ] } }] }));
+    expect(body.messages.some((message: AgentMessage) => message.role === 'tool' && message.content.includes('persisted inspection'))).toBe(true);
+    expect(JSON.stringify(body)).not.toContain('partial-finish');
+    expect(body.messages.at(-1).content).toContain('one focused tool call');
+    return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [
+      { id: 'finish', function: { name: 'finish', arguments: '{}' } },
+    ] } }] }));
+  } });
+  const host = createAgentHost({ modelClient: client, resolveToolContext });
+  await expect(host.run(task([
+    tool('inspect', async () => { inspections++; return { fact: 'persisted inspection' }; }),
+    tool('finish', async () => { finishes++; return { status: 'success' }; }),
+  ]))).resolves.toEqual({ status: 'success' });
+  expect({ requests, inspections, finishes }).toEqual({ requests: 3, inspections: 1, finishes: 1 });
+});
+
 describe("AgentHost runtime", () => {
   it("bounds model diagnostics while preserving the complete Host trace and test facts", async () => {
     const output = { status: "success", tests: { executed: 23, passed: 23, failed: 0, skipped: 0 },

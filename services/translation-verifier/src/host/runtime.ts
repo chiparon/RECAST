@@ -1,6 +1,10 @@
 import { bindFunctionGroupTestRunner, bindTestRunner } from "./test-runner.js";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import { mkdir } from 'node:fs/promises';
+import { retainedTestDirectory, type TestRetention } from './test-artifacts.js';
+import { createTestArtifactRecorder } from './test-artifact-recorder.js';
+import { resolveSafePath } from './tools/common.js';
 import {
   createAgentRunBudget,
   DEFAULT_AGENT_RUN_LIMITS,
@@ -45,6 +49,7 @@ export type AgentHostOptions<Result = unknown> = {
   workLogger?: AgentWorkLogger;
   traceLogger?: AgentTraceLogger;
   reviewTestCorrection?: TestCorrectionReviewer;
+  retainTests?: TestRetention;
 };
 
 export type ToolContextResolver = (
@@ -56,8 +61,21 @@ const DEFAULT_CONTINUE_PROMPT =
 
 async function defaultToolContextResolver(
   taskContext: AgentTaskContext,
+  retention?: TestRetention,
 ): Promise<ToolRuntimeContext> {
-  const testEnvironment = await resolveTestEnvironment(taskContext);
+  const directory = retention ? retainedTestDirectory(retention.id) : undefined;
+  const testEnvironment = await resolveTestEnvironment(taskContext, directory);
+  if (retention) {
+    const key = directory!.split('/')[1];
+    testEnvironment.testRoots = await Promise.all(testEnvironment.testRoots.map(async root => {
+      const owned = root.startsWith(`${directory}/`) ? root : `${root}/recast/${key}`;
+      await mkdir(resolveSafePath(taskContext.targetProjectPath, owned), { recursive: true });
+      return owned;
+    }));
+    // The output copier owns the lifecycle of retained tests. Coverage/build
+    // directories remain disposable; test sources survive retries and crashes.
+    testEnvironment.cleanup = undefined;
+  }
   return {
     ...taskContext,
     sourceDirectory: directoryForFile(taskContext.sourcePath),
@@ -80,7 +98,7 @@ export function createAgentHost<Result = unknown>(
 ): AgentHost<Result> {
   const continuePrompt = options.continuePrompt ?? DEFAULT_CONTINUE_PROMPT;
   const resolveToolContext =
-    options.resolveToolContext ?? defaultToolContextResolver;
+    options.resolveToolContext ?? ((taskContext: AgentTaskContext) => defaultToolContextResolver(taskContext, options.retainTests));
   const limits: AgentRunLimits = { ...DEFAULT_AGENT_RUN_LIMITS, ...options.limits };
 
   return {
@@ -97,6 +115,7 @@ export function createAgentHost<Result = unknown>(
         traceEvent(runId, "run.started"),
       );
       let cleanup: (() => Promise<void>) | undefined;
+      let recordArtifacts: (() => Promise<void>) | undefined;
       const state: ToolState = { ...(task.functionGroup?.testEvidence ? { testEvidence: structuredClone(task.functionGroup.testEvidence) } : {}) };
       try {
         budget.assertActive();
@@ -115,7 +134,15 @@ export function createAgentHost<Result = unknown>(
             ? { functionGroupRunner: bindFunctionGroupTestRunner(resolvedContext) }
             : {}),
         };
-        const tools = bindTools(task, context);
+        if (options.retainTests) {
+          recordArtifacts = createTestArtifactRecorder(resolvedContext.runtime, state, options.retainTests);
+          await recordArtifacts();
+        }
+        const tools = bindTools(task, context).map(tool => ({ ...tool, execute: async (input: unknown) => {
+          const result = await tool.execute(input);
+          if (['write_target_test', 'run_target_test', 'run_function_group_tests'].includes(tool.name)) await recordArtifacts?.();
+          return result;
+        } }));
         const result = await runAgentLoop({
           client: options.modelClient,
           task: withRuntimeTestInstructions(task, resolvedContext.runtime, limits),
@@ -172,7 +199,7 @@ export function createAgentHost<Result = unknown>(
         throw error;
       } finally {
         try {
-          await cleanup?.();
+          try { await recordArtifacts?.(); } finally { await cleanup?.(); }
         } finally {
           budget.dispose();
         }
@@ -194,10 +221,20 @@ function withRuntimeTestInstructions(
   limits: AgentRunLimits,
 ): AgentTask {
   const roots = runtime.testRoots.join(", ");
+  const moduleKey = roots.match(/[a-f0-9]{24}/)?.[0];
   const instruction = [
     "Host test setup (authoritative):",
     `- Test framework: ${runtime.testRunner}`,
     `- Authorized test roots: ${roots}`,
+    ...(moduleKey ? [
+      `- These tests are delivered with the project. Use a module-unique namespace/package such as recast.m${moduleKey} for Java/C# test classes, and keep fixture names unique. Tests from other modules may compile in the same project.`,
+      '- Keep earlier test files in this module namespace runnable on retries. Read and extend existing tests rather than replacing them with weaker cases; executed failure/correction rules still apply.',
+    ] : []),
+    ...(runtime.testRunner === 'cmake' ? [
+      '- Native harness: write standalone .c/.cpp/.cc/.cxx test files, each with int main(void). Each source file is one CTest case; return 0 on success and nonzero on failed assertions. Do not require an external test framework.',
+      '- The Host configures the real CMake project, instruments it with GCC/gcov, and links test programs to its library target(s), preserving PUBLIC includes and dependencies. Never include production .c/.cpp files directly or reimplement the subject in the test.',
+      '- Use public headers, include extern "C" when calling a C API from C++, and test requirement behavior, edge cases and module interactions. CMakeLists and the runner belong to the Host; write only test sources and fixtures.',
+    ] : []),
     "- Every test path passed to write_target_test and run_function_group_tests must start with one of those exact roots.",
     "- Use one test file and one test class for this verification whenever possible; after writing it, run it immediately and use the Host diagnostics to fix it.",
     `- Run budget: ${limits.maxTurns} model turns and ${limits.maxToolCalls} tool calls, with up to ${limits.maxToolCallsPerTurn} tool calls per turn.`,

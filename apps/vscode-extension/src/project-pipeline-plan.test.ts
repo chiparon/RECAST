@@ -21,3 +21,14 @@ it('orders prerequisites before consumers and fails explicitly for a generation 
   const files = Array.from({ length: 129 }, (_, i) => `${i}.java`);
   expect(() => buildProjectPipelineModules(index(files), 'project', [module('huge', files)])).toThrow('128');
 });
+
+it('supports C/C++ headers, all native suffixes and mixed native modules without assigning a second writer', () => {
+  for (const [files, language] of [[['price.h', 'price.c'], 'C'], [['price.h', 'price.cxx', 'port.hh', 'port.hxx'], 'C++']] as const) {
+    const data = index([...files]);
+    data.files.forEach(file => { file.languageId = file.relativePath.endsWith('.cxx') ? 'cpp' : 'c'; });
+    const result = buildProjectPipelineModules(data, 'project', [{ ...module('price', [...files]), language: 'Mixed' }]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.target.language).toBe(language);
+    expect(result[0]!.target.module!.sourceFiles).toEqual(files);
+  }
+});

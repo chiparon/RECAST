@@ -43,6 +43,13 @@ interface ManifestKind {
 
 const manifestKinds: readonly ManifestKind[] = [
   {
+    kind: 'cmake',
+    languageIds: ['c', 'cpp'],
+    // add_subdirectory manifests are parts of the top-level build, not
+    // independently buildable projects. Explicit nested project() creates a boundary.
+    matches: (path) => basename(path).toLowerCase() === 'cmakelists.txt',
+  },
+  {
     kind: 'maven',
     languageIds: ['java'],
     matches: (path) => basename(path).toLowerCase() === 'pom.xml',
@@ -303,6 +310,14 @@ function projectReferenceSyntax(
  * can persist it as part of an immutable analysis revision.
  */
 export function discoverProjects(request: ProjectDiscoveryRequest): ProjectDiscoveryResult {
+  const cmakeRoots = new Set(request.files.filter(file => basename(file.relativePath).toLowerCase() === 'cmakelists.txt').map(file => directory(file.relativePath)));
+  const hasCmakeParent = (root: string): boolean => {
+    if (!root) return false;
+    for (let parent = directory(root); ; parent = directory(parent)) {
+      if (cmakeRoots.has(parent)) return true;
+      if (!parent) return false;
+    }
+  };
   const groups = new Map<string, {
     kind: string;
     languageIds: LanguageId[];
@@ -314,6 +329,7 @@ export function discoverProjects(request: ProjectDiscoveryRequest): ProjectDisco
     const relativePath = canonicalPath(file.relativePath);
     for (const manifest of manifestKinds) {
       if (!manifest.matches(relativePath)) continue;
+      if (manifest.kind === 'cmake' && !/^\s*project\s*\(/im.test(file.content) && hasCmakeParent(directory(relativePath))) continue;
       const root = directory(relativePath);
       const key = `${manifest.kind}\u0000${root}`;
       const group = groups.get(key) ?? {

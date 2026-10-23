@@ -1,4 +1,6 @@
 import type { Language } from '@forexplore/contracts';
+import { createDefaultLanguageRegistry } from './language-registry.js';
+import { indexTreeSitterFile } from './tree-sitter-indexer.js';
 
 export interface SymbolMatch {
   kind: 'class' | 'function';
@@ -16,6 +18,7 @@ const extensions: Record<string, Language> = {
   '.cs': 'C#',
   '.rs': 'Rust',
   '.go': 'Go',
+  '.c': 'C', '.h': 'C', '.cpp': 'C++', '.cc': 'C++', '.cxx': 'C++', '.hpp': 'C++', '.hh': 'C++', '.hxx': 'C++',
 };
 
 export const fileExtensions = extensions;
@@ -104,6 +107,7 @@ function declaration(
     Language,
     Array<{ kind: 'class' | 'function'; pattern: RegExp }>
   > = {
+    C: [], 'C++': [], // Native extraction below uses the existing syntax parser.
     TypeScript: [
       {
         kind: 'class',
@@ -222,6 +226,14 @@ function signature(lines: string[], start: number, language: Language): string {
 }
 
 export function extractSymbols(source: string, language: Language): SymbolMatch[] {
+  if (language === 'C' || language === 'C++') {
+    const registration = createDefaultLanguageRegistry().get(language === 'C' ? 'c' : 'cpp')!;
+    const index = indexTreeSitterFile({ content: source, language: registration, relativePath: language === 'C' ? 'source.c' : 'source.cpp' });
+    return index.declarations.filter(item => ['class', 'struct', 'function', 'method', 'constructor'].includes(item.kind)).map(item => ({
+      kind: ['class', 'struct'].includes(item.kind) ? 'class' : 'function', name: item.name, signature: item.signature,
+      line: item.sourceRange.startLine, preview: source.split(/\r?\n/).slice(item.sourceRange.startLine - 1, item.sourceRange.endLine).join('\n').slice(0, 6000), summary: '',
+    }));
+  }
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
   const symbols: SymbolMatch[] = [];
   let braceDepth = 0;

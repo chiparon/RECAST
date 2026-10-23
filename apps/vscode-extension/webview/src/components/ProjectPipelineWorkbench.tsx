@@ -78,7 +78,7 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
   const stopped = run && ['failed', 'cancelled', 'interrupted'].includes(run.status);
   const resumable = stopped && Boolean(run.outputRoot && run.baselineCommit && run.modules.length);
   const canRetry = (id: string) => resumable && (run?.modules.some(module => module.id === id && ['failed', 'running'].includes(module.status))
-    || run?.validation?.modules?.some(module => module.id === id && module.verification.disposition === 'production-defect'));
+    || run?.validation?.modules?.some(module => module.id === id && module.verification.disposition === 'production-defect') || run?.validation?.retainedTestFailures?.includes(id));
   const doneModules = run?.modules.filter(module => module.status === 'completed').length ?? 0;
   const currentModule = run?.modules.find(module => module.id === run.currentModuleId);
   const status = starting ? '正在启动' : !run ? error ? '启动失败' : '等待宿主确认' : run.status === 'completed' ? '执行完成'
@@ -164,6 +164,7 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
             <div><span className="pipeline-eyebrow">{completed ? '交付结果' : '当前执行记录'}</span><h2>{completed ? '项目已生成，查看交付结果' : '项目输出与验收报告'}</h2></div></div>
           <p>{run.acceptance === 'behavior-verified' ? '完整项目编译和最终行为验证通过，验证范围与未覆盖项详见报告。' : run.acceptance === 'compilation-only' ? '编译通过，行为验证尚未全部通过，详见各模块记录。' : '执行尚未完成，报告保留当前进度与失败原因。'}</p>
           <div className="project-result-facts"><span>覆盖率：未采集</span></div>
+          {run.validation?.retainedTests ? <p>生成测试已随项目保留，交付目录重放：{run.validation.retainedTests.success ? '通过' : '失败'}。</p> : null}
           <div className="project-delivery-actions"><button type="button" className={completed ? 'primary-action' : 'secondary-action'} disabled={!run.outputRoot} onClick={() => action('open-output')}><FolderOpen size={15} />{completed ? '打开输出项目' : '查看执行副本'}</button>
             <button type="button" className="secondary-action" onClick={() => action('open-report')}><FileText size={14} />查看验收报告</button>
             <button type="button" className="text-button" onClick={() => action('export-report')}>导出报告<ArrowRight size={13} /></button></div>
@@ -178,14 +179,19 @@ export function ProjectPipelineWorkbench({ bus, run, scope, projectName, history
             {run?.events.length ? run.events.slice(-600).map(event => <div className="pipeline-log-line" key={event.id}><time>{new Date(event.at).toLocaleTimeString('zh-CN', { hour12: false })}</time><span className="pipeline-log-tag">{stages[stageOrder[event.stage]]}</span><span>{event.message}</span></div>)
               : <div className="pipeline-log-empty"><Terminal size={22} /><span>{starting ? '正在启动任务，等待进度反馈…' : '尚无工作日志，可刷新运行状态'}</span></div>}
           </div></section>
-        {run?.modules.length ? <details className="project-module-results"><summary><span>模块执行明细</span><span>{doneModules} / {run.modules.length} 已完成</span></summary><div className="project-modules-table"><table><thead><tr><th>模块</th><th>状态</th><th>修改文件</th><th>验证</th></tr></thead><tbody>
+        {run?.modules.length ? <details className="project-module-results"><summary><span>模块执行明细</span><span>{doneModules} / {run.modules.length} 已完成</span></summary><div className="project-modules-table"><table><thead><tr><th>模块</th><th>状态</th><th>修改文件</th><th>保留测试</th><th>验证</th></tr></thead><tbody>
           {run.modules.map(module => <tr key={module.id}><td>{module.name}</td><td><span className={`project-module-status is-${module.status}`}>{{ pending: '待执行', running: '执行中', completed: '已完成', failed: '失败' }[module.status]}</span>
             {canRetry(module.id) ? <button type="button" className="text-button" aria-label={`重试模块：${module.name}`} disabled={active || importing} onClick={() => resume(module.id)}>重试此模块</button> : null}
-          </td><td>{module.changedFiles?.length ?? 0}</td><td>{moduleVerificationLabel(run, module.id)}</td></tr>)}</tbody></table></div></details> : null}
+          </td><td>{module.changedFiles?.length ?? 0}</td><td>{moduleTestFiles(run, module.id)}</td><td>{moduleVerificationLabel(run, module.id)}</td></tr>)}</tbody></table></div></details> : null}
       </div>
       {run ? <details className="project-run-id"><summary>运行编号</summary><code>{run.id}</code></details> : null}
     </section> : null}
   </main>;
+}
+function moduleTestFiles(run: ProjectPipelineRun, id: string): ReactNode {
+  const module = run.modules.find(module => module.id === id);
+  const suite = run.validation?.modules?.find(module => module.id === id)?.verification.testSuite ?? module?.retainedTests ?? module?.moduleVerification?.testSuite;
+  return suite ? <details><summary>{suite.testPaths.length ? `${suite.testPaths.length} 个测试入口` : '测试文件与配置'}</summary>{suite.files.map(file => <p key={file.path}><code>{file.path}</code></p>)}</details> : '—';
 }
 function moduleVerificationLabel(run: ProjectPipelineRun, id: string): ReactNode {
   const final = run.validation?.modules?.find(item => item.id === id)?.verification;

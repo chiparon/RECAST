@@ -1,4 +1,4 @@
-export type Language = 'TypeScript' | 'Python' | 'Java' | 'C#' | 'Rust' | 'Go';
+export type Language = 'TypeScript' | 'Python' | 'Java' | 'C#' | 'Rust' | 'Go' | 'C' | 'C++';
 
 export type ModuleKind =
   | 'workspace'

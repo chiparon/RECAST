@@ -150,9 +150,25 @@ function requestShutdown(): void {
 process.once('SIGINT', requestShutdown);
 process.once('SIGTERM', requestShutdown);
 process.once('disconnect', requestShutdown);
-process.on('message', message => { if (message && typeof message === 'object' && 'type' in message && message.type === 'shutdown') {
-  void shutdown().catch(() => { process.exitCode = 1; }).finally(() => { if (process.connected) process.disconnect?.(); });
-} });
+process.on('message', message => {
+  if (!message || typeof message !== 'object' || !('type' in message)) return;
+  if (message.type === 'shutdown') {
+    void shutdown().catch(() => { process.exitCode = 1; }).finally(() => { if (process.connected) process.disconnect?.(); });
+  } else if (message.type === 'shutdown-if-idle' && 'requestId' in message && typeof message.requestId === 'string') {
+    const requestId = message.requestId;
+    void (async () => {
+      // Runtime closes admission synchronously before yielding. A request that
+      // arrives during retirement cannot start a translation after this check.
+      const idle = workspaceTranslationRuntime ? await workspaceTranslationRuntime.shutdownIfIdle() : true;
+      process.send?.({ type: 'shutdown-if-idle-result', requestId, status: idle ? 'closing' : 'busy' });
+      if (!idle) return;
+      await shutdown();
+      if (process.connected) process.disconnect?.();
+    })().catch(() => {
+      process.send?.({ type: 'shutdown-if-idle-result', requestId, status: 'error' });
+    });
+  }
+});
 
 void main().catch(async (error) => {
   const message = error instanceof Error ? error.message : String(error);

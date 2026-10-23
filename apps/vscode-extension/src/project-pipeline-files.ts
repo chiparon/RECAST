@@ -6,9 +6,11 @@ import { promisify } from 'node:util';
 import type { ProjectPipelineCheckpoint, ProjectPipelineRun } from './project-pipeline-types';
 import { projectPipelineMarkdown } from './project-pipeline';
 import { isNewProjectIntegrationSource } from '../../../services/adaptation-service/src/project-integration-context';
+import { readRetainedTestSuite, retainedTestFiles, recoverRetainedTestDelivery, RETAINED_TEST_README, RETAINED_TEST_RUNNER } from '../../../services/translation-verifier/src/host/test-artifacts';
+import type { RetainedTestSuite } from '../../../services/translation-verifier/src/types';
 
 const execute = promisify(execFile);
-const ignored = new Set(['.git', '.forexpore', '.agent-tmp', '.translation-verifier-tests', '.translation-verifier-coverage', '.forexplore', '.vs', '.idea', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out', 'target', 'coverage', '__pycache__']);
+const ignored = new Set(['.git', '.forexpore', '.agent-tmp', '.translation-verifier-tests', '.translation-verifier-coverage', '.recast-tests-delivery', '.recast-build', '.forexplore', '.vs', '.idea', '.gradle', '.pytest_cache', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out', 'target', 'coverage', '__pycache__']);
 const safeId = /^[a-f0-9-]{36}$/;
 async function git(root: string, args: string[]): Promise<string> {
   return (await execute('git', ['-C', root, ...args], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 })).stdout;
@@ -43,7 +45,7 @@ export class ProjectPipelineFiles {
     };
     await copy(root, outputRoot); signal.throwIfAborted();
     await git(outputRoot, ['init', '-b', `codex/project-pipeline/${id}`]);
-    await writeFile(path.join(outputRoot, '.git', 'info', 'exclude'), '\n.forexplore/\n.forexpore/\n.agent-tmp/\n.translation-verifier-tests/\n.translation-verifier-coverage/\nnode_modules/\nbin/\nobj/\ndist/\nbuild/\nout/\ntarget/\ncoverage/\n__pycache__/\n');
+    await writeFile(path.join(outputRoot, '.git', 'info', 'exclude'), '\n.forexplore/\n.forexpore/\n.agent-tmp/\n.translation-verifier-tests/\n.translation-verifier-coverage/\n.recast-tests-delivery/\n.recast-build/\nnode_modules/\nbin/\nobj/\ndist/\nbuild/\nout/\ntarget/\ncoverage/\n__pycache__/\n.gradle/\n.pytest_cache/\n');
     await git(outputRoot, ['add', '--force', '--all']);
     await this.commit(outputRoot, 'RECAST: capture target skeleton baseline', true);
     return { outputRoot, baselineCommit: (await git(outputRoot, ['rev-parse', 'HEAD'])).trim() };
@@ -54,12 +56,28 @@ export class ProjectPipelineFiles {
   async sourceHash(run: ProjectPipelineRun): Promise<string> {
     return (await this.checkpoint(run)).sourceHash;
   }
+  async testSuites(run: ProjectPipelineRun): Promise<RetainedTestSuite[]> {
+    const root = this.output(run), suites: RetainedTestSuite[] = [];
+    for (const module of run.modules.filter(module => !module.taskKind)) {
+      const suite = await readRetainedTestSuite(root, module.id); if (suite) suites.push(suite);
+    }
+    if (suites.length && (await readFile(path.join(root, '.recast-tests/run.cjs'), 'utf8') !== RETAINED_TEST_RUNNER ||
+        await readFile(path.join(root, '.recast-tests/README.md'), 'utf8') !== RETAINED_TEST_README)) throw new Error('测试交付入口发生未授权修改。');
+    return suites;
+  }
+  async productionHash(run: ProjectPipelineRun): Promise<string> {
+    const tests = new Set((await this.testSuites(run)).flatMap(retainedTestFiles));
+    const checkpoint = await this.checkpoint(run), hash = createHash('sha256');
+    for (const [file, digest] of Object.entries(checkpoint.files)) if (!tests.has(file)) hash.update(JSON.stringify([file, digest]));
+    return hash.digest('hex');
+  }
   async checkpoint(run: ProjectPipelineRun): Promise<ProjectPipelineCheckpoint> {
     const root = this.output(run), hash = createHash('sha256');
     const files: Record<string, string> = {};
     const tracked = (await git(root, ['ls-files', '-z'])).split('\0').filter(Boolean);
     const untracked = (await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
-    for (const file of [...new Set([...tracked, ...untracked])].sort()) {
+    const retained = (await this.testSuites(run)).flatMap(retainedTestFiles);
+    for (const file of [...new Set([...tracked, ...untracked, ...retained])].sort()) {
       const absolute = path.join(root, file); const info = await lstat(absolute);
       if (!info.isFile() || info.isSymbolicLink()) throw new Error(`输出项目存在非普通文件：${file}`);
       files[file] = createHash('sha256').update(await readFile(absolute)).digest('hex');
@@ -70,6 +88,7 @@ export class ProjectPipelineFiles {
   }
   async assertResumable(run: ProjectPipelineRun): Promise<void> {
     const root = this.output(run);
+    for (const module of run.modules.filter(module => !module.taskKind)) await recoverRetainedTestDelivery(root, module.id);
     if (path.relative(await realpath(root), path.resolve(root)) !== '') throw new Error('输出项目路径已改变，无法继续原任务。');
     if (!run.baselineCommit || (await git(root, ['rev-parse', `${run.baselineCommit}^{commit}`])).trim() !== run.baselineCommit) throw new Error('原任务的骨架基线不存在，无法继续。');
     if (!run.checkpoint) { await this.assertWriteScope(run); return; } // Older runs still require fresh final validation.
@@ -90,13 +109,14 @@ export class ProjectPipelineFiles {
     }
     await this.assertWriteScope(run);
     if (current.sourceHash === run.checkpoint.sourceHash) return;
-    const permitted = new Set(interrupted?.authorizedFiles ?? []);
+    const permitted = new Set([...(interrupted?.authorizedFiles ?? []), ...(await this.testSuites(run)).flatMap(retainedTestFiles)]);
     const paths = new Set([...Object.keys(run.checkpoint.files), ...Object.keys(current.files)]);
     const unexpected = [...paths].filter(file => current.files[file] !== run.checkpoint!.files[file] && !permitted.has(file));
-    if (!interrupted || unexpected.length) throw new Error(`输出工程在断点后发生了未记录的修改，无法直接继续：${unexpected.slice(0, 8).join('、') || '快照不一致'}`);
+    if (unexpected.length) throw new Error(`输出工程在断点后发生了未记录的修改，无法直接继续：${unexpected.slice(0, 8).join('、') || '快照不一致'}`);
   }
   async assertWriteScope(run: ProjectPipelineRun): Promise<void> {
     const root = this.output(run), allowed = new Set(run.modules.flatMap(module => module.authorizedFiles ?? module.target.module?.sourceFiles ?? []));
+    for (const file of (await this.testSuites(run)).flatMap(retainedTestFiles)) allowed.add(file);
     const changed = [...(await git(root, ['diff', '--name-only', '-z', run.baselineCommit!, '--'])).split('\0'),
       ...(await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0')].filter(Boolean);
     const baseline = new Set((await git(root, ['ls-tree', '-r', '--name-only', '-z', run.baselineCommit!])).split('\0').filter(Boolean));
@@ -109,11 +129,11 @@ export class ProjectPipelineFiles {
     signal.throwIfAborted(); await this.assertWriteScope(run);
     if (!run.validation || await this.sourceHash(run) !== run.validation.sourceHash) throw new Error('待提交输出与验收快照不一致。');
     const root = this.output(run);
-    const allowed = [...new Set(run.modules.flatMap(module => [...(module.authorizedFiles ?? module.target.module?.sourceFiles ?? []), ...(module.taskKind === 'project-integration' ? module.changedFiles ?? [] : [])]))];
+    const allowed = [...new Set([...run.modules.flatMap(module => [...(module.authorizedFiles ?? module.target.module?.sourceFiles ?? []), ...(module.taskKind === 'project-integration' ? module.changedFiles ?? [] : [])]), ...(await this.testSuites(run)).flatMap(retainedTestFiles)])];
     // Keep large projects below Windows' command-line length limit and treat
     // every reviewed file name literally, rather than as a Git path pattern.
     await writeFile(path.join(root, '.git', 'recast-approved-files'), allowed.join('\0') + '\0');
-    await git(root, ['--literal-pathspecs', 'add', '--pathspec-from-file=.git/recast-approved-files', '--pathspec-file-nul']);
+    await git(root, ['--literal-pathspecs', 'add', '--force', '--pathspec-from-file=.git/recast-approved-files', '--pathspec-file-nul']);
     await this.assertWriteScope(run);
     if (await this.sourceHash(run) !== run.validation.sourceHash) throw new Error('暂存期间输出文件发生变化，已停止发布。');
     await this.commit(root, `RECAST: deliver project pipeline ${run.id}`, true);

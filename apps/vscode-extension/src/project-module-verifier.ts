@@ -8,6 +8,7 @@ import { buildModuleFunctionMapping, discoverExecutableFunctions, expandClassLev
 
 import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput, FunctionGroupVerificationResult } from '../../../services/translation-verifier/src/types';
 import type { ProjectPipelineModule } from './project-pipeline-types';
+import type { TestRetention, RetainedTestSuite, VerificationTestEvidence } from '../../../services/translation-verifier/src/types';
 
 // Match the extension's existing runtime bridges: backend implementations are bundled,
 // while their independent TypeScript projects retain their own compiler options.
@@ -19,6 +20,7 @@ export interface PipelineModuleVerification {
   attempts: FunctionGroupVerificationResult[];
   /** The complete assembled project hash, not just the module's owned files. */
   sourceHash?: string;
+  testSuite?: RetainedTestSuite;
 }
 
 export function verifierDisposition(result: FunctionGroupVerificationResult): PipelineModuleVerification['disposition'] {
@@ -33,12 +35,14 @@ export async function verifyPipelineModule(input: {
   root: string; module: ProjectPipelineModule; requirement: string; model: PipelineModel;
   candidates: SearchCandidate[]; historyView?: WorkspaceHistoryView; protocol?: ModuleProtocol;
   signal: AbortSignal; previous?: PipelineModuleVerification; log(message: string): void;
+  retainTests?: TestRetention;
+  testEvidence?: VerificationTestEvidence;
 }): Promise<PipelineModuleVerification> {
   const { createAgentHost } = require('../../../services/translation-verifier/src/host/runtime') as {
-    createAgentHost(options: { modelClient: unknown; signal: AbortSignal; workLogger(event: { event: string }): void }): unknown;
+    createAgentHost(options: { modelClient: unknown; signal: AbortSignal; retainTests?: TestRetention; workLogger(event: { event: string }): void }): unknown;
   };
   const { createTranslationVerifierModelClient } = require('../../../services/translation-verifier/src/host/model-client') as {
-    createTranslationVerifierModelClient(options: PipelineModel & { maxOutputTokens: number }): unknown;
+    createTranslationVerifierModelClient(options: PipelineModel & { maxOutputTokens: number; onOutputLimitRetry(attempt: number, maxRetries: number): void }): unknown;
   };
   const { createFunctionGroupVerifier } = require('../../../services/translation-verifier/src/function-group-verify') as {
     createFunctionGroupVerifier(host: unknown): (input: FunctionGroupVerificationInput | RequirementFunctionGroupVerificationInput, strategy: 'single-agent-function-group' | 'requirement-function-group', phase: 'verify') => Promise<FunctionGroupVerificationResult>;
@@ -62,12 +66,16 @@ export async function verifyPipelineModule(input: {
   const attempts = [...(input.previous?.attempts ?? [])];
   if (!functions.length) return { mode, attempts, disposition: mapping.nonExecutableFunctions.length ? 'not-applicable' : 'agent-uncertain' };
   const host = createAgentHost({
-    modelClient: createTranslationVerifierModelClient({ ...input.model, maxOutputTokens: 16_384 }), signal: input.signal,
+    modelClient: createTranslationVerifierModelClient({ ...input.model, maxOutputTokens: 16_384,
+      onOutputLimitRetry: (attempt, maxRetries) => input.log(`Verifier 单次输出达到 Token 上限，已丢弃不完整回复，正在小步重试（${attempt}/${maxRetries}）`),
+    }), signal: input.signal,
+    retainTests: input.retainTests,
     workLogger: event => { if (event.event === 'run.started' || event.event === 'run.completed') input.log(`Verifier：${event.event}`); },
   });
+  const previousEvidence = input.testEvidence ?? input.previous?.result?.testEvidence;
   const common = { schemaVersion: '3.1' as const, targetLanguage: input.module.target.language,
     targetProjectPath: input.root, requirement: input.requirement, moduleProtocol: input.protocol,
-    ...(input.previous?.result?.testEvidence ? { testEvidence: input.previous.result.testEvidence } : {}) };
+    ...(previousEvidence ? { testEvidence: previousEvidence } : {}) };
   let result: FunctionGroupVerificationResult;
   try {
     result = await createFunctionGroupVerifier(host)(fidelity ? {

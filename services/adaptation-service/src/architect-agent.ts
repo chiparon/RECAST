@@ -426,7 +426,7 @@ function validateFunctionalModule(
   if (value.language !== undefined) {
     assertEnum<ModuleSummaryLanguage>(
       value.language,
-      ["TypeScript", "Python", "Java", "C#", "Rust", "Go", "Mixed", "Unknown"],
+      ["TypeScript", "Python", "Java", "C#", "Rust", "Go", "C", "C++", "Mixed", "Unknown"],
       `modules[${index}].language`,
     );
   }
@@ -623,7 +623,7 @@ function moduleMigrationProposalSchema(): Record<string, unknown> {
       description: "string",
       purpose: "Purpose summary for module-summary.json",
       coreApis: ["Core API names or signatures present in the snapshot"],
-      language: "TypeScript | Python | Java | C# | Rust | Go | Mixed | Unknown",
+      language: "TypeScript | Python | Java | C# | Rust | Go | C | C++ | Mixed | Unknown",
       domain: "Business or technical domain for module-summary.json",
       sourceFiles: ["snapshot source path"],
       testFiles: ["optional snapshot test path"],

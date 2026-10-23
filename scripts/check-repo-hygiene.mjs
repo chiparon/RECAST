@@ -19,6 +19,9 @@ const maxBytes = 1_000_000;
 const allowLarge = new Set([
   'docs/proj47-面向 Agent记忆的向量检索系统IO优化-山东大学.pptx',
   'docs/request/聚焦国家战略需求.pdf',
+  // Enterprise handoff manual with annotated, sanitized UI screenshots;
+  // the Markdown source and individual images are versioned beside it.
+  'docs/user-guide/RECAST企业使用说明书.docx',
   // Frozen 716-module oracle used to reproduce the 50-case retrieval dataset;
   // build_dataset.py and experiment.mts read it directly. It is fixture input,
   // not a generated run log or a model/runtime cache.

@@ -36,7 +36,7 @@ export interface SemanticModulePlanProposal {
     description: string;
     purpose?: string;
     coreApis?: string[];
-    language?: 'TypeScript' | 'Python' | 'Java' | 'C#' | 'Rust' | 'Go' | 'Mixed' | 'Unknown';
+    language?: 'TypeScript' | 'Python' | 'Java' | 'C#' | 'Rust' | 'Go' | 'C' | 'C++' | 'Mixed' | 'Unknown';
     domain?: string;
     sourceFiles: string[];
     symbolKeys: string[];

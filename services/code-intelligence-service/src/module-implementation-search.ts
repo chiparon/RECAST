@@ -79,7 +79,7 @@ const languageNames: Record<string, Language> = {
   javascript: 'TypeScript',
   python: 'Python',
   java: 'Java',
-  csharp: 'C#',
+  csharp: 'C#', c: 'C', cpp: 'C++', 'c++': 'C++',
   rust: 'Rust',
   go: 'Go',
 };

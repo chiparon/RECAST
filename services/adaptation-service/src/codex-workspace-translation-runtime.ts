@@ -16,6 +16,7 @@ import { resolveCodexCommand } from "./codex-command";
 import type { CodexHomeHandle } from "./codex-experiment-home";
 import { codexPatchInstructions, codexPatchToolFile, writeCodexPatchTool } from './codex-patch-tool';
 import { analysisEvidenceFile, analysisEvidenceInstructions, captureAnalysisEvidence, refreshAnalysisEvidence, type AnalysisEvidence } from './codex-analysis-evidence';
+import { codexOutputLimit, outputLimitInstructions } from './codex-output-limit';
 
 export interface CodexWorkspaceTranslationRuntimeOptions {
   workspaceRoot: string;
@@ -32,6 +33,8 @@ export interface CodexWorkspaceTranslationRuntimeOptions {
   maxModelTurns?: number;
   timeoutMs?: number;
   maxVerificationRepairs?: number;
+  /** Extra continuations for truncated outputs, within the original time limit. */
+  maxOutputLimitRetries?: number;
   /** Extra environment is useful for a host-owned Codex provider adapter. */
   environment?: NodeJS.ProcessEnv;
 }
@@ -46,7 +49,7 @@ const hash = (value: string | null): string | null => value === null ? null : cr
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const maxCodexOutput = 4 * 1024 * 1024;
 const maxRecordedAnalyzerOutput = 64 * 1024;
-const generatedDirectoryNames = new Set([".git", ".forexpore", ".codex", ".claude", ".agent-tmp", ".translation-verifier-tests", "node_modules", "bin", "obj", "target", "build", "dist", "test", "tests", "__tests__", "evaluation"]);
+const generatedDirectoryNames = new Set([".git", ".forexpore", ".codex", ".claude", ".agent-tmp", ".translation-verifier-tests", ".recast-tests", ".recast-tests-delivery", "node_modules", "bin", "obj", "target", "build", "dist", "test", "tests", "__tests__", "evaluation"]);
 const sensitiveFileNames = new Set([".env", ".env.local", ".env.production", ".npmrc", "id_rsa", "id_ed25519"]);
 const codexMetadataDirectories = new Set([".agents", ".aws", ".codex", ".git"]);
 
@@ -73,6 +76,16 @@ interface CodexInvocation {
   usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number };
 }
 
+interface CodexStaging {
+  root: string;
+  historyRoot: string;
+  baseline: Map<string, string>;
+  historyBaseline: Map<string, string>;
+  planHash?: string;
+  controlHashes: Map<string, string>;
+  evidenceSummary?: { entries: number; stalePaths: string[]; excerptChars: number };
+}
+
 const integrationOutputSchema = {
   type: "object",
   additionalProperties: false,
@@ -97,6 +110,7 @@ export class CodexWorkspaceTranslationRuntime {
   private readonly codexCommand: string;
   private readonly codexModel?: string;
   private readonly maxVerificationRepairs: number;
+  private readonly maxOutputLimitRetries: number;
   private readonly environment: NodeJS.ProcessEnv;
   private closing = false;
   private active?: { run: WorkspaceTranslationRun; controller: AbortController; done: Promise<void>; child?: ChildProcess };
@@ -114,9 +128,13 @@ export class CodexWorkspaceTranslationRuntime {
     this.maxTurns = options.maxModelTurns ?? 4;
     this.timeoutMs = options.timeoutMs ?? 1_800_000;
     this.maxVerificationRepairs = options.maxVerificationRepairs ?? 2;
+    this.maxOutputLimitRetries = options.maxOutputLimitRetries ?? 3;
     if (!Number.isInteger(this.maxTurns) || this.maxTurns < 2 || this.maxTurns > 1000 ||
         !Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 7_200_000) {
       throw new Error("Invalid Codex workspace translation execution budget.");
+    }
+    if (!Number.isInteger(this.maxOutputLimitRetries) || this.maxOutputLimitRetries < 0 || this.maxOutputLimitRetries > 8) {
+      throw new Error('Invalid Codex output-limit recovery budget.');
     }
     if (options.verification) {
       validateWorkspaceCompileCommand(options.verification.command);
@@ -239,6 +257,13 @@ export class CodexWorkspaceTranslationRuntime {
     await active.done;
   }
 
+  /** Stop accepting runs only if no run is owned; a busy run stays untouched. */
+  async shutdownIfIdle(): Promise<boolean> {
+    if (this.active) return false;
+    await this.shutdown();
+    return true;
+  }
+
   private launch(run: WorkspaceTranslationRun): WorkspaceTranslationRun {
     const controller = new AbortController();
     const active = { run, controller, done: Promise.resolve() } as { run: WorkspaceTranslationRun; controller: AbortController; done: Promise<void>; child?: ChildProcess; environment?: NodeJS.ProcessEnv };
@@ -290,8 +315,7 @@ export class CodexWorkspaceTranslationRuntime {
       const analysisStage = await this.createStaging(run.request, signal, undefined, true);
       try {
         const prompt = this.analyzerPrompt(run.request, analysisStage.historyRoot);
-        const result = await this.invokeCodex(analysisStage.root, prompt, signal, active, "read-only", "analyzer");
-        this.recordInvocation(run, "analyzer", "read-only", prompt, result, run.request.historyView?.files ?? []);
+        const result = await this.invokeWithOutputRecovery(run, analysisStage, prompt, signal, active, 'analyzer');
         const analyzerStage = run.agent?.stages?.at(-1);
         if (analyzerStage) analyzerStage.analyzerOutput = boundedAnalyzerOutput(result.lastMessage).value;
         if (analyzerStage && boundedAnalyzerOutput(result.lastMessage).truncated) analyzerStage.analyzerOutputTruncated = true;
@@ -315,7 +339,9 @@ export class CodexWorkspaceTranslationRuntime {
           this.event(run, "translating", `Analyzer 未提交可用计划，切换需求直实现 Translator 兜底：${reason.slice(0, 240)}`);
           this.save(run);
         };
-        if (result.exitCode !== 0) {
+        if (codexOutputLimit(result)) {
+          fallback(this.outputLimitError(result, 'analyzer'));
+        } else if (result.exitCode !== 0) {
           fallback(`Codex Analyzer exited with code ${result.exitCode}: ${codexFailureMessage(result)}`);
         } else {
           try {
@@ -365,24 +391,8 @@ export class CodexWorkspaceTranslationRuntime {
           outputSchema = join(stage.root, "CODEX_INTEGRATION_SCHEMA.json");
           await writeFile(outputSchema, JSON.stringify(integrationOutputSchema, null, 2) + "\n", { mode: 0o444 });
         }
-        const result = await this.invokeCodex(stage.root, prompt, signal, active, "workspace-write", "translator",
-          outputSchema);
-        this.recordInvocation(run, "translator", "workspace-write", prompt, result, run.request.historyView?.files ?? []);
-        const invocation = run.agent!.stages!.at(-1)!;
-        invocation.analysisEvidence = stage.evidenceSummary;
-        try {
-          const lines = (await readFile(join(stage.root, '.agent-tmp/recast-patch-results.jsonl'), 'utf8')).trim().split('\n');
-          const results = lines.filter(Boolean).map(line => JSON.parse(line) as { exitCode: number; durationMs: number; error: string });
-          invocation.patchTool = { attempts: results.length, failures: results.filter(item => item.exitCode !== 0).length,
-            durationMs: results.reduce((sum, item) => sum + item.durationMs, 0), errors: results.filter(item => item.exitCode !== 0).slice(-4).map(item => item.error.slice(-4000)) };
-        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-        assertCodexNotBlocked(result, "Translator");
-        if (integration) {
-          const invocation = run.agent!.stages!.at(-1)!;
-          try { invocation.integrationEvidence = await collectProjectIntegrationEvidence(stage.root); }
-          catch { invocation.integrationEvidence = { files: [], omissions: ["Integration evidence could not be collected."] }; }
-          this.save(run);
-        }
+        const result = await this.invokeWithOutputRecovery(run, stage, prompt, signal, active, 'translator', outputSchema);
+        if (codexOutputLimit(result)) throw new Error(this.outputLimitError(result));
         if (result.exitCode !== 0) throw new Error(`Codex Translator exited with code ${result.exitCode}: ${codexFailureMessage(result)}`);
         if (!result.lastMessage.trim()) throw new Error("Codex Translator exited without a final completion message; staged changes were not accepted.");
         const changes = await this.diffStaging(stage, run.request.writeFiles, integration);
@@ -610,8 +620,80 @@ export class CodexWorkspaceTranslationRuntime {
     return value;
   }
 
+  private outputLimitError(result: CodexInvocation, stage: CodexStage = 'translator'): string {
+    if (stage === 'analyzer') return codexOutputLimit(result)?.kind === 'configuration'
+      ? 'Analyzer 模型输出参数不兼容，未接受该计划；切换需求直实现 Translator 兜底。'
+      : `Analyzer 用尽 ${this.maxOutputLimitRetries} 次输出超限重试，未接受不完整计划；切换需求直实现 Translator 兜底。`;
+    return codexOutputLimit(result)?.kind === 'configuration'
+      ? '模型输出参数超过服务商支持范围。请检查当前模型、API 地址和服务商允许的单次输出上限；本次未重复发送相同的无效请求，暂存修改未发布。'
+      : `模型单次输出仍达到 Token 上限，已用尽 ${this.maxOutputLimitRetries} 次小步续接机会。暂存修改未发布，请从失败模块重试；编译和行为验收未被跳过。`;
+  }
+
+  /** Continue only the failed model invocation; keep edits private until completion. */
+  private async invokeWithOutputRecovery(run: WorkspaceTranslationRun, staging: CodexStaging, prompt: string,
+    signal: AbortSignal, active: { child?: ChildProcess; environment?: NodeJS.ProcessEnv }, stage: CodexStage,
+    outputSchema?: string): Promise<CodexInvocation> {
+    const sandbox = stage === 'analyzer' ? 'read-only' : 'workspace-write';
+    const integration = run.request.taskKind === 'project-integration';
+    let recordedPatchResults = 0;
+    for (let retry = 0; ; retry++) {
+      signal.throwIfAborted();
+      if (retry) { run.modelTurns++; this.save(run); }
+      const currentPrompt = `${prompt}\n\n${outputLimitInstructions(stage, retry)}`;
+      const result = await this.invokeCodex(staging.root, currentPrompt, signal, active, sandbox, stage, outputSchema);
+      signal.throwIfAborted();
+      this.recordInvocation(run, stage, sandbox, currentPrompt, result, run.request.historyView?.files ?? []);
+      const entry = run.agent!.stages!.at(-1)!;
+      if (stage === 'analyzer') {
+        const bounded = boundedAnalyzerOutput(result.lastMessage);
+        entry.analyzerOutput = bounded.value;
+        if (bounded.truncated) entry.analyzerOutputTruncated = true;
+        await this.assertStagingUnchanged(staging);
+      } else {
+        entry.analysisEvidence = staging.evidenceSummary;
+        try {
+          const lines = (await readFile(join(staging.root, '.agent-tmp/recast-patch-results.jsonl'), 'utf8')).trim().split('\n');
+          const results = lines.filter(Boolean).map(line => JSON.parse(line) as { exitCode: number; durationMs: number; error: string });
+          const added = results.slice(recordedPatchResults); recordedPatchResults = results.length;
+          entry.patchTool = { attempts: added.length, failures: added.filter(item => item.exitCode !== 0).length,
+            durationMs: added.reduce((sum, item) => sum + item.durationMs, 0), errors: added.filter(item => item.exitCode !== 0).slice(-4).map(item => item.error.slice(-4000)) };
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        if (integration) {
+          try { entry.integrationEvidence = await collectProjectIntegrationEvidence(staging.root); }
+          catch { entry.integrationEvidence = { files: [], omissions: ['Integration evidence could not be collected.'] }; }
+        }
+      }
+      assertCodexNotBlocked(result, stage === 'analyzer' ? 'Analyzer' : 'Translator');
+      const limit = codexOutputLimit(result);
+      if (!limit) {
+        if (retry && result.exitCode === 0 && result.lastMessage.trim()) {
+          entry.outputLimitRecovery = { attempt: retry, maxRetries: this.maxOutputLimitRetries, status: 'recovered' };
+          this.event(run, run.status, `${stage === 'analyzer' ? 'Analyzer' : 'Translator'} 输出超限恢复成功，继续执行`);
+        }
+        this.save(run);
+        return result;
+      }
+      // Even rejected outputs cannot expand permissions. Only already executed,
+      // allow-listed text edits may be retained in the private staging copy.
+      if (stage === 'translator') {
+        const changes = await this.diffStaging(staging, run.request.writeFiles, integration);
+        if (changes.some(change => change.after.startsWith('\0binary:'))) throw new Error('Codex changed a non-text file during output-limit recovery.');
+      }
+      const status = limit.kind === 'configuration' ? 'configuration' : retry >= this.maxOutputLimitRetries ? 'exhausted' : 'retrying';
+      entry.outputLimitRecovery = { attempt: retry, maxRetries: this.maxOutputLimitRetries, status };
+      this.event(run, run.status, status === 'retrying'
+        ? `${stage === 'analyzer' ? 'Analyzer' : 'Translator'} 单次输出达到 Token 上限，保留执行副本，正在以小步修改续接（${retry + 1}/${this.maxOutputLimitRetries}）`
+        : this.outputLimitError(result, stage));
+      this.save(run);
+      if (status !== 'retrying') return result;
+    }
+  }
+
   private async invokeCodex(root: string, prompt: string, signal: AbortSignal, active: { child?: ChildProcess; environment?: NodeJS.ProcessEnv }, sandbox: CodexSandbox, stage: CodexStage, outputSchema?: string): Promise<CodexInvocation> {
     const lastMessage = join(root, ".codex-last-message.txt");
+    // Recovery reuses a staging directory. An older completion must never
+    // make a later process with no final response appear successful.
+    await rm(lastMessage, { force: true });
     const args = ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", sandbox, "--cd", root, "--json", "--output-last-message", lastMessage];
     if (outputSchema) args.push("--output-schema", outputSchema);
     if (this.codexModel) args.push("--model", this.codexModel);
@@ -691,7 +773,7 @@ export class CodexWorkspaceTranslationRuntime {
     return { startedAt, exitCode, stderr, stdout, lastMessage: finalMessage, outputChars: stdout.length + finalMessage.length, durationMs: Date.now() - started, ...(usage ? { usage } : {}) };
   }
 
-  private async createStaging(request: WorkspaceTranslationRequest, signal: AbortSignal, plan: WorkspaceTranslationPlan | undefined, analyzer: boolean, evidence?: AnalysisEvidence): Promise<{ root: string; historyRoot: string; baseline: Map<string, string>; historyBaseline: Map<string, string>; planHash?: string; controlHashes: Map<string, string>; evidenceSummary?: { entries: number; stalePaths: string[]; excerptChars: number } }> {
+  private async createStaging(request: WorkspaceTranslationRequest, signal: AbortSignal, plan: WorkspaceTranslationPlan | undefined, analyzer: boolean, evidence?: AnalysisEvidence): Promise<CodexStaging> {
     const root = await mkdtemp(join(tmpdir(), `forexplore-codex-${randomUUID()}-`));
     const baseline = new Map<string, string>();
     try {
@@ -1038,6 +1120,7 @@ async function copyVisibleTree(source: string, destination: string, protectedFil
 async function walkTree(root: string, prefix: string, visit: (relativePath: string, absolutePath: string) => Promise<void>): Promise<void> {
   for (const entry of await readdir(join(root, ...(prefix ? prefix.split("/") : [])), { withFileTypes: true })) {
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(relativePath)) continue;
     // Both spellings exist in deployed workspaces. Run journals contain prior
     // implementation snapshots and verification evidence, never Agent input.
     if (generatedDirectoryNames.has(entry.name) || entry.name.startsWith(".forexpore") || entry.name.startsWith(".forexplore") || sensitiveFileNames.has(entry.name.toLowerCase()) || /(?:\.test|\.spec)\.[^.]+$/i.test(entry.name)) continue;
@@ -1058,6 +1141,7 @@ async function collectTargetFiles(root: string, result: Map<string, string>): Pr
 async function collectAllFiles(root: string, prefix: string, result: Map<string, string>): Promise<void> {
   for (const entry of await readdir(join(root, ...(prefix ? prefix.split("/") : [])), { withFileTypes: true })) {
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(relativePath)) continue;
     const absolute = join(root, ...relativePath.split("/"));
     if (entry.isDirectory()) {
       // Build/test tools commonly leave bin/obj/node_modules in the staging

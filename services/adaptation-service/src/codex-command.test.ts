@@ -26,6 +26,11 @@ describe('Codex command launch', () => {
       await mkdir(dirname(entry), { recursive: true });
       await writeFile(join(directory, 'codex.cmd'), 'npm shim');
       await writeFile(entry, 'process.exit(0)');
+      // Keep unrelated installations in ancestor node_modules out of this
+      // fixture: this platform package deliberately has no native binary.
+      const platformRoot = join(root, 'node_modules', '@openai', `codex-win32-${process.arch}`);
+      await mkdir(platformRoot, { recursive: true });
+      await writeFile(join(platformRoot, 'package.json'), '{}');
       const expected = { executable: process.execPath, args: [resolve(entry)] };
       expect(await resolveCodexCommand('codex', { cwd: tmpdir(), environment: { Path: directory }, platform: 'win32' }))
         .toEqual(expected);
@@ -41,6 +46,44 @@ describe('Codex command launch', () => {
       await writeFile(executable, 'native fixture');
       expect(await resolveCodexCommand('codex', { cwd: tmpdir(), environment: { PATH: root }, platform: 'win32' }))
         .toEqual({ executable, args: [] });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    { layout: 'nested', arch: 'x64' },
+    { layout: 'hoisted', arch: 'x64' },
+    { layout: 'legacy', arch: 'x64' },
+    { layout: 'nested', arch: 'arm64' },
+  ])('bypasses the npm JS launcher for $layout / $arch native installs', async ({ layout, arch }) => {
+    const root = await mkdtemp(join(tmpdir(), 'codex-native-npm-'));
+    try {
+      const packageRoot = join(root, 'node_modules', '@openai', 'codex');
+      const entry = join(packageRoot, 'bin', 'codex.js');
+      const platformRoot = layout === 'nested'
+        ? join(packageRoot, 'node_modules', '@openai', `codex-win32-${arch}`)
+        : join(root, 'node_modules', '@openai', `codex-win32-${arch}`);
+      const vendorRoot = join(layout === 'legacy' ? packageRoot : platformRoot, 'vendor');
+      const target = arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
+      const executable = join(vendorRoot, target, 'bin', 'codex.exe');
+      await mkdir(dirname(entry), { recursive: true });
+      await mkdir(dirname(executable), { recursive: true });
+      await writeFile(join(root, 'codex.cmd'), 'npm shim');
+      await writeFile(entry, 'throw new Error("The JS launcher would open a console window")');
+      await writeFile(executable, 'native fixture');
+      if (layout !== 'legacy') {
+        await writeFile(join(platformRoot, 'package.json'), JSON.stringify({ name: `@openai/codex-win32-${arch}` }));
+      }
+      const expected = { executable, args: [] };
+      expect(await resolveCodexCommand('codex', { cwd: root, environment: { PATH: root }, platform: 'win32', arch }))
+        .toEqual(expected);
+      expect(await resolveCodexCommand(join(root, 'codex.cmd'), { cwd: root, environment: {}, platform: 'win32', arch }))
+        .toEqual(expected);
+      // Local .bin shims must use the same direct executable.
+      const localBin = join(root, 'node_modules', '.bin');
+      await mkdir(localBin, { recursive: true });
+      await writeFile(join(localBin, 'codex.cmd'), 'npm shim');
+      expect(await resolveCodexCommand('codex', { cwd: root, environment: { Path: localBin }, platform: 'win32', arch }))
+        .toEqual(expected);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

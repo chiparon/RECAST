@@ -20,7 +20,7 @@ export interface BackendCapabilities {
 }
 class BackendProbeUnavailable extends Error {}
 
-/** One owned child per extension host. Existing processes are never terminated. */
+/** One owned child per extension host. Only an idle owned child can be replaced. */
 export class BackendProcess {
   private child?: ChildProcess;
   private pending?: Promise<BackendCapabilities>;
@@ -67,7 +67,7 @@ export class BackendProcess {
       if (capabilities.workspaceTranslation) throw new Error('启动服务不应绑定目标工程。');
       return;
     }
-    if (!capabilities.workspaceRoot || await realpath(capabilities.workspaceRoot) !== root) {
+    if (!capabilities.workspaceRoot || !sameWorkspace(await realpath(capabilities.workspaceRoot), root)) {
       throw new Error(`后端 ${new URL(config.url).origin} 绑定了其他目标工程或未声明目标；请为本窗口配置另一 adaptationApiUrl。`);
     }
     let authorized: Response;
@@ -80,7 +80,7 @@ export class BackendProcess {
       throw new Error(`后端鉴权失败（HTTP ${authorized.status}）：翻译令牌与本窗口不一致；请配置匹配的令牌或另一 adaptationApiUrl。`);
     }
     const configuration = await authorized.json() as { workspaceRoot?: string };
-    if (!configuration.workspaceRoot || await realpath(configuration.workspaceRoot) !== root) {
+    if (!configuration.workspaceRoot || !sameWorkspace(await realpath(configuration.workspaceRoot), root)) {
       throw new Error('后端已鉴权的目标工程与本窗口不一致。');
     }
   }
@@ -91,29 +91,52 @@ export class BackendProcess {
     return this.pending;
   }
 
+  private async releaseIdleChild(): Promise<void> {
+    const child = this.child;
+    if (!child) return;
+    if (!child.connected) throw new Error('后端控制连接暂不可用，保留现有任务；稍后会重试切换。');
+    const requestId = randomBytes(16).toString('hex');
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        child.removeListener('exit', exited);
+        child.removeListener('message', replied);
+        if (error) reject(error); else resolve();
+      };
+      const exited = () => finish();
+      const replied = (message: unknown) => {
+        if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'shutdown-if-idle-result' ||
+            !('requestId' in message) || message.requestId !== requestId || !('status' in message)) return;
+        if (message.status === 'busy') finish(new Error('当前后端仍有翻译任务执行，完成或取消后会自动切换目标，无需关闭窗口。'));
+        else if (message.status !== 'closing') finish(new Error('后端暂未完成空闲检查，保留现有任务；稍后会重试切换。'));
+        // An accepted request still owns its port until the child has exited.
+      };
+      const timer = setTimeout(() => finish(new Error('后端正在完成原有请求，稍后会重试切换；现有任务已保留。')), 10_000);
+      child.once('exit', exited);
+      child.on('message', replied);
+      try {
+        child.send({ type: 'shutdown-if-idle', requestId }, error => { if (error) finish(new Error('后端控制连接暂不可用，保留现有任务；稍后会重试切换。')); });
+      } catch { finish(new Error('后端控制连接暂不可用，保留现有任务；稍后会重试切换。')); }
+    });
+    this.log('原后端已空闲退出，正在应用当前目标与端口配置。');
+  }
+
   private async start(): Promise<BackendCapabilities> {
     const config = await this.configuration();
     const url = new URL(config.url);
     if (!config.trusted) throw new Error('请先信任工作区，再启动模型后端。');
     const root = await realpath(config.workspaceRoot);
-    if (this.child && this.verified?.workspaceTranslation === false && config.workspaceTranslation !== false) {
-      // Only the service-only child can be rebound automatically. A real
-      // target-bound process may own translation jobs and retains its guard.
-      const bootstrap = this.child;
-      await new Promise<void>(resolve => {
-        const timer = setTimeout(() => { bootstrap.kill(); }, 5000);
-        bootstrap.once('exit', () => { clearTimeout(timer); resolve(); });
-        if (bootstrap.connected) bootstrap.send({ type: 'shutdown' }, error => { if (error) bootstrap.kill(); });
-        else bootstrap.kill();
-      });
-    }
-    if (this.child && (this.ownedRoot !== root || this.ownedOrigin !== url.origin)) {
-      throw new Error('后端仍绑定另一目标或端口；请关闭该扩展开发窗口后在新目标中重开，避免中断正在进行的翻译。');
+    const endpointOrigin = this.endpoint ? new URL(this.endpoint).origin : undefined;
+    const originChanged = this.ownedOrigin !== url.origin && !(config.dynamicPort && endpointOrigin === url.origin);
+    if (this.child && (!this.ownedRoot || !sameWorkspace(this.ownedRoot, root) || originChanged ||
+        this.verified && (this.verified.workspaceTranslation !== (config.workspaceTranslation !== false) ||
+          this.verified.semanticQueryUrl?.replace(/\/+$/, '') !== `http://127.0.0.1:${config.semanticPort}`))) {
+      if (!config.autoStart) throw new Error('后端配置已变化，请启用自动启动以切换到当前目标与端口。');
+      // The child checks and closes admission atomically. Never infer idleness
+      // from a missed health probe or force-kill a target-bound process.
+      await this.releaseIdleChild();
     }
     if (this.child && this.verified && this.endpoint) {
-      if (this.verified.semanticQueryUrl?.replace(/\/+$/, '') !== `http://127.0.0.1:${config.semanticPort}`) {
-        throw new Error('后端绑定的语义查询端口已变化，请重新打开此窗口。');
-      }
       if (Date.now() - this.lastProbeAt < 30_000) return this.verified;
       const child = this.child;
       let probe = await this.probe(this.endpoint);
@@ -175,6 +198,7 @@ export class BackendProcess {
       if (this.child !== child) return;
       this.child = undefined; this.ownedRoot = undefined; this.ownedOrigin = undefined;
       this.verified = undefined; this.endpoint = undefined; this.probePending = false;
+      this.lastProbeAt = 0;
     };
     child.once('error', error => {
       failure = `后端进程启动失败：${error.message}`;
@@ -231,4 +255,8 @@ export class BackendProcess {
     const timer = setTimeout(() => { if (this.child === child) child.kill(); }, 5000);
     timer.unref();
   }
+}
+
+function sameWorkspace(left: string, right: string): boolean {
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }

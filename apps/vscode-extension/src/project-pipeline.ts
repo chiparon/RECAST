@@ -55,6 +55,7 @@ export class ProjectPipeline {
     const run = structuredClone(previous);
     const failed = new Set(run.modules.filter(module => module.status === 'failed' || module.status === 'running').map(module => module.id));
     for (const module of run.validation?.modules ?? []) if (module.verification.disposition === 'production-defect') failed.add(module.id);
+    for (const id of run.validation?.retainedTestFailures ?? []) failed.add(id);
     if (moduleId && !failed.has(moduleId)) throw new Error('只能重试本任务中失败或未完成的模块。');
     const reset = new Set(moduleId ? [moduleId] : failed);
     // A regenerated dependency invalidates downstream implementations, while
@@ -194,6 +195,7 @@ export class ProjectPipeline {
         run.validation = await this.ports.validate(structuredClone(run), signal, message => this.event(message)); signal.throwIfAborted();
         (run.validationHistory ??= []).push(structuredClone(run.validation));
         if (!run.validation.protectedFilesUnchanged) throw new Error('固定验收文件发生变化，禁止发布输出。');
+        if (run.validation.retainedTests && !run.validation.retainedTests.success) throw new Error('交付目录中的生成测试未通过，已保留代码、测试和诊断，禁止发布。');
         if (run.validation.compilation.success && (!run.validation.verification || run.validation.verification.success)) break;
         if (attempt >= 2) throw new Error('联合验收在集成修复后仍未通过，请查看报告中的实际诊断。');
         const files = [...new Set(run.modules.flatMap(module => module.target.module?.sourceFiles ?? []))];
@@ -262,6 +264,7 @@ export function projectPipelineMarkdown(run: ProjectPipelineRun): string {
       + '\n自动参考选择：\n\n' + fenced(module.referenceSelection ?? '无历史参考')
       + '\n模块 Verifier 证据（生成阶段）：\n\n' + fenced(module.moduleVerification ?? '未执行')
       + '\n最终模块 Verifier：\n\n' + fenced(run.validation?.modules?.find(item => item.id === module.id)?.verification ?? '未执行 / 不适用')
+      + '\n随项目交付的测试与运行入口：\n\n' + fenced(run.validation?.modules?.find(item => item.id === module.id)?.verification.testSuite ?? module.retainedTests ?? module.moduleVerification?.testSuite ?? '无生成测试')
       + '\nCodex 与 Integration 运行证据：\n\n' + fenced(module.translation?.agent ?? '未执行')
       + '\n修改计划：\n\n' + fenced(module.plan ?? '未生成计划')
       + '\n实际编译检查：\n\n' + (checks.length ? checks.map(check => fenced({ command: check.command, success: check.success, exitCode: check.exitCode, durationMs: check.durationMs, output: check.output, diagnostics: check.diagnostics })).join('\n') : '未执行\n')
@@ -269,5 +272,7 @@ export function projectPipelineMarkdown(run: ProjectPipelineRun): string {
       + '\n按需历史查询：\n\n' + fenced(module.translation?.evidenceQueries ?? [])
       + '\n重试前的模块记录：\n\n' + fenced(module.attemptHistory ?? []);
   }).join('\n');
-  return projectPipelineSummary(run) + '\n## 联合验收尝试历史\n\n' + fenced(run.validationHistory ?? []) + '\n## 模块详细证据\n' + details;
+  return projectPipelineSummary(run) + '\n## 交付测试重放\n\n' + fenced(run.validation?.retainedTests ?? '无生成测试 / 未执行')
+    + '\n项目根目录执行：`node .recast-tests/run.cjs`；各模块目录的 manifest.json 记录测试文件、内容指纹与生成时状态。\n'
+    + '\n## 联合验收尝试历史\n\n' + fenced(run.validationHistory ?? []) + '\n## 模块详细证据\n' + details;
 }
