@@ -1,5 +1,7 @@
 import type { VerificationIssue, VerificationIssueKind } from "../../types.js";
+import { runTargetTests } from "./run-target-tests.js";
 import {
+  type FinishFeedback,
   type HostTool,
   type HostToolFactory,
   type TargetTestResult,
@@ -23,6 +25,8 @@ export type FinishResult = {
   /** Host-observed test status; Agent input never controls this field. */
   targetTest: TargetTestResult;
 };
+
+export type FinishResponse = FinishResult | (FinishFeedback & { targetTest: TargetTestResult });
 
 const testStatuses = new Set<TargetTestResult["status"]>([
   "success",
@@ -127,9 +131,9 @@ function parseIssue(value: unknown): FinishIssue | undefined {
 }
 
 export function createFinishTool(): HostToolFactory {
-  return (context: ToolContext): HostTool<FinishInput, FinishResult> => ({
+  return (context: ToolContext): HostTool<FinishInput, FinishResponse> => ({
     name: "finish",
-    description: `Finish ${context.runtime.sourceLanguage} to ${context.runtime.targetLanguage} verification after reporting the Host-observed test status and translation assessment.`,
+    description: `Rerun every test in the dedicated test folder and finish ${context.runtime.sourceLanguage} to ${context.runtime.targetLanguage} verification from that fresh Host result. All tests must compile and the target function must execute. Success requires every test to pass; a real failing assertion may establish a translation bug. Unmet completion checks return feedback and the current Host result so you can continue debugging.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -155,39 +159,30 @@ export function createFinishTool(): HostToolFactory {
       },
     },
     parse: parseFinishInput,
+    isTerminal: output => !("outcome" in output),
     async execute(input) {
-      const targetTest = context.state.lastTargetTest;
-      if (targetTest === undefined) {
-        throw new Error("Run run_target_tests before finish.");
+      const targetTest = await runTargetTests(context);
+      const feedback: string[] = [];
+      if (targetTest.timedOut || targetTest.exitCode === null || (targetTest.executionErrors ?? 0) > 0 || !targetTest.tests || targetTest.tests.executed < 1 ||
+          (targetTest.status === "failure" && targetTest.tests.failed < 1)) {
+        feedback.push("The complete test folder must compile and execute before finish. Repair compilation/setup errors and rerun, or report_uncertain if blocked.");
+      }
+      if ((targetTest.tests?.skipped ?? 0) > 0) {
+        feedback.push("The complete test folder must execute without skipped tests before finish.");
+      }
+      if (targetTest.coverage?.status !== "available" || !targetTest.coverage.targetFunction.executed) {
+        feedback.push("The complete test folder must execute the requested target function before finish. Inspect the coverage result and reportPaths, then repair the tests or coverage setup.");
       }
       if (input.testExecutionStatus !== targetTest.status) {
-        throw new Error(
-          [
-            `finish.testExecutionStatus does not match the Host result: expected ${targetTest.status}.`,
-            `Host target test result: ${JSON.stringify(targetTest)}`,
-          ].join("\n"),
-        );
+        feedback.push(`finish.testExecutionStatus does not match the Host result: expected ${targetTest.status}. Investigate the current result before resubmitting.`);
       }
       if (input.translationStatus !== targetTest.status) {
-        throw new Error(
-          [
-            `finish.translationStatus does not match the Host result: expected ${targetTest.status}.`,
-            `Host target test result: ${JSON.stringify(targetTest)}`,
-          ].join("\n"),
-        );
+        feedback.push(`finish.translationStatus does not match the Host result: expected ${targetTest.status}. Debug test-authoring errors or report a real production bug with a concrete issue.`);
       }
-      if (input.translationStatus === "success") {
-        if (!targetTest.tests || targetTest.tests.executed < 1 || targetTest.tests.failed > 0) {
-          throw new Error("Successful verification requires at least one executed, passing test.");
-        }
-        if (targetTest.coverage?.status !== "available") {
-          const reason = targetTest.coverage?.status === "unavailable" ? targetTest.coverage.reason : "No coverage evidence.";
-          throw new Error(`Successful verification requires target function coverage: ${reason}`);
-        }
-        if (!targetTest.coverage.targetFunction.executed) {
-          throw new Error("The target function was not executed. Add a test that invokes it and rerun.");
-        }
+      if (input.translationStatus === "success" && (targetTest.tests?.failed ?? 0) > 0) {
+        feedback.push("Successful verification requires every test in the dedicated folder to pass. Diagnose the failed tests before claiming success; preserve valid failing requirement assertions.");
       }
+      if (feedback.length > 0) return { outcome: "continue" as const, feedback, targetTest };
       return {
         testExecutionStatus: targetTest.status,
         translationStatus: input.translationStatus,

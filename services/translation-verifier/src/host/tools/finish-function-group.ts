@@ -1,6 +1,7 @@
-import type { ProtocolCheck, VerificationIssue, VerificationReason } from "../../types.js";
-import { hasUnresolvedTestFailures, snapshotTest, testEvidence } from "../test-evidence.js";
+import type { ProtocolCheck, VerificationIssue } from "../../types.js";
+import { runFunctionGroupTests } from "./run-function-group-tests.js";
 import {
+  type FinishFeedback,
   type FunctionGroupTestRun,
   type HostTool,
   type HostToolFactory,
@@ -16,86 +17,9 @@ export type FinishFunctionGroupInput = {
 
 export type FinishFunctionGroupResult = FinishFunctionGroupInput & {
   functionGroupTest: FunctionGroupTestRun;
-  testEvidence?: import("../../types.js").VerificationTestEvidence;
 };
 
-function mergeFunctionGroupTests(runs: readonly FunctionGroupTestRun[]): FunctionGroupTestRun {
-  const latest = runs[runs.length - 1];
-  if (!latest) throw new Error("Run run_function_group_tests before finish_function_group.");
-  // Merge current execution/coverage separately from immutable failure history.
-  // A green latest run cannot discharge historical failures in testEvidence.
-  const allFunctionKeys = new Set(runs.flatMap((run) => run.functions.map((item) =>
-    `${item.target.path}\0${item.target.name}\0${item.target.signature ?? ""}`,
-  )));
-  const latestFunctionKeys = new Set(latest.functions.map((item) =>
-    `${item.target.path}\0${item.target.name}\0${item.target.signature ?? ""}`,
-  ));
-  const latestIsComplete = latest.status === "success" && latest.tests.executed > 0 && latest.tests.failed === 0 &&
-    latest.functions.length > 0 && latestFunctionKeys.size === allFunctionKeys.size &&
-    [...allFunctionKeys].every((key) => latestFunctionKeys.has(key)) &&
-    latest.functions.every((item) => item.status === "passed" && item.executed);
-  if (latestIsComplete) {
-    return {
-      ...latest,
-      testPaths: [...latest.testPaths],
-      functions: latest.functions.map((item) => ({ ...item })),
-      failures: [],
-      reason: "verified",
-    };
-  }
-  // An agent commonly reruns the same generated test file after fixing an
-  // assertion or a fixture.  That retry supersedes the earlier observation;
-  // retaining the old failure would make a final passing run impossible to
-  // finish.  Keep separate test-file runs so a function group can still be
-  // covered by more than one file, while replacing exact-path retries with
-  // their newest Host result.
-  const latestByPathSet = new Map<string, FunctionGroupTestRun>();
-  for (const run of runs) {
-    const key = [...run.testPaths].sort().join("\0");
-    latestByPathSet.set(key, run);
-  }
-  const effectiveRuns = [...latestByPathSet.values()];
-  const tests = effectiveRuns.reduce(
-    (total, run) => ({
-      executed: total.executed + run.tests.executed,
-      passed: total.passed + run.tests.passed,
-      failed: total.failed + run.tests.failed,
-      skipped: total.skipped + run.tests.skipped,
-    }),
-    { executed: 0, passed: 0, failed: 0, skipped: 0 },
-  );
-  const byFunction = new Map<string, FunctionGroupTestRun["functions"][number]>();
-  for (const run of effectiveRuns) {
-    for (const item of run.functions) {
-      const key = `${item.target.path}\0${item.target.name}\0${item.target.signature ?? ""}`;
-      const previous = byFunction.get(key);
-      if (!previous || (item.status === "passed" && previous.status === "unverified")) {
-        byFunction.set(key, { ...item });
-      } else if (item.executed && !previous.executed) {
-        byFunction.set(key, { ...previous, ...item });
-      }
-    }
-  }
-  return {
-    ...latest,
-    status: effectiveRuns.some((run) => run.status === "failure") ? "failure" : "success",
-    tests,
-    testPaths: [...new Set(effectiveRuns.flatMap((run) => run.testPaths))],
-    functions: [...byFunction.values()],
-    failures: effectiveRuns.flatMap((run) => run.failures),
-    reason: mergeReason(effectiveRuns, [...byFunction.values()]),
-  };
-}
-
-function mergeReason(
-  runs: readonly FunctionGroupTestRun[],
-  functions: readonly FunctionGroupTestRun["functions"][number][],
-): VerificationReason {
-  if (runs.some((run) => run.reason === "test-failed" || run.status === "failure")) return "test-failed";
-  if (functions.some((item) => item.reason === "coverage-unavailable")) return "coverage-unavailable";
-  if (functions.some((item) => item.reason === "not-executed" || !item.executed)) return "not-executed";
-  return "verified";
-}
+export type FinishFunctionGroupResponse = FinishFunctionGroupResult | (FinishFeedback & { functionGroupTest: FunctionGroupTestRun });
 
 function parseFinishFunctionGroupInput(value: unknown): FinishFunctionGroupInput {
   if (
@@ -172,9 +96,9 @@ function parseIssue(value: unknown): VerificationIssue | undefined {
 }
 
 export function createFinishFunctionGroupTool(): HostToolFactory {
-  return (context: ToolContext): HostTool<FinishFunctionGroupInput, FinishFunctionGroupResult> => ({
+  return (context: ToolContext): HostTool<FinishFunctionGroupInput, FinishFunctionGroupResponse> => ({
     name: "finish_function_group",
-    description: `Finish ${context.runtime.sourceLanguage} to ${context.runtime.targetLanguage} verification after reporting the Host-observed result for every target function. On success pass testExecutionStatus and translationStatus. Include up to three protocolChecks when the task supplies a module protocol.`,
+    description: `Rerun every test in the dedicated folder and finish ${context.runtime.sourceLanguage} to ${context.runtime.targetLanguage} verification. All tests must compile and every upstream target function must execute. Success requires all tests to pass; failing assertions may establish a production bug. Include up to three protocolChecks when supplied. Unmet completion checks return feedback and the current Host result so you can continue debugging.`,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -193,44 +117,44 @@ export function createFinishFunctionGroupTool(): HostToolFactory {
       },
     },
     parse: parseFinishFunctionGroupInput,
+    isTerminal: output => !("outcome" in output),
     async execute(input) {
-      const result = mergeFunctionGroupTests(context.state.functionGroupTests ?? []);
-      const evidence = testEvidence(context);
-      for (const path of result.testPaths) {
-        const observed = evidence.runs.findLast(run => run.versions.some(version => version.path === path))?.versions.find(version => version.path === path);
-        if (observed && (await snapshotTest(context, path)).sha256 !== observed.sha256) {
-          throw new Error("Tests changed after their last Host run. Execute the current version before finishing.");
-        }
+      const result = await runFunctionGroupTests(context);
+      const feedback: string[] = [];
+      if (result.timedOut || result.exitCode === null || (result.executionErrors ?? 0) > 0 || result.tests.executed < 1 ||
+          (result.status === "failure" && result.tests.failed < 1)) {
+        feedback.push("The complete test folder must compile and execute before finish_function_group. Repair compilation/setup errors and rerun, or report_uncertain if blocked.");
+      }
+      if (result.tests.skipped > 0) {
+        feedback.push("The complete test folder must execute without skipped tests before finish_function_group.");
+      }
+      const requested = context.runtime.functionGroup?.functions ?? [];
+      const unverified = requested.filter(({ target }) => !result.functions.some(item =>
+        item.target.path === target.path && item.target.name === target.name &&
+        item.target.signature === target.signature && item.executed &&
+        (result.status === "failure" || item.status === "passed"),
+      ));
+      if (requested.length === 0 || unverified.length > 0) {
+        feedback.push(`The complete test folder must execute every requested target function before finishing. Missing execution evidence: ${unverified.map(item => `${item.target.path}#${item.target.name}${item.target.signature ? ` (${item.target.signature})` : ""}`).join(", ")}. Inspect function coverage and reportPaths, then extend the tests or repair coverage setup.`);
       }
       if (input.testExecutionStatus !== result.status) {
-        throw new Error(`finish_function_group.testExecutionStatus does not match the Host result: expected ${result.status}.`);
-      }
-      if (hasUnresolvedTestFailures(evidence) && result.status === "success") {
-        return {
-          ...input, translationStatus: "failure" as const,
-          issue: { kind: "unknown" as const, description: "Host-observed test failures remain unresolved. A later green run does not establish requirement compliance; review the retained failing versions and correction evidence." },
-          functionGroupTest: result, testEvidence: structuredClone(evidence),
-        };
+        feedback.push(`finish_function_group.testExecutionStatus does not match the Host result: expected ${result.status}. Investigate the current result before resubmitting.`);
       }
       if (input.translationStatus !== result.status) {
-        throw new Error(`finish_function_group.translationStatus does not match the Host result: expected ${result.status}.`);
+        feedback.push(`finish_function_group.translationStatus does not match the Host result: expected ${result.status}. Debug test-authoring errors or report a real production bug with a concrete issue.`);
       }
       if (input.translationStatus === "success") {
         if (input.protocolChecks?.some(check => check.status === "failed" || check.status === "ambiguous")) {
-          throw new Error("Cannot claim verification success with failed or ambiguous requirement checks. Retain the failing assertion or report_uncertain.");
+          feedback.push("Cannot claim verification success with failed or ambiguous requirement checks. Retain the failing assertion or report_uncertain.");
         }
-        if (result.tests.executed < 1 || result.tests.failed > 0) {
-          throw new Error("Successful function-group verification requires executed, passing tests.");
-        }
-        const unverified = result.functions.filter((item) => item.status !== "passed" || !item.executed);
-        if (unverified.length > 0) {
-          throw new Error(`Successful function-group verification requires every target function to pass: ${unverified.map((item) => item.target.name).join(", ")}`);
+        if (result.tests.failed > 0) {
+          feedback.push("Successful function-group verification requires every test in the dedicated folder to pass. Diagnose the failed tests before claiming success; preserve valid failing requirement assertions.");
         }
       }
+      if (feedback.length > 0) return { outcome: "continue" as const, feedback, functionGroupTest: result };
       return {
         ...input,
         functionGroupTest: result,
-        testEvidence: structuredClone(evidence),
       };
     },
   });

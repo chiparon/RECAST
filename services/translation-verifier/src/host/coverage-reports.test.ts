@@ -1,7 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { parseJacocoReport, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx } from "./coverage-reports.js";
+import { parseJacocoReport, parseExecutionErrors, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseJUnitTestCases, parseNodeTests, parseNodeTestCases, parsePythonCoverage, parseTrx, parseTrxTestCases } from "./coverage-reports.js";
 const loc = (start: number, end = start) => ({ start: { line: start, column: 0 }, end: { line: end, column: 20 } });
 describe("framework coverage reports", () => {
+  it("returns per-run assertion identities and diagnostics for Agent debugging", () => {
+    expect(parseJUnitTestCases('<testsuite name="Suite"><testcase name="ok"/><testcase classname="Thing" name="bad"><failure message="expected no effect">trace</failure></testcase><testcase name="skip"><skipped/></testcase></testsuite>')).toEqual([
+      { id: "Suite#ok", status: "passed" }, { id: "Thing#bad", status: "failed", message: "expected no effect\ntrace" }, { id: "Suite#skip", status: "skipped" },
+    ]);
+    expect(parseNodeTestCases(JSON.stringify({ testResults: [{ name: "thing.test.ts", assertionResults: [
+      { fullName: "Thing rejects invalid", status: "failed", failureMessages: ["assertion mismatch"] },
+      { fullName: "Thing skipped", status: "pending" },
+    ] }] }))).toEqual([
+      { id: "thing.test.ts#Thing rejects invalid", status: "failed", message: "assertion mismatch" }, { id: "thing.test.ts#Thing skipped", status: "skipped" },
+    ]);
+    expect(parseTrxTestCases('<TestRun><TestDefinitions><UnitTest id="uuid"><TestMethod className="ThingTests"/></UnitTest></TestDefinitions><Results><UnitTestResult testId="uuid" testName="Reject" outcome="Failed"><Output><ErrorInfo><Message>failed</Message></ErrorInfo></Output></UnitTestResult></Results></TestRun>'))
+      .toEqual([{ id: "ThingTests#Reject", status: "failed", message: "failed" }]);
+  });
+
+  it("separates collection and execution errors from assertion failures", () => {
+    expect(parseExecutionErrors("junit", '<testsuite tests="2" failures="1" errors="1"><testcase name="assertion"><failure/></testcase><testcase name="collection"><error message="SyntaxError"/></testcase></testsuite>')).toBe(1);
+    expect(parseExecutionErrors("junit", '<testsuites><testsuite errors="2"><testsuite errors="1"/><testsuite errors="1"/></testsuite></testsuites>')).toBe(2);
+    expect(parseExecutionErrors("node", JSON.stringify({ numRuntimeErrorTestSuites: 1, testResults: [
+      { status: "failed", assertionResults: [{ status: "failed" }] },
+      { status: "failed", testExecError: { message: "Cannot compile" }, assertionResults: [] },
+    ] }))).toBe(1);
+    expect(parseExecutionErrors("node", JSON.stringify({ testResults: [{ status: "failed", assertionResults: [{ status: "failed" }] }] }))).toBe(0);
+    expect(parseExecutionErrors("trx", '<TestRun><ResultSummary><Counters failed="1" error="0" aborted="1" timeout="0"/></ResultSummary></TestRun>')).toBe(1);
+  });
   it("matches a qualified Java method without parameters and keeps overloads ambiguous", () => {
     const method = (desc: string) => `<method name="run" desc="${desc}"><counter type="METHOD" missed="0" covered="1"/></method>`;
     const xml = (methods: string) => `<report><package name="demo"><class name="demo/Service" sourcefilename="Service.java">${methods}</class><class name="demo/Other" sourcefilename="Service.java">${method("()V")}</class></package></report>`;
@@ -123,6 +147,108 @@ describe("framework coverage reports", () => {
     const subject = { path: "Service.cs", name: "SubmitAsync", signature: "AssetService.SubmitAsync" };
     expect(parseCobertura(report(state("App.AssetService", 1) + state("App.OrderService", 2)), subject, "/project")).toMatchObject({ executed: true, lineCoverage: 100 });
     expect(() => parseCobertura(report(state("App.AssetService", 1) + state("App.AssetService", 2)), subject, "/project")).toThrow("Cannot uniquely locate");
+  });
+});
+
+describe("C# Cobertura identities", () => {
+  const method = (name: string, signature: string, points: number[], hits = 1) =>
+    `<method name="${name}" signature="${signature}"><lines>${points.map(number => `<line number="${number}" hits="${hits}"/>`).join("")}</lines></method>`;
+  const cls = (owner: string, methods: string) => `<class name="${owner}" filename="Service.cs"><methods>${methods}</methods></class>`;
+  const state = (ordinal: number, points: number[], hits = 1, owner = "App.Service") =>
+    cls(`${owner}/&lt;RunAsync&gt;d__${ordinal}`, method("MoveNext", "()", points, hits));
+  const report = (classes: string) => `<coverage><packages><package><classes>${classes}</classes></package></packages></coverage>`;
+  const subject = { path: "Service.cs", name: "RunAsync", signature: "App.Service.RunAsync(int value, CancellationToken token = default)" };
+  const source = [
+    "namespace App;",
+    "public class Service {",
+    "  public async Task<int> RunAsync(int value, CancellationToken token = default)",
+    "  {",
+    "    await Task.Yield();",
+    "    return value;",
+    "  }",
+    "  public async Task<int> RunAsync(int? value, CancellationToken token)",
+    "  {",
+    "    await Task.Yield();",
+    "    return value ?? 0;",
+    "  }",
+    "}",
+  ].join("\n");
+
+  it("uses source types and sequence points rather than state-machine ordinal or report order", () => {
+    const xml = report(state(2, [10, 11]) + state(98, [5, 6], 0));
+    expect(parseCobertura(xml, subject, undefined, source)).toMatchObject({ executed: false, lineCoverage: 0 });
+    expect(parseCobertura(xml, { ...subject, signature: "Service.RunAsync(System.Int32 value, CancellationToken token)" }, undefined, source).executed).toBe(false);
+    expect(parseCobertura(xml, { ...subject, signature: "Service.RunAsync(int? value, CancellationToken token = default)" }, undefined, source).executed).toBe(true);
+    expect(() => parseCobertura(xml, { ...subject, signature: "Service.RunAsync(string value, CancellationToken token)" }, undefined, source)).toThrow("0 matches");
+    expect(() => parseCobertura(xml, { ...subject, signature: "Service.RunAsync" }, undefined, source)).toThrow("Cannot uniquely locate");
+  });
+
+  it("keeps the optional source argument backward compatible and rejects unresolved legacy overloads", () => {
+    expect(parseCobertura(report(state(9, [5])), subject).executed).toBe(true);
+    expect(() => parseCobertura(report(state(9, [5]) + state(3, [10])), subject)).toThrow("2 matches");
+  });
+
+  it("uses MoveNext body coverage when the original async kickoff stub is also present", () => {
+    const stub = cls("App.Service", method("RunAsync", "(System.Int32,System.Threading.CancellationToken)", [3]));
+    expect(parseCobertura(report(stub + state(98, [5, 6], 0)), subject, undefined, source)).toMatchObject({ executed: false, lineCoverage: 0 });
+    expect(() => parseCobertura(report(stub + state(98, [5]) + state(99, [6])), subject, undefined, source)).toThrow("2 matches");
+    expect(() => parseCobertura(report(stub + state(98, [50])), subject, undefined, source)).toThrow("0 matches");
+    expect(() => parseCobertura(report(stub + state(98, [5])), subject, undefined, "invalid source")).toThrow("0 matches");
+  });
+
+  it("does not borrow hits from another overload or from indistinguishable source lines", () => {
+    expect(() => parseCobertura(report(state(1, [5, 10])), subject, undefined, source)).toThrow("0 matches");
+    const oneLine = "namespace App; class Service { async Task RunAsync(int value) { } async Task RunAsync(string value) { } }";
+    expect(() => parseCobertura(report(state(1, [1]) + state(2, [1])), { ...subject, signature: "Service.RunAsync(int value)" }, undefined, oneLine)).toThrow("0 matches");
+    expect(() => parseCobertura(report(state(1, [5])), subject, undefined, '#line 100 "Service.cs"\n' + source)).toThrow("0 matches");
+  });
+
+  it("matches namespace-qualified generic source types and ignores delimiters in comments and literals", () => {
+    const genericSource = [
+      "namespace App { class Service {",
+      '  // RunAsync(int value) { }',
+      '  public async Task RunAsync(App.Box<string> value, string separator = "a,b")',
+      "  {",
+      '    var text = $"value {Format("}")}"; /* } */',
+      "    await Task.Yield();",
+      "  }",
+      "} }",
+    ].join("\n");
+    const generic = { ...subject, signature: 'App.Service.RunAsync(Box<string> value, string? separator = "a,b")' };
+    expect(parseCobertura(report(state(37, [5, 6])), generic, undefined, genericSource).executed).toBe(true);
+    expect(() => parseCobertura(report(state(37, [5, 6])), { ...generic, signature: "App.Service.RunAsync(Other.Box<string> value, string separator)" }, undefined, genericSource)).toThrow("0 matches");
+  });
+
+  it("uses full declaring types and keeps duplicate short type names ambiguous", () => {
+    const xml = report(cls("First.Service", method("Evaluate", "()", [2])) + cls("Second.Service", method("Evaluate", "()", [8], 0)));
+    const target = { path: "Service.cs", name: "Evaluate", signature: "Second.Service.Evaluate" };
+    expect(parseCobertura(xml, target).executed).toBe(false);
+    expect(() => parseCobertura(xml, { ...target, signature: "Service.Evaluate" })).toThrow("2 matches");
+    const asyncSource = [
+      "namespace First { class Service {",
+      "  public async Task RunAsync(int value) { await Task.Yield(); }",
+      "} }",
+      "namespace Second { class Service {",
+      "  public async Task RunAsync(int value) { await Task.Yield(); }",
+      "} }",
+    ].join("\n");
+    const asyncXml = report(state(1, [2], 1, "First.Service") + state(2, [5], 0, "Second.Service"));
+    expect(parseCobertura(asyncXml, { ...subject, signature: "Second.Service.RunAsync(int value)" }, undefined, asyncSource).executed).toBe(false);
+    expect(() => parseCobertura(asyncXml, { ...subject, signature: "Service.RunAsync(int value)" }, undefined, asyncSource)).toThrow("2 matches");
+  });
+
+  it("matches property names and keeps explicit getter and setter coverage independent", () => {
+    const accessors = method("get_RuleNames", "()", [3]) + method("set_RuleNames", "(System.String[])", [4], 0);
+    const xml = report(cls("App.Service", accessors));
+    const property = { path: "Service.cs", name: "RuleNames", signature: "App.Service.RuleNames" };
+    expect(parseCobertura(xml, property)).toMatchObject({ executed: true, lineCoverage: 50 });
+    expect(parseCobertura(xml, { ...property, name: "get_RuleNames", signature: "App.Service.get_RuleNames()" }).executed).toBe(true);
+    expect(parseCobertura(xml, { ...property, name: "set_RuleNames", signature: "App.Service.set_RuleNames(string[] value)" }).executed).toBe(false);
+    expect(parseCobertura(report(cls("App.Service", method("get_RuleNames", "()", [3]))), property).executed).toBe(true);
+    expect(parseCobertura(report(cls("App.Service", method("get_RuleNames", "()", [3]) + method("set_RuleNames", "(System.String[])", [3], 0))), property).lineCoverage).toBe(100);
+    expect(() => parseCobertura(report(cls("App.Service", accessors) + cls("Other.Service", accessors)), { ...property, signature: "Service.RuleNames" })).toThrow("4 matches");
+    expect(() => parseCobertura(report(cls("App.Service", accessors + method("get_RuleNames", "()", [9]))), property)).toThrow("3 matches");
+    expect(() => parseCobertura(xml, { ...property, signature: "App.Service.RuleNames()" })).toThrow("0 matches");
   });
 });
 

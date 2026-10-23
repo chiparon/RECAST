@@ -1,8 +1,6 @@
-import { stat } from "node:fs/promises";
+import { resolveTestPaths } from "../test-runner.js";
 import {
-  assertTestPath,
   relativePath,
-  resolveSafePath,
   type HostTool,
   type HostToolFactory,
   type ToolContext,
@@ -10,7 +8,7 @@ import {
 } from "./common.js";
 
 export type RunTargetTestsInput = {
-  path: string;
+  path?: string;
 };
 
 function parseRunTargetTestsInput(value: unknown): RunTargetTestsInput {
@@ -18,14 +16,12 @@ function parseRunTargetTestsInput(value: unknown): RunTargetTestsInput {
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
-    Object.keys(value).length !== 1 ||
-    !("path" in value)
+    Object.keys(value).some(key => key !== "path")
   ) {
-    throw new Error("run_target_tests requires only path.");
+    throw new Error("run_target_tests accepts only an optional path.");
   }
-  return {
-    path: relativePath((value as { path: unknown }).path, "test path"),
-  };
+  const path = (value as { path?: unknown }).path;
+  return path === undefined ? {} : { path: relativePath(path, "test path") };
 }
 
 function rootsDescription(testRoots: readonly string[]): string {
@@ -43,48 +39,50 @@ export function createRunTargetTestsTool(): HostToolFactory {
 
     return {
       name: "run_target_tests",
-      description: `Run one ${context.runtime.targetLanguage} target test under these project-relative test roots: ${rootsDescription(testRoots)}. Use the fixed Host-selected ${context.runtime.testRunner} command and its output as verification evidence.`,
+      description: `Run an existing ${context.runtime.targetLanguage} target test file or every test in a directory inside this dedicated project-relative test folder: ${rootsDescription(testRoots)}. Pass the authorized folder itself or omit path to check all existing tests before adding tests. Files need not have been created or modified during this Agent run. Use the fixed Host-selected ${context.runtime.testRunner} command and its output as verification evidence. The result includes reportPaths for fresh test and coverage reports, relative to the target project; inspect them with read_target_file. An empty list means no fresh report was found.`,
       inputSchema: {
         type: "object",
         additionalProperties: false,
-        required: ["path"],
         properties: { path: { type: "string" } },
       },
       parse: parseRunTargetTestsInput,
-      async execute(input) {
-        context.budget?.assertActive();
-        context.state.lastTargetTest = undefined;
-        const result = await runTargetTests(context, testRoots, input.path);
-        context.budget?.assertActive();
-        context.state.lastTargetTest = result;
-        return result;
-      },
+      execute: input => runTargetTests(context, input),
     };
   };
 }
 
-async function runTargetTests(
+/** Shared execution path for the Agent tool and Host finish check. */
+export async function runTargetTests(
   context: ToolContext,
-  testRoots: readonly string[],
-  testPath: string,
+  input: RunTargetTestsInput = {},
 ): Promise<TargetTestResult> {
-  assertTestPath(testPath, testRoots);
-  const absoluteTestPath = resolveSafePath(
-    context.runtime.targetProjectPath,
-    testPath,
-  );
-  let testStat: Awaited<ReturnType<typeof stat>>;
-  try {
-    testStat = await stat(absoluteTestPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`Test file does not exist: ${testPath}`);
-    }
-    throw error;
+  context.budget?.assertActive();
+  context.state.lastTargetTest = undefined;
+  const testPaths = await resolveTestPaths(context, input.path === undefined ? undefined : [input.path]);
+  const singleFile = input.path !== undefined && testPaths.length === 1 && testPaths[0] === input.path;
+  let observation: TargetTestResult;
+  if (testPaths.length === 0) {
+    observation = {
+      status: "success", timedOut: false, exitCode: 0, stdout: "", stderr: "", durationMs: 0,
+      tests: { executed: 0, passed: 0, failed: 0, skipped: 0 }, testCases: [],
+      coverage: { status: "unavailable", reason: "The dedicated test folder contains no executable test files." },
+    };
+  } else if (singleFile) {
+    observation = await context.runner.run(testPaths[0]!);
+  } else if (context.runner.runSuite) {
+    observation = await context.runner.runSuite(testPaths);
+  } else if (testPaths.length === 1) {
+    observation = await context.runner.run(testPaths[0]!);
+  } else {
+    throw new Error("The bound test runner must support runSuite to execute every test in the dedicated folder together.");
   }
-  if (!testStat.isFile()) {
-    throw new Error(`Test path is not a file: ${testPath}`);
-  }
-
-  return context.runner.run(testPath);
+  const result: TargetTestResult = {
+    ...observation,
+    status: !singleFile && testPaths.length > 0 && (observation.tests?.executed ?? 0) === 0 ? "failure" : observation.status,
+    testPaths,
+    reportPaths: observation.reportPaths ?? [],
+  };
+  context.budget?.assertActive();
+  context.state.lastTargetTest = result;
+  return result;
 }

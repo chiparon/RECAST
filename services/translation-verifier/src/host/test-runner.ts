@@ -1,29 +1,98 @@
 import { randomUUID } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
-import { access, mkdir, readdir, readFile, writeFile, realpath, rm } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { mkdir, readdir, readFile, writeFile, realpath, rm, stat, lstat } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
-import { parseJacocoReport, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx, parseJUnitTestCases, parseNodeTestCases, parseTrxTestCases, jsonReport, type PythonFunction } from "./coverage-reports.js";
-import { MAX_TEST_OUTPUT_CHARS, readProjectFile, resolveSafePath, type FunctionGroupTestRun, type FunctionGroupTestRunner, type ToolContext, type TargetTestResult, type TargetCoverageResult, type TestSummary } from "./tools/common.js";
+import { parseJacocoReport, parseExecutionErrors, parseSurefireReport, parseCobertura, parseIstanbul, parseJUnit, parseNodeTests, parsePythonCoverage, parseTrx, parseJUnitTestCases, parseNodeTestCases, parseTrxTestCases, jsonReport, type PythonFunction } from "./coverage-reports.js";
+import { MAX_TEST_OUTPUT_CHARS, assertTestPath, relativePath, readProjectFile, resolveSafePath, type FunctionGroupTestRun, type FunctionGroupTestRunner, type ToolContext, type TargetTestResult, type TargetCoverageResult, type TestSummary } from "./tools/common.js";
 import type { TargetFunctionCoverage, VerificationFunction, VerificationReason, VerificationTestCase } from "../types.js";
 
 const JACOCO = "org.jacoco:jacoco-maven-plugin:0.8.13";
 export const MAVEN_COVERAGE_GOALS = [`${JACOCO}:prepare-agent`, "test", `${JACOCO}:report`] as const;
 const MAVEN_REPORT_PATH = "target/site/jacoco/jacoco.xml";
 const MAVEN_TEST_REPORTS = "target/surefire-reports";
-const LEGACY_MAVEN_COVERAGE = "target/translation-verifier-coverage";
+const GRADLE_REPORT_PATH = "build/reports/jacoco/test/jacocoTestReport.xml";
+const GRADLE_TEST_REPORTS = "build/test-results/test";
 type CoverageRun = {
-  dataDirectory: string;
+  reportRoot: string;
+  previousReports: Map<string, string>;
+  scriptDirectory?: string;
   args: string[];
-  env?: Record<string, string>;
   pythonFunctions?: Array<{ path: string; functions: PythonFunction[] }>;
-  surefireReportsDirectory?: string;
-  jacocoReportPath?: string;
 };
 type RunnerContext = Omit<ToolContext, "runner" | "state">;
 export type BoundTestRunner = {
   run(testPath: string): Promise<TargetTestResult>;
+  /** Execute all selected test files together, retaining complete-suite evidence. */
+  runSuite?(testPaths: readonly string[]): Promise<TargetTestResult>;
 };
+
+/** Resolve authorized file/directory selections before starting a test process. */
+export async function resolveTestPaths(
+  context: RunnerContext,
+  selections: readonly string[] = context.runtime.testRoots,
+): Promise<string[]> {
+  const root = context.runtime.targetProjectPath;
+  const selected: Array<{ path: string; directory: boolean }> = [];
+  for (const path of selections) {
+    relativePath(path, "test path");
+    assertTestPath(path, context.runtime.testRoots);
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(resolveSafePath(root, path));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // The first baseline may precede creation of the dedicated folder.
+      if (context.runtime.testRoots.includes(path)) continue;
+      throw new Error(`Test path does not exist: ${path}`);
+    }
+    if (context.runtime.testRoots.includes(path) && !info.isDirectory()) {
+      throw new Error(`Test path is not a directory: ${path}`);
+    }
+    if (!info.isFile() && !info.isDirectory()) throw new Error(`Test path is not a file or directory: ${path}`);
+    selected.push({ path, directory: info.isDirectory() });
+  }
+  const paths = new Set<string>();
+  for (const selection of selected) {
+    context.budget?.assertActive();
+    if (!selection.directory) { paths.add(selection.path); continue; }
+    const discovered: string[] = [];
+    const visit = async (path: string): Promise<void> => {
+      context.budget?.assertActive();
+      const absolute = resolveSafePath(root, path);
+      const info = await lstat(absolute);
+      // Fixtures share the directory boundary even when they are not tests.
+      if (info.isSymbolicLink() || (info.isFile() && info.nlink > 1)) throw new Error(`Linked test paths are not allowed: ${path}`);
+      if (info.isDirectory()) {
+        for (const name of (await readdir(absolute)).sort()) await visit(relativePath(`${path}/${name}`, "test path"));
+      } else if (info.isFile() && await isTestFile(context.runtime.testRunner, path, () => readProjectFile(root, path))) {
+        discovered.push(path);
+      }
+    };
+    await visit(selection.path);
+    for (const path of discovered.sort()) paths.add(path);
+  }
+  return [...paths];
+}
+
+async function isTestFile(runner: RunnerContext["runtime"]["testRunner"], path: string, read: () => Promise<string>): Promise<boolean> {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  if (runner === "jest" || runner === "vitest") {
+    if (/\.d\.(?:ts|mts|cts)$/.test(name)) return false;
+    return /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)
+      || (path.split("/").includes("__tests__") && /\.[cm]?[jt]sx?$/.test(name));
+  }
+  if (runner === "pytest") return /^(?:test_.*|.*_test)\.py$/.test(name);
+  if (runner === "maven" || runner === "gradle") {
+    if (!/\.(?:java|kt)$/i.test(name)) return false;
+    if (/^(?:Test.+|.+Tests?|.+TestCase|.+IT)\.(?:java|kt)$/i.test(name)) return true;
+    return /@(?:[\w$]+\.)*(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate|Suite)\b/.test(await read());
+  }
+  if (!/\.cs$/i.test(name)) return false;
+  const source = await read();
+  return /\[\s*(?:(?:global::)?[\w.]+\.)?(?:Fact|Theory|Test|TestCase|TestCaseSource|TestMethod|DataTestMethod)(?:Attribute)?\b/.test(source)
+    || /\bclass\s+\w+Tests?\b/.test(source);
+}
 
 /** Bind the command and framework capabilities before exposing tools to the Agent. */
 export function bindTestRunner(context: RunnerContext): BoundTestRunner {
@@ -35,7 +104,10 @@ export function bindTestRunner(context: RunnerContext): BoundTestRunner {
       targetTest: { ...context.runtime.targetTest, args: [...context.runtime.targetTest.args] },
     },
   };
-  return { run: (testPath) => runTests(boundContext, testPath) };
+  return {
+    run: (testPath) => runTests(boundContext, [testPath]),
+    runSuite: (testPaths) => runTests(boundContext, testPaths),
+  };
 }
 
 /** Bind the same Host-controlled runner to every target function in a group. */
@@ -79,9 +151,12 @@ export function bindFunctionGroupTestRunner(context: RunnerContext): FunctionGro
       });
       return {
         status: result.status,
+        timedOut: result.timedOut,
         testPaths: [...testPaths],
         tests: result.tests ?? { executed: 0, passed: 0, failed: 0, skipped: 0 },
         testCases: result.testCases,
+        executionErrors: result.executionErrors,
+        reportPaths: result.reportPaths,
         functions: functionsResult,
         failures: result.failures,
         stdout: result.stdout,
@@ -93,94 +168,14 @@ export function bindFunctionGroupTestRunner(context: RunnerContext): FunctionGro
   };
 }
 
-async function runTests(context: RunnerContext, testPath: string): Promise<TargetTestResult> {
-  context.budget?.assertActive();
-  const coverageRun = await prepareCoverage(context, [testPath], [context.runtime.targetFunction]);
-  try {
-    const { executable } = context.runtime.targetTest;
-    const args = [...context.runtime.targetTest.args, ...coverageRun.args];
-    const timeoutMs = Math.min(
-      context.runtime.targetTest.timeoutMs ?? 300_000,
-      context.budget?.remainingMs() ?? Number.POSITIVE_INFINITY,
-    );
-    if (
-      !executable ||
-      executable.includes("\0") ||
-      args.some((arg) => arg.includes("\0")) ||
-      !Number.isInteger(timeoutMs) ||
-      timeoutMs <= 0
-    ) {
-      throw new Error("Host target test command is invalid.");
-    }
-
-    const startedAt = Date.now();
-    const result = await new Promise<{
-      exitCode: number | null;
-      signal?: string;
-      stdout: string;
-      stderr: string;
-      timedOut: boolean;
-    }>((resolve) => {
-      const child = spawn(executable, args, {
-        cwd: context.runtime.targetProjectPath,
-        shell: false,
-        env: { ...process.env, ...coverageRun.env },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "";
-      let stderr = "";
-      let timedOut = false;
-      let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const append = (current: string, chunk: Buffer | string): string => {
-        const next = current + chunk.toString();
-        return next.length <= MAX_TEST_OUTPUT_CHARS
-          ? next
-          : next.slice(0, MAX_TEST_OUTPUT_CHARS);
-      };
-      const finish = (value: { exitCode: number | null; signal?: string }) => {
-        if (settled) return;
-        settled = true;
-        if (timer !== undefined) clearTimeout(timer);
-        resolve({ ...value, stdout, stderr, timedOut });
-      };
-
-      child.stdout?.on("data", (chunk) => {
-        stdout = append(stdout, chunk);
-      });
-      child.stderr?.on("data", (chunk) => {
-        stderr = append(stderr, chunk);
-      });
-      child.once("error", (error) => {
-        stderr = append(stderr, error.message);
-        finish({ exitCode: null });
-      });
-      child.once("close", (exitCode, signal) => {
-        finish({ exitCode, signal: signal ?? undefined });
-      });
-      timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-      }, timeoutMs);
-    });
-
-    const evidence = await collectCoverage(context, coverageRun, [context.runtime.targetFunction]);
-
-    const targetCoverage = evidence.coverage[0] ?? { status: "unavailable" as const, reason: "No target coverage was produced." };
-    return {
-      ...evidence,
-      coverage: targetCoverage,
-      status: result.timedOut || result.exitCode !== 0 || ("tests" in evidence && (evidence.tests?.failed ?? 0) > 0) ? "failure" : "success",
-      timedOut: result.timedOut,
-      exitCode: result.exitCode,
-      ...(result.signal ? { signal: result.signal } : {}),
-      stdout: result.stdout,
-      stderr: result.stderr,
-      durationMs: Date.now() - startedAt,
-    };
-  } finally {
-    await rm(coverageRun.dataDirectory, { recursive: true, force: true });
-  }
+async function runTests(context: RunnerContext, testPaths: readonly string[]): Promise<TargetTestResult> {
+  if (testPaths.length === 0) throw new Error("At least one test path is required.");
+  const result = await runTestsForSubjects(context, testPaths, [context.runtime.targetFunction]);
+  return {
+    ...result,
+    testPaths: [...testPaths],
+    coverage: result.coverage[0] ?? { status: "unavailable", reason: "No target coverage was produced." },
+  };
 }
 
 async function runTestsForSubjects(
@@ -196,7 +191,9 @@ async function runTestsForSubjects(
   stderr: string;
   durationMs: number;
   tests?: TestSummary;
+  executionErrors?: number;
   testCases?: VerificationTestCase[];
+  reportPaths: string[];
   coverage: TargetCoverageResult[];
   failures: Array<{ message: string; testPath?: string; suspectedFunctions: VerificationFunction[] }>;
 }> {
@@ -211,7 +208,7 @@ async function runTestsForSubjects(
     }
     const startedAt = Date.now();
     const processResult = await new Promise<{ exitCode: number | null; signal?: string; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
-      const child = spawn(executable, args, { cwd: context.runtime.targetProjectPath, shell: false, env: { ...process.env, ...coverageRun.env }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(executable, args, { cwd: context.runtime.targetProjectPath, shell: false, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "", timedOut = false, settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const append = (current: string, chunk: Buffer | string) => {
@@ -231,7 +228,7 @@ async function runTestsForSubjects(
       timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
     });
     const evidence = await collectCoverage(context, coverageRun, subjects);
-    const status = processResult.timedOut || processResult.exitCode !== 0 || (evidence.tests?.failed ?? 0) > 0 ? "failure" as const : "success" as const;
+    const status = processResult.timedOut || processResult.exitCode !== 0 || evidence.executionErrors > 0 || (evidence.tests?.failed ?? 0) > 0 || evidence.tests?.executed === 0 ? "failure" as const : "success" as const;
     const failures = status === "failure" ? [{
       message: [processResult.stderr, processResult.stdout].filter(Boolean).join("\n") || "Target tests failed.",
       ...(testPaths.length === 1 ? { testPath: testPaths[0] } : {}),
@@ -247,11 +244,13 @@ async function runTestsForSubjects(
       durationMs: Date.now() - startedAt,
       ...(evidence.tests ? { tests: evidence.tests } : {}),
       testCases: evidence.testCases,
+      executionErrors: evidence.executionErrors,
+      reportPaths: evidence.reportPaths,
       coverage: evidence.coverage,
       failures,
     };
   } finally {
-    await rm(coverageRun.dataDirectory, { recursive: true, force: true });
+    if (coverageRun.scriptDirectory) await rm(coverageRun.scriptDirectory, { recursive: true, force: true });
   }
 }
 
@@ -275,32 +274,71 @@ visit(tree)
 print(json.dumps(result))
 `;
 
-async function prepareCoverage(context: RunnerContext, testPaths: readonly string[], subjects: readonly VerificationFunction[]): Promise<CoverageRun> {
-  const { targetProjectPath: root, testRunner: runner } = context.runtime;
-  const directory = runner === "maven" ? ".forexpore/translation-verifier-coverage" : ".translation-verifier-coverage";
-  const dataDirectory = resolveSafePath(root, `${directory}/${randomUUID()}`);
-  await mkdir(dataDirectory, { recursive: true });
+function dotnetProject(context: RunnerContext): string {
+  const projects = context.runtime.targetTest.args.filter(arg => /\.csproj$/i.test(arg)).map(path => path.replaceAll("\\", "/"));
+  if (projects.length !== 1) throw new Error("C# coverage requires exactly one bound test project.");
+  return projects[0]!;
+}
+
+async function reportIdentity(path: string): Promise<string | undefined> {
   try {
-    if (runner === "maven") {
-      // New Maven runs write only to the Host-owned .forexpore directory. An
-      // old report must not be mistaken for evidence if a project still has
-      // the default output directories from a prior invocation.
-      await Promise.all([
-        rm(resolveSafePath(root, MAVEN_REPORT_PATH), { force: true }).catch(() => undefined),
-        rm(resolveSafePath(root, MAVEN_TEST_REPORTS), { recursive: true, force: true }).catch(() => undefined),
-        // Keep the legacy parent available for older integrations that inspect
-        // its emptiness; failure here is harmless on a root-owned target.
-        mkdir(resolveSafePath(root, LEGACY_MAVEN_COVERAGE), { recursive: true }).catch(() => undefined),
-      ]);
-    }
-    return await configureRunnerCoverage(context, testPaths, subjects, dataDirectory);
+    const value = await stat(path, { bigint: true });
+    return value.isFile() ? `${value.ino}:${value.size}:${value.mtimeNs}:${value.ctimeNs}` : undefined;
   } catch (error) {
-    await rm(dataDirectory, { recursive: true, force: true });
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
 }
 
-async function configureRunnerCoverage(context: RunnerContext, testPaths: readonly string[], subjects: readonly VerificationFunction[], dataDirectory: string): Promise<CoverageRun> {
+async function directoryEntries(path: string): Promise<string[]> {
+  try { return await readdir(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+// Inspect only known report locations, never recurse through generated build trees.
+async function reportPaths(runner: RunnerContext["runtime"]["testRunner"], root: string): Promise<string[]> {
+  if (runner === "maven" || runner === "gradle") {
+    const directory = runner === "maven" ? MAVEN_TEST_REPORTS : GRADLE_TEST_REPORTS;
+    const tests = (await directoryEntries(resolveSafePath(root, directory))).filter(name => /^TEST-.*\.xml$/.test(name));
+    return [runner === "maven" ? MAVEN_REPORT_PATH : GRADLE_REPORT_PATH, ...tests.map(name => `${directory}/${name}`)];
+  }
+  if (runner === "jest" || runner === "vitest") return ["tests.json", "coverage/coverage-final.json"];
+  if (runner === "pytest") return ["tests.xml", "coverage.json"];
+  const entries = await directoryEntries(root);
+  const paths = entries.filter(name => /\.trx$/i.test(name));
+  for (const directory of entries.filter(name => /^[0-9a-f-]{36}$/i.test(name))) {
+    const names = await directoryEntries(resolveSafePath(root, directory));
+    paths.push(...names.filter(name => /\.trx$/i.test(name) || name === "coverage.cobertura.xml").map(name => `${directory}/${name}`));
+  }
+  return paths;
+}
+
+async function prepareCoverage(context: RunnerContext, testPaths: readonly string[], subjects: readonly VerificationFunction[]): Promise<CoverageRun> {
+  const { targetProjectPath: root, testRunner: runner } = context.runtime;
+  const pomFlag = context.runtime.targetTest.args.indexOf("-f");
+  const project = runner === "dotnet" ? dotnetProject(context)
+    : runner === "maven" && pomFlag >= 0 ? context.runtime.targetTest.args[pomFlag + 1]?.replaceAll("\\", "/") : undefined;
+  const projectDirectory = project ? dirname(project).replaceAll("\\", "/") : ".";
+  const reportRoot = runner === "dotnet" ? resolveSafePath(root, `${projectDirectory}/TestResults`)
+    : runner === "maven" && projectDirectory !== "." ? resolveSafePath(root, projectDirectory) : root;
+  const scriptDirectory = runner === "gradle" ? resolveSafePath(root, `.translation-verifier-scripts/${randomUUID()}`) : undefined;
+  if (scriptDirectory) await mkdir(scriptDirectory, { recursive: true });
+  try {
+    const run = await configureRunnerCoverage(context, testPaths, subjects, { reportRoot, previousReports: new Map(), scriptDirectory, args: [] });
+    for (const path of await reportPaths(runner, reportRoot)) {
+      const identity = await reportIdentity(resolveSafePath(reportRoot, path));
+      if (identity !== undefined) run.previousReports.set(path, identity);
+    }
+    return run;
+  } catch (error) {
+    if (scriptDirectory) await rm(scriptDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function configureRunnerCoverage(context: RunnerContext, testPaths: readonly string[], subjects: readonly VerificationFunction[], run: CoverageRun): Promise<CoverageRun> {
   const { targetProjectPath: root, testRunner: runner } = context.runtime;
   const testPath = testPaths[0];
   if (!testPath) throw new Error("At least one test path is required.");
@@ -308,52 +346,36 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
   // command. It is not a Jest/Vitest executable, so appending coverage flags
   // would make the process exit immediately and hide the timeout behavior.
   if (context.runtime.targetTest.executable === process.execPath && context.runtime.targetTest.args[0] === "-e") {
-    return { dataDirectory, args: [] };
+    return run;
   }
   if (runner === "maven") {
     if (!/\.(?:java|kt)$/i.test(testPath)) throw new Error(`Java test selector requires a .java or .kt file: ${testPath}`);
     const classNames = testPaths.map((path) => path.slice(path.lastIndexOf("/") + 1).replace(/\.(?:java|kt)$/i, ""));
-    const dataFile = join(dataDirectory, "jacoco.exec");
-    return { dataDirectory, args: [
-      `-Djacoco.destFile=${dataFile}`, `-Djacoco.dataFile=${dataFile}`,
-      `-Dproject.build.directory=${join(dataDirectory, "maven-build")}`,
-      `-Dproject.reporting.outputDirectory=${join(dataDirectory, "maven-reporting")}`,
-      `-Dsurefire.reportsDirectory=${join(dataDirectory, "surefire-reports")}`,
-      `-Djacoco.outputDirectory=${join(dataDirectory, "jacoco")}`,
-      "-Djacoco.append=false", "-DfailIfNoTests=true", `-Dtest=${classNames.join(",")}`,
-    ],
-      surefireReportsDirectory: `${relative(root, dataDirectory).replaceAll("\\", "/")}/surefire-reports`,
-      jacocoReportPath: `${relative(root, dataDirectory).replaceAll("\\", "/")}/jacoco/jacoco.xml`,
-    };
+    // Continue to JaCoCo after assertion failures; fresh Surefire counts still
+    // determine failure, while compiler/setup errors remain process failures.
+    return { ...run, args: ["-Djacoco.append=false", "-Dmaven.test.failure.ignore=true", "-DfailIfNoTests=true", `-Dtest=${classNames.join(",")}`] };
   }
-  const tests = join(dataDirectory, "tests.json");
-  if (runner === "jest") return { dataDirectory, args: ["--runTestsByPath", ...testPaths, `--roots=${await realpath(root)}`, "--coverage", ...subjects.map((subject) => `--collectCoverageFrom=${subject.path}`), "--coverageReporters=json", `--coverageDirectory=${dataDirectory}`, "--json", `--outputFile=${tests}`] };
-  if (runner === "vitest") return { dataDirectory, args: ["--run", ...testPaths, "--coverage", `--coverage.include=${subjects.map((subject) => subject.path).join(",")}`, "--coverage.reporter=json", `--coverage.reportsDirectory=${dataDirectory}`, "--reporter=json", `--outputFile=${tests}`] };
+  if (runner === "jest") return { ...run, args: ["--runTestsByPath", ...testPaths, `--roots=${await realpath(root)}`, "--coverage", ...subjects.map((subject) => `--collectCoverageFrom=${subject.path}`), "--coverageReporters=json", "--json", "--outputFile=tests.json"] };
+  if (runner === "vitest") return { ...run, args: ["--run", ...testPaths, "--coverage", `--coverage.include=${subjects.map((subject) => subject.path).join(",")}`, "--coverage.reporter=json", "--reporter=json", "--outputFile=tests.json"] };
   if (runner === "pytest") {
     const pythonFunctions: Array<{ path: string; functions: PythonFunction[] }> = [];
     for (const subject of subjects) {
       const { stdout } = await runFile(context.runtime.targetTest.executable, ["-c", PYTHON_FUNCTIONS, resolveSafePath(root, subject.path)], { cwd: root, timeout: Math.min(10_000, context.budget?.remainingMs() ?? 10_000), maxBuffer: 1_000_000 });
       pythonFunctions.push({ path: subject.path, functions: jsonReport(stdout) });
     }
-    return { dataDirectory, pythonFunctions, env: { COVERAGE_FILE: join(dataDirectory, ".coverage") },
-      args: [...testPaths, `--cov=${root}`, "--cov-branch", `--cov-report=json:${join(dataDirectory, "coverage.json")}`, `--junitxml=${join(dataDirectory, "tests.xml")}`] };
+    return { ...run, pythonFunctions,
+      args: [...testPaths, `--cov=${root}`, "--cov-branch", "--cov-report=json", "--junitxml=tests.xml"] };
   }
   if (runner === "gradle") {
-    const script = join(dataDirectory, "coverage.gradle");
-    const quoted = (path: string) => JSON.stringify(path);
+    const script = join(run.scriptDirectory!, "coverage.gradle");
     await writeFile(script, `allprojects { p ->
   p.afterEvaluate {
     if (p == rootProject && p.plugins.hasPlugin('java')) {
       p.apply plugin: 'jacoco'
       p.jacoco.toolVersion = '0.8.13'
-      p.tasks.named('test') {
-        jacoco.destinationFile = p.file(${quoted(join(dataDirectory, "jacoco.exec"))})
-        reports.junitXml.outputLocation.set(p.file(${quoted(join(dataDirectory, "tests"))}))
-      }
+      p.tasks.named('test') { ignoreFailures = true }
       p.tasks.named('jacocoTestReport') {
-        executionData.setFrom(p.file(${quoted(join(dataDirectory, "jacoco.exec"))}))
         reports.xml.required.set(true)
-        reports.xml.outputLocation.set(p.file(${quoted(join(dataDirectory, "jacoco.xml"))}))
         reports.html.required.set(false)
         reports.csv.required.set(false)
       }
@@ -363,11 +385,11 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
 `);
     if (!/\.(java|kt)$/.test(testPath)) throw new Error("Gradle selector requires a Java/Kotlin test file.");
     const names = testPaths.map((path) => path.split("/").pop()!.replace(/\.(java|kt)$/, ""));
-    return { dataDirectory, args: names.flatMap((name) => ["--tests", `*.${name}`]).concat(["jacocoTestReport", "--init-script", script, "--rerun-tasks", "--no-build-cache"]) };
+    return { ...run, args: names.flatMap((name) => ["--tests", `*.${name}`]).concat(["jacocoTestReport", "--init-script", script, "--rerun-tasks", "--no-build-cache"]) };
   }
   if (runner === "dotnet") {
-    const projects = context.runtime.targetTest.args.filter(arg => arg.endsWith(".csproj"));
-    if (projects.length !== 1 || testPaths.some((path) => !path.startsWith(`${projects[0].slice(0, projects[0].lastIndexOf("/"))}/`))) throw new Error("C# test file does not belong to the bound test project.");
+    const directory = dirname(dotnetProject(context)).replaceAll("\\", "/");
+    if (testPaths.some(path => directory !== "." && !path.startsWith(`${directory}/`))) throw new Error("C# test file does not belong to the bound test project.");
     const classNames: string[] = [];
     for (const path of testPaths) {
       const source = await readProjectFile(root, path);
@@ -383,7 +405,7 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
     // omits a namespace (and made a repair loop report "no test matches" even
     // though the generated xUnit file compiled). Match the class identity
     // directly; the Host still binds the exact test paths and owns the runner.
-    return { dataDirectory, args: ["--filter", classNames.map((name) => `FullyQualifiedName~${name}`).join("|"), "--collect:XPlat Code Coverage", "--results-directory", dataDirectory, "--logger", "trx;LogFileName=tests.trx"] };
+    return { ...run, args: ["--filter", classNames.map((name) => `FullyQualifiedName~${name}`).join("|"), "--collect:XPlat Code Coverage", "--logger", "trx;LogFileName=tests.trx"] };
   }
   throw new Error(`Unsupported coverage runner: ${runner}`);
 }
@@ -393,13 +415,28 @@ async function report(path: string): Promise<string> {
   if (bytes.length > 16_000_000) throw new Error("Report exceeds the size limit.");
   return bytes.toString("utf8");
 }
-async function collectCoverage(context: RunnerContext, run: CoverageRun, subjects: readonly VerificationFunction[]): Promise<{ tests?: TestSummary; testCases: VerificationTestCase[]; coverage: TargetCoverageResult[] }> {
+async function collectCoverage(context: RunnerContext, run: CoverageRun, subjects: readonly VerificationFunction[]): Promise<{ tests?: TestSummary; executionErrors: number; testCases: VerificationTestCase[]; reportPaths: string[]; coverage: TargetCoverageResult[] }> {
   let tests: TestSummary | undefined;
+  let executionErrors = 0;
   const testCases: VerificationTestCase[] = [];
+  const collectedReportPaths: string[] = [];
   const { testRunner: runner, targetProjectPath: root } = context.runtime;
   const canonicalRoot = await realpath(root);
-  const reportDirectory = relative(canonicalRoot, run.dataDirectory);
-  const read = (path: string) => report(resolveSafePath(root, `${reportDirectory}/${path}`));
+  const read = async (path: string) => {
+    const absolute = resolveSafePath(run.reportRoot, path);
+    const identity = await reportIdentity(absolute);
+    if (identity === undefined) throw new Error(`Missing report: ${absolute}`);
+    if (identity === run.previousReports.get(path)) throw new Error(`Report was not updated by this test run: ${absolute}`);
+    return report(absolute);
+  };
+  const freshPaths = async () => {
+    const paths: string[] = [];
+    for (const path of await reportPaths(runner, run.reportRoot)) {
+      const identity = await reportIdentity(resolveSafePath(run.reportRoot, path));
+      if (identity !== undefined && identity !== run.previousReports.get(path)) paths.push(path);
+    }
+    return paths;
+  };
   const parseSubjects = async (parse: (subject: VerificationFunction) => TargetFunctionCoverage | Promise<TargetFunctionCoverage>): Promise<TargetCoverageResult[]> => {
     const results: TargetCoverageResult[] = [];
     for (const subject of subjects) {
@@ -412,16 +449,22 @@ async function collectCoverage(context: RunnerContext, run: CoverageRun, subject
     return results;
   };
   try {
+    const currentPaths = await freshPaths();
+    collectedReportPaths.push(...currentPaths.map(path =>
+      relative(canonicalRoot, resolveSafePath(run.reportRoot, path)).replaceAll("\\", "/"),
+    ));
     let targetFunctions: TargetCoverageResult[] = [];
     if (runner === "jest" || runner === "vitest") {
       const testReport = await read("tests.json");
       tests = parseNodeTests(testReport);
+      executionErrors += parseExecutionErrors("node", testReport);
       testCases.push(...parseNodeTestCases(testReport));
-      const report = await read("coverage-final.json");
+      const report = await read("coverage/coverage-final.json");
       targetFunctions = await parseSubjects(async subject => parseIstanbul(report, canonicalRoot, subject, await readProjectFile(root, subject.path)));
     } else if (runner === "pytest") {
       const testReport = await read("tests.xml");
       tests = parseJUnit(testReport);
+      executionErrors += parseExecutionErrors("junit", testReport);
       testCases.push(...parseJUnitTestCases(testReport));
       const report = await read("coverage.json");
       targetFunctions = await parseSubjects(subject => {
@@ -429,43 +472,36 @@ async function collectCoverage(context: RunnerContext, run: CoverageRun, subject
         return parsePythonCoverage(report, canonicalRoot, subject, functions);
       });
     } else if (runner === "maven" || runner === "gradle") {
-      const primaryDirectory = runner === "maven" ? resolveSafePath(root, run.surefireReportsDirectory ?? MAVEN_TEST_REPORTS) : join(run.dataDirectory, "tests");
-      const fallbackDirectory = runner === "maven" ? resolveSafePath(root, MAVEN_TEST_REPORTS) : undefined;
-      let testDirectory = primaryDirectory;
-      let names = (await readdir(testDirectory).catch(() => [] as string[])).filter(name => /^TEST-.*\.xml$/.test(name));
-      if (names.length === 0 && fallbackDirectory && fallbackDirectory !== primaryDirectory) {
-        testDirectory = fallbackDirectory;
-        names = (await readdir(testDirectory).catch(() => [] as string[])).filter(name => /^TEST-.*\.xml$/.test(name));
-      }
-      if (names.length === 0) throw new Error(`Missing ${runner} test reports.`);
+      const names = currentPaths.filter(path => /\/TEST-[^/]*\.xml$/.test(path));
+      if (names.length === 0) throw new Error(`Missing fresh ${runner} test reports.`);
       tests = { executed: 0, passed: 0, failed: 0, skipped: 0 };
       for (const name of names) {
-        const xml = runner === "maven" ? await report(join(testDirectory, name)) : await read(`tests/${name}`);
+        const xml = await read(name);
         const value = runner === "maven" ? parseSurefireReport(xml) : parseJUnit(xml);
         for (const key of ["executed", "passed", "failed", "skipped"] as const) tests[key] += value[key];
         testCases.push(...parseJUnitTestCases(xml));
+        executionErrors += parseExecutionErrors("junit", xml);
       }
-      const primaryCoverage = runner === "maven" ? resolveSafePath(root, run.jacocoReportPath ?? MAVEN_REPORT_PATH) : join(run.dataDirectory, "jacoco.xml");
-      const fallbackCoverage = runner === "maven" ? resolveSafePath(root, MAVEN_REPORT_PATH) : undefined;
-      let coveragePath = primaryCoverage;
-      try { await access(coveragePath); } catch {
-        if (fallbackCoverage) coveragePath = fallbackCoverage;
-      }
-      const xml = runner === "maven" ? await report(coveragePath) : await read("jacoco.xml");
+      const xml = await read(runner === "maven" ? MAVEN_REPORT_PATH : GRADLE_REPORT_PATH);
       targetFunctions = await parseSubjects(async subject => parseJacocoReport(xml, subject, await readProjectFile(root, subject.path)));
     } else if (runner === "dotnet") {
-      const testReport = await read("tests.trx");
+      const paths = currentPaths;
+      const testReports = paths.filter(path => /\.trx$/i.test(path));
+      if (testReports.length !== 1) throw new Error(`Expected one fresh TRX report in ${run.reportRoot}; found ${testReports.length}.`);
+      const testReport = await read(testReports[0]!);
       tests = parseTrx(testReport);
+      executionErrors += parseExecutionErrors("trx", testReport);
       testCases.push(...parseTrxTestCases(testReport));
-      const names = await readdir(run.dataDirectory, { recursive: true });
-      const coverage = names.filter(name => /^[0-9a-f-]{36}[\\/]coverage\.cobertura\.xml$/i.test(name));
-      if (coverage.length !== 1) throw new Error("Expected one Coverlet Cobertura report in a VSTest run directory.");
-      const report = await read(coverage[0]);
-      targetFunctions = await parseSubjects(subject => parseCobertura(report, subject, canonicalRoot));
+      const testDirectory = dirname(testReports[0]!).replaceAll("\\", "/");
+      const coverage = paths.filter(path => /^[0-9a-f-]{36}\/coverage\.cobertura\.xml$/i.test(path)
+        && (testDirectory === "." || path.startsWith(`${testDirectory}/`)));
+      if (coverage.length !== 1) throw new Error("Expected one fresh Coverlet Cobertura report in the current VSTest run directory.");
+      const report = await read(coverage[0]!);
+      targetFunctions = await parseSubjects(async subject => parseCobertura(report, subject, canonicalRoot, await readProjectFile(root, subject.path)));
     } else throw new Error(`Unsupported coverage runner: ${runner}`);
-    return { tests, testCases, coverage: targetFunctions };
+    return { tests, executionErrors, testCases, reportPaths: collectedReportPaths, coverage: targetFunctions };
   } catch (error) {
     const reason = error instanceof Error ? error.message : "Could not collect coverage.";
-    return { ...(tests ? { tests } : {}), testCases, coverage: subjects.map(() => ({ status: "unavailable", reason })) };
+    return { ...(tests ? { tests } : {}), executionErrors, testCases, reportPaths: collectedReportPaths, coverage: subjects.map(() => ({ status: "unavailable", reason })) };
   }
 }

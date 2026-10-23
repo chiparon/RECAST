@@ -33,8 +33,6 @@ import {
   type AgentTraceEvent,
   type AgentTraceLogger,
 } from "./trace-log.js";
-import type { TestCorrectionReviewer } from "./test-evidence.js";
-import { createModelTestCorrectionReviewer } from "./test-correction-reviewer.js";
 
 export type AgentHostOptions<Result = unknown> = {
   modelClient: AgentModelClient;
@@ -44,7 +42,6 @@ export type AgentHostOptions<Result = unknown> = {
   resolveToolContext?: ToolContextResolver;
   workLogger?: AgentWorkLogger;
   traceLogger?: AgentTraceLogger;
-  reviewTestCorrection?: TestCorrectionReviewer;
 };
 
 export type ToolContextResolver = (
@@ -97,7 +94,7 @@ export function createAgentHost<Result = unknown>(
         traceEvent(runId, "run.started"),
       );
       let cleanup: (() => Promise<void>) | undefined;
-      const state: ToolState = { ...(task.functionGroup?.testEvidence ? { testEvidence: structuredClone(task.functionGroup.testEvidence) } : {}) };
+      const state: ToolState = {};
       try {
         budget.assertActive();
         const resolvedContext = {
@@ -109,7 +106,6 @@ export function createAgentHost<Result = unknown>(
         budget.assertActive();
         const context: ToolContext = {
           ...resolvedContext,
-          reviewTestCorrection: options.reviewTestCorrection ?? createModelTestCorrectionReviewer(options.modelClient, budget, limits),
           runner: bindTestRunner(resolvedContext),
           ...(task.functionGroup
             ? { functionGroupRunner: bindFunctionGroupTestRunner(resolvedContext) }
@@ -127,9 +123,6 @@ export function createAgentHost<Result = unknown>(
           workLogger: options.workLogger,
           traceLogger: options.traceLogger,
         }) as Result;
-        if (state.testEvidence && result && typeof result === "object") {
-          Object.assign(result, { testEvidence: structuredClone(state.testEvidence) });
-        }
         emitAgentWorkLog(
           options.workLogger,
           workEvent(runId, "run.completed", {
@@ -148,9 +141,6 @@ export function createAgentHost<Result = unknown>(
         );
         return result;
       } catch (error) {
-        if (state.testEvidence && error && typeof error === "object") {
-          Object.assign(error, { testEvidence: structuredClone(state.testEvidence) });
-        }
         emitAgentWorkLog(
           options.workLogger,
           workEvent(runId, "run.failed", {
@@ -198,18 +188,18 @@ function withRuntimeTestInstructions(
     "Host test setup (authoritative):",
     `- Test framework: ${runtime.testRunner}`,
     `- Authorized test roots: ${roots}`,
-    "- Every test path passed to write_target_test and run_function_group_tests must start with one of those exact roots.",
-    "- Use one test file and one test class for this verification whenever possible; after writing it, run it immediately and use the Host diagnostics to fix it.",
+    "- Every test path passed to write_target_test, run_target_tests, and run_function_group_tests must start with one of those exact roots.",
+    "- Test writes and test execution are limited to the dedicated folder above, not its parent test directory. You may edit and run any existing test in that folder, including tests from earlier runs; no creation or modification in the current run is required.",
+    "- Start by inspecting and running ALL existing tests in the dedicated folder with the run tool's path/paths omitted. Establish a passing baseline with no skipped tests before adding new tests when possible. If the folder has no tests, write tests next.",
+    "- Diagnose failed baseline tests. Repair stale tests only when changed source APIs or declared contracts explain the failure. Correct imports, signatures and fixtures as needed, but never weaken a valid requirement assertion just to match current implementation behavior. Retain actual production failures and report them.",
+    "- Then write or update meaningful tests for EVERY upstream target function. Run changed tests immediately, inspect reportPaths with read_target_file when needed, and use Host diagnostics to repair test-authoring mistakes.",
+    "- When ready, call finish or finish_function_group for the final complete-suite run. Every test must compile and execute without skips. Assertions that expose a real requirement bug may fail and must be preserved in a failure report; success requires the entire current suite to pass and every upstream target to execute.",
+    "- finish and finish_function_group always rerun the complete dedicated suite once and record current function coverage. If completion checks are unmet, they return outcome='continue', feedback and the current test result. Read the diagnostics, debug or extend tests, and try again; this feedback keeps the Agent running.",
     `- Run budget: ${limits.maxTurns} model turns and ${limits.maxToolCalls} tool calls, with up to ${limits.maxToolCallsPerTurn} tool calls per turn.`,
     "- Batch independent source reads in one turn. Use at most the first third of model turns for initial inspection and reserve the remaining turns for writing, running, correcting tests, and finishing.",
     "- Discover sibling dependency files with list_target_files using directory '.'; use the returned project-relative paths rather than guessing file names.",
     "- Use the exact types and public signatures from the files you read; do not guess dependency names or dump the whole assembly through reflection probes. If a signature is unclear, read only its declaring file.",
-    "- The Host retains executed failures and immutable test versions. A later green run or deletion of an assertion does not resolve historical failures. Test compilation errors with zero executed failures do not create requirement failures.",
-    "- You may freely correct test-authoring mistakes. When changing a previously failed assertion, include write_target_test.corrections with its failureId, an explanation, and an exact excerpt from the public requirement. A proposal alone is not confirmation; unresolved facts remain available to Integration. Retain actual requirement failures and report_uncertain when their correctness cannot be established.",
-    "- Copy failureId exactly from the latest tool result's testEvidence.unresolvedFailures[].id or the earlier unresolved Host failures below, never from a compiler diagnostic or the test name. Invalid references reject the write; retry with the exact Host id. Compilation-only repairs need no corrections metadata.",
-    "- Keep the original test case identity when correcting a fixture or assertion. After editing, run the corrected version: the Host then independently reviews the immutable failing version against the executed replacement. If renaming or consolidating is necessary, preserve the failing scenario and its assertions in the replacement; deletion alone cannot discharge a failure.",
-    ...(runtime.functionGroup?.testEvidence?.failures.some(item => item.status === "unresolved")
-      ? [`- Earlier unresolved Host failures: ${JSON.stringify(runtime.functionGroup.testEvidence.failures.filter(item => item.status === "unresolved"))}`] : []),
+    "- The current complete-suite result determines acceptance. Preserve valid requirement failures and report actual production bugs. No historical failure ledger, test snapshots, correction metadata or review model is used.",
   ].join("\n");
   return { ...task, userPrompt: `${task.userPrompt}\n\n${instruction}` };
 }
@@ -412,7 +402,7 @@ export async function runAgentLoop({
         const output = await tool.execute(parsed);
         budget.assertActive();
         const outputFields = toolOutputFields(output);
-        if (terminalNames.has(call.name)) {
+        if (terminalNames.has(call.name) && (tool.isTerminal?.(output) ?? true)) {
           emitAgentWorkLog(
             workLogger,
             workEvent(runId, "tool.completed", {
@@ -637,7 +627,7 @@ function serializeToolValue(value: unknown): string {
 }
 
 function modelVisibleToolOutput(name: string, value: unknown): unknown {
-  if (!["run_target_tests", "run_function_group_tests", "write_target_test"].includes(name) ||
+  if (!["run_target_tests", "run_function_group_tests", "write_target_test", "finish", "finish_function_group"].includes(name) ||
       typeof value !== "object" || value === null || Array.isArray(value)) return value;
   const output = value as Record<string, unknown>;
   const bounded = (text: unknown, limit: number): unknown => {
@@ -650,14 +640,8 @@ function modelVisibleToolOutput(name: string, value: unknown): unknown {
   // The Host state and trace retain the original complete observation.
   return {
     ...output,
-    ...(output.testEvidence && typeof output.testEvidence === "object" ? {
-      testEvidence: {
-        unresolvedFailures: (output.testEvidence as import("../types.js").VerificationTestEvidence).failures.filter(item => item.status === "unresolved").map(item => ({ ...item, message: bounded(item.message, 2000) })),
-        latestRun: (output.testEvidence as import("../types.js").VerificationTestEvidence).runs.at(-1),
-        latestRevision: (output.testEvidence as import("../types.js").VerificationTestEvidence).revisions.at(-1),
-        note: "Full immutable history is retained by the Host and forwarded in the final result.",
-      },
-    } : {}),
+    ...(output.targetTest ? { targetTest: modelVisibleToolOutput("run_target_tests", output.targetTest) } : {}),
+    ...(output.functionGroupTest ? { functionGroupTest: modelVisibleToolOutput("run_function_group_tests", output.functionGroupTest) } : {}),
     ...(typeof output.stdout === "string" ? { stdout: bounded(output.stdout, 8_000) } : {}),
     ...(typeof output.stderr === "string" ? { stderr: bounded(output.stderr, 4_000) } : {}),
     ...(Array.isArray(output.failures) ? {
