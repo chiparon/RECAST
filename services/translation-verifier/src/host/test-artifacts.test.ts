@@ -5,7 +5,10 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, expect, it } from 'vitest';
-import { createAgentHost } from './runtime.js';
+import { createLangChainAgentHost } from './agent/langchain-runtime.js';
+import { ScriptedChatModel } from '../../test-support/scripted-chat-model.js';
+import { AIMessage } from '@langchain/core/messages';
+import { messageText } from './agent/messages.js';
 import { createWriteTargetTestTool } from './tools/write-target-test.js';
 import { createTestArtifactRecorder } from './test-artifact-recorder.js';
 import { copyRetainedTestSuite, readRetainedTestSuite, recoverRetainedTestDelivery, retainedTestDirectory } from './test-artifacts.js';
@@ -36,18 +39,17 @@ async function fixture() {
 it('retains tests through a model interruption, isolates existing tests and checkpoints every write', async () => {
   const root = await temporary(), output = join(root, 'output'); await mkdir(output);
   await mkdir(join(root, 'tests')); await writeFile(join(root, 'tests', 'enterprise_test.py'), 'DO NOT CHANGE');
-  let turn = 0, testPath = '', updates = 0;
-  const host = createAgentHost({ retainTests: { id: 'module', onUpdate: async (from, suite) => { updates++; await copyRetainedTestSuite(from, output, suite); } },
-    modelClient: { complete: async messages => {
-      if (turn++ > 0) throw new Error('model interrupted');
-      const prompt = messages.find(message => message.role === 'user')!.content;
+  let testPath = '', updates = 0;
+  const host = createLangChainAgentHost({ retainTests: { id: 'module', onUpdate: async (from, suite) => { updates++; await copyRetainedTestSuite(from, output, suite); } },
+    model: new ScriptedChatModel([async messages => {
+      const prompt = messages.map(message => messageText(message)).join('\n');
       testPath = `${prompt.match(/Authorized test roots: ([^\n]+)/)![1]}/test_price.py`;
-      return { toolCalls: [{ id: 'write', name: 'write_target_test', arguments: JSON.stringify({ path: testPath, content: 'def test_price():\n    assert 2 == 2\n' }) }] };
-    } },
+      return new AIMessage({ content: '', tool_calls: [{ id: 'write', name: 'write_target_test', args: { path: testPath, content: 'def test_price():\n    assert 2 == 2\n' }, type: 'tool_call' }] });
+    }, () => { throw new Error('model interrupted'); }]),
   });
-  await expect(host.run({ subject: { requirement: 'double', sourceFunction: { path: 'price.py', name: 'price' }, targetFunction: { path: 'price.py', name: 'price' } },
+  await expect(host.run({
     taskContext: { sourceLanguage: 'Python', targetLanguage: 'Python', sourceProjectPath: root, targetProjectPath: root, sourcePath: 'price.py', targetPath: 'price.py', targetFunction: { path: 'price.py', name: 'price' } },
-    systemPrompt: 'test', userPrompt: 'test', tools: [createWriteTargetTestTool()], terminalTools: [] })).rejects.toThrow('model interrupted');
+    systemPrompt: 'test', userPrompt: 'test', tools: [createWriteTargetTestTool()] })).rejects.toThrow('model interrupted');
   expect(await readFile(join(root, 'tests', 'enterprise_test.py'), 'utf8')).toBe('DO NOT CHANGE');
   expect(await readFile(join(output, testPath), 'utf8')).toContain('assert 2 == 2');
   expect((await readRetainedTestSuite(output, 'module'))?.status).toBe('not-run'); expect(updates).toBeGreaterThanOrEqual(2);

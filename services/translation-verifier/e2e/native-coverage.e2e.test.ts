@@ -2,9 +2,10 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { resolveTestEnvironment } from '../src/host/test-environment.js';
-import { bindFunctionGroupTestRunner, bindTestRunner } from '../src/host/test-runner.js';
-import { createRunFunctionGroupTestsTool } from '../src/host/tools/run-function-group-tests.js';
+import { resolveTestEnvironment } from '../src/host/testing/test-environment.js';
+import { bindFunctionGroupTestRunner, bindTestRunner } from '../src/host/testing/test-runner.js';
+import { runFunctionGroupTests } from '../src/host/tools/run-function-group-tests.js';
+import { createTestHistory } from '../src/host/verification/test-history.js';
 import type { ToolContext } from '../src/host/tools/common.js';
 import { buildModuleFunctionMapping, discoverExecutableFunctions } from '../../../scripts/module-function-mapping.js';
 import { compileTargetIntegrated, compileTargetStandalone } from '../../adaptation-service/src/compiler.js';
@@ -72,36 +73,39 @@ suite('real CMake/GCC behavior verification', () => {
         targetFunction: target, sourceDirectory: 'src', targetDirectory: 'src', testRoots: environment.testRoots,
         testRunner: environment.framework, targetTest: environment.targetTest, functionGroup: input } };
       const context: ToolContext = { ...bound, runner: bindTestRunner(bound), functionGroupRunner: bindFunctionGroupTestRunner(bound) };
-      const tool = createRunFunctionGroupTestsTool()(context);
+      context.testHistory = createTestHistory(context, async () => ({ approved: false, note: 'An assertion was changed.' }));
+      const run = () => runFunctionGroupTests(context, { paths: [testPath] });
       const call = cpp ? 'shop::Price::calculate' : 'calculate';
       const good = `#include "${header}"\nint main(void) { return (${call}(3) == 6 && ${call}(0) == 0) ? 0 : 1; }\n`;
       await put(testPath, good);
-      const positive = await tool.execute({ paths: [testPath] });
+      const positive = await run();
       expect(positive, JSON.stringify(positive)).toMatchObject({ status: 'success', tests: { executed: 1, passed: 1, failed: 0 }, functions: [
         { status: 'passed', executed: true, lineCoverage: 100 }, { status: 'unverified', reason: 'not-executed', executed: false },
       ] });
+      expect(positive.reportPaths).toHaveLength(2);
+      for (const report of positive.reportPaths!) expect((await readFile(join(root, report), 'utf8')).length).toBeGreaterThan(0);
       await put(testPath, 'int main(void) { return 0; }\n');
-      const unrelated = await tool.execute({ paths: [testPath] });
+      const unrelated = await run();
       // Static libraries need not be linked at all for unrelated tests. Missing
       // gcov evidence must remain unavailable, never become a passed function.
       expect(unrelated.status).toBe('success');
       expect(unrelated.tests.executed).toBe(1);
       expect(unrelated.functions.every(fn => fn.status === 'unverified' && !fn.executed)).toBe(true);
       await put(testPath, good.replace('== 6', '== 7'));
-      const failing = await tool.execute({ paths: [testPath] });
+      const failing = await run();
       expect(failing).toMatchObject({ status: 'failure', tests: { failed: 1 } });
       expect(failing.functions[0]).toMatchObject({ status: 'unverified', reason: 'test-failed' });
-      expect(failing.testEvidence?.failures.some(failure => failure.status === 'unresolved')).toBe(true);
+      expect(context.state?.testEvidence?.failures.some(failure => failure.status === 'unresolved')).toBe(true);
       await put(testPath, good);
-      const repaired = await tool.execute({ paths: [testPath] });
+      const repaired = await run();
       expect(repaired.status).toBe('success');
-      expect(repaired.testEvidence?.failures.some(failure => failure.status === 'unresolved')).toBe(true);
+      expect(context.state?.testEvidence?.failures.some(failure => failure.status === 'unresolved')).toBe(true);
       // Compiler errors report no executed tests and cannot reuse earlier XML.
       await put(testPath, '#error intentional compile failure\n');
-      const broken = await tool.execute({ paths: [testPath] });
+      const broken = await run();
       expect(broken.status).toBe('failure');
       expect(broken.tests.executed).toBe(0);
-      expect(await readdir(join(root, '.translation-verifier-coverage'))).toEqual([]);
+      expect(await readdir(join(root, '.translation-verifier-scripts'))).toEqual([]);
     } finally { await environment?.cleanup?.(); await rm(root, { recursive: true, force: true }); }
   }, 180_000);
 });

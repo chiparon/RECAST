@@ -1,0 +1,506 @@
+import {
+  createAgent,
+  createMiddleware,
+  HumanMessage,
+  modelCallLimitMiddleware,
+  toolCallLimitMiddleware,
+} from "langchain";
+import { MemorySaver } from "@langchain/langgraph";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { AIMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
+import type { StructuredToolInterface } from "@langchain/core/tools";
+import type { VerificationTestCase } from "../../types.js";
+import {
+  AgentRunFailure,
+  createAgentRunBudget,
+  DEFAULT_AGENT_RUN_LIMITS,
+  type AgentRunBudget,
+  type AgentRunLimits,
+} from "./run-budget.js";
+import type { AgentHost, AgentTask } from "./task.js";
+import { bindFunctionGroupTestRunner, bindTestRunner } from "../testing/test-runner.js";
+import {
+  revalidateFunctionGroupReport,
+  revalidateTargetReport,
+} from "../verification/revalidation.js";
+import {
+  acceptedFunctionGroupResult,
+  acceptedResult,
+  parseFinalReport,
+  type FinalReportClaim,
+  type ParsedReport,
+  type AgentHostResult,
+  type FunctionGroupHostResult,
+} from "../verification/report.js";
+import { feedbackMessage, functionGroupFeedbackMessage } from "../verification/feedback.js";
+import { messageCharacters, messageText } from "./messages.js";
+import type {
+  FunctionGroupTestRun,
+  TargetTestResult,
+  ToolContext,
+  ToolRuntimeContext,
+} from "../tools/common.js";
+import {
+  createToolCallMiddleware,
+  createWorkspaceSerializer,
+  type WorkspaceSerializer,
+} from "./tool-middleware.js";
+import {
+  emitAgentTrace,
+  type AgentTraceLogger,
+} from "../logging/trace-log.js";
+import { emitAgentWorkLog, type AgentWorkLogger } from "../logging/work-log.js";
+import {
+  defaultToolContextResolver,
+  type ToolContextResolver,
+} from "../testing/tool-context.js";
+import { randomUUID } from "node:crypto";
+import { createTestArtifactRecorder } from "../test-artifact-recorder.js";
+import { createTestHistory, modelTestChangeReviewer, type TestChangeReviewer } from "../verification/test-history.js";
+import type { TestRetention } from "../../types.js";
+
+export type LangChainAgentHostOptions = {
+  /** Framework chat model instance; production callers build it with createTranslationVerifierChatModel. */
+  model: BaseChatModel;
+  signal?: AbortSignal;
+  limits?: Partial<AgentRunLimits>;
+  /** Upper bound for Host feedback continuations after natural Agent endings. */
+  maxFeedbackRounds?: number;
+  resolveToolContext?: ToolContextResolver;
+  workLogger?: AgentWorkLogger;
+  traceLogger?: AgentTraceLogger;
+  retainTests?: TestRetention;
+  reviewTestChanges?: TestChangeReviewer;
+};
+
+const DEFAULT_MAX_FEEDBACK_ROUNDS = 4;
+
+/** Shared shape of the fresh Host observation both task kinds report on. */
+type ObservationSummary = {
+  status: "success" | "failure";
+  exitCode: number | null;
+  timedOut?: boolean;
+  tests?: { executed: number };
+};
+
+/** One Host ownership contract per task shape: runner binding, revalidation, feedback and accepted result. */
+type Acceptance<Observation extends ObservationSummary, Result> = {
+  /** Host-owned runners bound for this task shape. */
+  bindRunner(context: Omit<ToolContext, "runner" | "functionGroupRunner">): Pick<ToolContext, "runner" | "functionGroupRunner">;
+  revalidate(
+    context: ToolContext,
+    report?: FinalReportClaim,
+  ): Promise<{ observation: Observation; feedback: string[] }>;
+  accept(report: FinalReportClaim, observation: Observation): Result;
+  feedback(feedback: readonly string[], observation: Observation): string;
+  /** Extra Host setup lines for the model-visible task. */
+  setup: readonly string[];
+};
+
+const TARGET_ACCEPTANCE: Acceptance<TargetTestResult, AgentHostResult> = {
+  bindRunner: context => ({ runner: bindTestRunner(context) }),
+  revalidate: (context, report) => revalidateTargetReport(context, report),
+  accept: (report, observation) => acceptedResult(report, observation),
+  feedback: (feedback, observation) => feedbackMessage(feedback, observation),
+  setup: [
+    "- Every test path passed to write_target_test and run_target_tests must start with one of those exact roots.",
+    "- Write and run tests only inside that dedicated folder. Start by running ALL existing tests in it with run_target_tests and path omitted.",
+  ],
+};
+
+const FUNCTION_GROUP_ACCEPTANCE: Acceptance<FunctionGroupTestRun, FunctionGroupHostResult> = {
+  bindRunner: context => ({
+    runner: bindTestRunner(context),
+    functionGroupRunner: bindFunctionGroupTestRunner(context),
+  }),
+  revalidate: (context, report) => revalidateFunctionGroupReport(context, report),
+  accept: (report, observation) => acceptedFunctionGroupResult(report, observation),
+  feedback: (feedback, observation) => functionGroupFeedbackMessage(feedback, observation),
+  setup: [
+    "- Every test path passed to write_target_test and run_function_group_tests must start with one of those exact roots.",
+    "- Write and run tests only inside that dedicated folder. Start by running ALL existing tests in it with run_function_group_tests and paths omitted.",
+  ],
+};
+
+export function createLangChainAgentHost(
+  options: LangChainAgentHostOptions,
+): AgentHost<AgentHostResult> {
+  return {
+    run: task => runLangChainTask(options, task, TARGET_ACCEPTANCE),
+  };
+}
+
+/** The same Host loop for translation-fidelity and requirement function groups. */
+export function createLangChainFunctionGroupAgentHost(
+  options: LangChainAgentHostOptions,
+): AgentHost<FunctionGroupHostResult> {
+  return {
+    run: task => runLangChainTask(options, task, FUNCTION_GROUP_ACCEPTANCE),
+  };
+}
+
+async function runLangChainTask<Observation extends ObservationSummary, Result>(
+  options: LangChainAgentHostOptions,
+  task: AgentTask,
+  acceptance: Acceptance<Observation, Result>,
+): Promise<Result> {
+  const limits: AgentRunLimits = { ...DEFAULT_AGENT_RUN_LIMITS, ...options.limits };
+  const maxFeedbackRounds = options.maxFeedbackRounds ?? DEFAULT_MAX_FEEDBACK_ROUNDS;
+  const resolveToolContext = options.resolveToolContext ?? (taskContext => defaultToolContextResolver(taskContext, options.retainTests));
+  const runId = randomUUID();
+  const startedAt = performance.now();
+  const budget = createAgentRunBudget(limits, Date.now(), options.signal);
+  emitAgentWorkLog(options.workLogger, { ...workEvent(runId, "run.started") });
+  emitAgentTrace(options.traceLogger, traceEvent(runId, "run.started"));
+  let cleanup: (() => Promise<void>) | undefined;
+  let serializer: WorkspaceSerializer | undefined;
+  let context: ToolContext | undefined;
+  let recordArtifacts: (() => Promise<void>) | undefined;
+  try {
+    budget.assertActive();
+    const runtime = await resolveToolContext(task.taskContext);
+    cleanup = runtime.cleanup;
+    budget.assertActive();
+    const previousEvidence = task.taskContext.functionGroup?.testEvidence;
+    context = {
+      budget,
+      runtime,
+      state: { ...(previousEvidence ? { testEvidence: structuredClone(previousEvidence) }
+        : options.retainTests ? { testEvidence: { runs: [], failures: [], revisions: [] } } : {}) },
+      ...acceptance.bindRunner({ budget, runtime }),
+    };
+    const reviewer = options.reviewTestChanges ?? modelTestChangeReviewer(options.model, budget.signal);
+    context.testHistory = createTestHistory(context, async input => {
+      emitAgentWorkLog(options.workLogger, workEvent(runId, "test-change-review.started"));
+      const decision = await reviewer(input);
+      emitAgentWorkLog(options.workLogger, workEvent(runId, "test-change-review.completed", { outcome: decision.approved ? "accepted" : "uncertain" }));
+      return decision;
+    });
+    if (options.retainTests) {
+      recordArtifacts = createTestArtifactRecorder(runtime, context.state!, options.retainTests);
+      context.recordArtifacts = recordArtifacts;
+      await recordArtifacts();
+    }
+    // Each factory returns one native LangChain tool bound to this run's
+    // authorization context; the framework owns dispatch and validation.
+    const tools: StructuredToolInterface[] = task.tools.map(factory => factory(context!));
+    serializer = createWorkspaceSerializer(budget);
+    const agent = createAgent({
+      model: options.model,
+      tools,
+      systemPrompt: withRuntimeInstructions(task.systemPrompt, runtime, acceptance.setup),
+      checkpointer: new MemorySaver(),
+      middleware: [
+        createInvalidToolCallMiddleware(),
+        createRunLimitMiddleware(limits),
+        modelCallLimitMiddleware({
+          threadLimit: limits.maxTurns,
+          exitBehavior: "error",
+        }),
+        toolCallLimitMiddleware({
+          threadLimit: limits.maxToolCalls,
+          exitBehavior: "error",
+        }),
+        createToolCallMiddleware({
+          runId,
+          serializer,
+          budget,
+          ...(options.workLogger ? { workLogger: options.workLogger } : {}),
+          ...(options.traceLogger ? { traceLogger: options.traceLogger } : {}),
+        }),
+      ],
+    });
+    const threadId = randomUUID();
+    let input: BaseMessage = new HumanMessage(task.userPrompt);
+
+    for (let round = 1; ; round += 1) {
+      budget.assertActive();
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "agent.invocation.started"),
+        turn: round,
+      });
+      const response = await agent.invoke(
+        { messages: [input] },
+        {
+          configurable: { thread_id: threadId },
+          signal: budget.signal,
+          // Every middleware hook and tool dispatch is a graph superstep, so
+          // the framework default of 25 would stop a normal multi-tool run
+          // long before the Host's own model/tool budgets. The Host budgets
+          // remain the authoritative limits.
+          recursionLimit: recursionLimitFor(limits),
+        },
+      );
+      budget.assertActive();
+      const messages = (response as { messages?: BaseMessage[] }).messages ?? [];
+      const last = messages[messages.length - 1];
+      const parsed = parseFinalReport(last);
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "agent.invocation.completed"),
+        turn: round,
+        status: parsed.report?.verdict,
+        outcome: parsed.problems.length === 0 ? "valid-report" : "invalid-report",
+      });
+      emitAgentTrace(options.traceLogger, traceEvent(runId, "agent.invocation.completed", {
+        round,
+        verdict: parsed.report?.verdict,
+        content: messageText(last).slice(0, 4_000),
+      }));
+
+      const revalidation = await acceptance.revalidate(context, parsed.report);
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "host.revalidation.completed"),
+        turn: round,
+        status: revalidation.observation.status,
+        exitCode: revalidation.observation.exitCode,
+        timedOut: revalidation.observation.timedOut,
+        toolCallCount: revalidation.observation.tests?.executed,
+        outcome: revalidation.feedback.length === 0 ? "accepted" : "feedback",
+      });
+      emitAgentTrace(options.traceLogger, traceEvent(runId, "host.revalidation.completed", {
+        round,
+        observation: revalidation.observation,
+        feedback: revalidation.feedback,
+      }));
+
+      const feedback = [...parsed.problems, ...revalidation.feedback];
+      if (feedback.length === 0 && parsed.report !== undefined) {
+        const problem = parsed.report.verdict === "bug-found" ? undefined : await context.testHistory.acceptGreenSuite();
+        const report: FinalReportClaim = problem ? { ...parsed.report, verdict: "uncertain", issue: { kind: "unknown", description: problem } } : parsed.report;
+        const result = acceptance.accept(report, revalidation.observation);
+        if (context.state?.testEvidence && result && typeof result === "object") {
+          Object.assign(result, { testEvidence: structuredClone(context.state.testEvidence), ...(problem ? { reason: "unresolved-test-failure" } : {}) });
+        }
+        await recordArtifacts?.();
+        emitAgentWorkLog(options.workLogger, {
+          ...workEvent(runId, "run.completed", {
+            elapsedMs: elapsedMs(startedAt),
+            outcome: report.verdict,
+          }),
+        });
+        emitAgentTrace(options.traceLogger, traceEvent(runId, "run.completed", {
+          elapsedMs: elapsedMs(startedAt),
+          verdict: report.verdict,
+        }));
+        return result;
+      }
+      if (round > maxFeedbackRounds) {
+        throw new AgentRunFailure(
+          "budget",
+          `Agent run budget exhausted: no accepted final report within ${maxFeedbackRounds} feedback rounds.`,
+        );
+      }
+      budget.assertActive();
+      input = new HumanMessage(acceptance.feedback(feedback, revalidation.observation));
+      emitAgentWorkLog(options.workLogger, {
+        ...workEvent(runId, "agent.feedback.appended"),
+        turn: round,
+        messageCount: feedback.length,
+      });
+    }
+  } catch (error) {
+    const failure = classifyRunFailure(error, budget);
+    if (failure && typeof failure === "object" && context?.state?.testEvidence) {
+      Object.assign(failure, { testEvidence: structuredClone(context.state.testEvidence) });
+    }
+    emitAgentWorkLog(options.workLogger, {
+      ...workEvent(runId, "run.failed", {
+        elapsedMs: elapsedMs(startedAt),
+        ...errorFields(failure),
+      }),
+    });
+    emitAgentTrace(options.traceLogger, traceEvent(runId, "run.failed", {
+      elapsedMs: elapsedMs(startedAt),
+      ...errorFields(failure),
+    }));
+    throw failure;
+  } finally {
+    try {
+      // Let the in-flight workspace operation settle before the harness is
+      // released; queued operations see the closed queue and never start.
+      await serializer?.close();
+    } finally {
+      try {
+        try { await recordArtifacts?.(); } finally { await cleanup?.(); }
+      } finally {
+        budget.dispose();
+      }
+    }
+  }
+}
+
+/**
+ * Host-side residual limits that framework middleware does not express:
+ * thread context size, per-response size and per-turn tool calls. All counts
+ * are derived from persisted thread state, so feedback rounds do not reset them.
+ */
+function createRunLimitMiddleware(limits: AgentRunLimits) {
+  return createMiddleware({
+    name: "TranslationVerifierRunLimit",
+    beforeModel: (state: { messages?: BaseMessage[] }) => {
+      const messages = state.messages ?? [];
+      const characters = messages.reduce(
+        (total, message) => total + messageCharacters(message),
+        0,
+      );
+      if (characters > limits.maxContextCharacters) {
+        throw new AgentRunFailure(
+          "context",
+          `Agent run context budget exhausted: ${characters} characters exceed the ${limits.maxContextCharacters}-character limit.`,
+        );
+      }
+    },
+    afterModel: (state: { messages?: BaseMessage[] }) => {
+      const messages = state.messages ?? [];
+      const last = messages[messages.length - 1];
+      if (last === undefined) return;
+      const characters = messageCharacters(last);
+      if (characters > limits.maxResponseCharacters) {
+        throw new AgentRunFailure(
+          "context",
+          `Agent run response budget exhausted: ${characters} characters exceed the ${limits.maxResponseCharacters}-character limit.`,
+        );
+      }
+      const calls = (last as unknown as { tool_calls?: unknown[] }).tool_calls;
+      const invalidCalls = (last as unknown as { invalid_tool_calls?: unknown[] }).invalid_tool_calls;
+      const toolCalls = (Array.isArray(calls) ? calls.length : 0)
+        + (Array.isArray(invalidCalls) ? invalidCalls.length : 0);
+      if (toolCalls > limits.maxToolCallsPerTurn) {
+        throw new AgentRunFailure(
+          "budget",
+          `Agent run budget exhausted: ${toolCalls} tool calls exceed the ${limits.maxToolCallsPerTurn}-call per-turn limit.`,
+        );
+      }
+    },
+  });
+}
+
+function createInvalidToolCallMiddleware() {
+  return createMiddleware({
+    name: "TranslationVerifierInvalidToolCall",
+    afterModel: {
+      canJumpTo: ["end"],
+      hook: (state: { messages?: BaseMessage[] }) => {
+        const last = state.messages?.at(-1);
+        if (!last || !AIMessage.isInstance(last) || !last.invalid_tool_calls?.length) return;
+        const rawCalls = last.additional_kwargs.tool_calls;
+        const identifiers: unknown[] = Array.isArray(rawCalls)
+          ? rawCalls.map(call => typeof call === "object" && call !== null && "id" in call ? call.id : undefined)
+          : [];
+        if (identifiers.length === 0 || identifiers.some(identifier => typeof identifier !== "string" || !identifier)
+          || new Set(identifiers).size !== identifiers.length) {
+          throw new AgentRunFailure("model", "Agent returned invalid tool calls without unique IDs; no tool calls executed.");
+        }
+        return {
+          messages: [
+            new AIMessage({ ...last, tool_calls: [] }),
+            ...identifiers.map(identifier => new ToolMessage({
+              tool_call_id: identifier as string,
+              status: "error",
+              content: "This entire tool-call batch was not executed because it contains invalid JSON arguments. Repeat the intended calls with valid JSON arguments.",
+            })),
+          ],
+          jumpTo: "end" as const,
+        };
+      },
+    },
+  });
+}
+
+/** Graph supersteps needed to reach the Host-enforced budgets, never a new budget. */
+function recursionLimitFor(limits: AgentRunLimits): number {
+  return 4 * limits.maxTurns + 2 * limits.maxToolCalls + 16;
+}
+
+/**
+ * Operational failures must stay distinguishable from a reported production
+ * defect upstream: budget/context/time exhaustion, model failures and
+ * cancellation are not verification results.
+ */
+function classifyRunFailure(error: unknown, budget: AgentRunBudget): unknown {
+  if (budget.signal.aborted) return budget.signal.reason ?? error;
+  const message = errorMessage(error);
+  // A middleware already wrapped Host failures once; the typed reason still
+  // identifies an operational failure without re-deriving it from its text.
+  const typed = typedRunFailure(error);
+  if (typed !== undefined) return typed;
+  if (/context budget exhausted|response budget exhausted/i.test(message)) {
+    return new AgentRunFailure("context", message, { cause: error });
+  }
+  const name = error instanceof Error ? error.name : "";
+  if (
+    name === "ModelCallLimitMiddlewareError" ||
+    name === "ToolCallLimitExceededError" ||
+    /call limits? exceeded/i.test(message)
+  ) {
+    return new AgentRunFailure("budget", `Agent run budget exhausted: ${message}`, { cause: error });
+  }
+  if (
+    typeof (error as { status?: unknown })?.status === "number" ||
+    /APIError|APIConnection|Authentication|RateLimit|OpenAI/i.test(name) ||
+    (/model|completion|api key/i.test(message) && !/budget/i.test(message))
+  ) {
+    return new AgentRunFailure("model", `Agent run model failure: ${message}`, { cause: error });
+  }
+  return error;
+}
+
+function withRuntimeInstructions(
+  systemPrompt: string,
+  runtime: ToolRuntimeContext,
+  setup: readonly string[],
+): string {
+  return [
+    systemPrompt,
+    "",
+    "Host test setup (authoritative):",
+    `- Test framework: ${runtime.testRunner}`,
+    `- Authorized test roots: ${runtime.testRoots.join(", ")}`,
+    ...setup,
+    "- After your final report the Host reruns the complete dedicated folder itself and may append feedback; your report is a candidate conclusion, not an accepted result.",
+    "",
+    "Completion policy: Existing meaningful tests can satisfy the task; do not rewrite or rerun unchanged tests after a passing observation solely to repeat the workflow.",
+    "Once you have inspected the requested functions and observed meaningful passing tests with execution evidence for every target, end the current call immediately with a no-bug report, or uncertain if you can name a concrete requirement ambiguity. Do not keep exploring speculative requirements.",
+    "Once a valid requirement-backed assertion reproduces a production defect, preserve that failing test and end immediately with a bug-found report; a passing baseline is not required to report a reproduced defect.",
+    "The final assistant content must start with { and end with }. No introduction, analysis, Markdown fences, or text outside the JSON. Omit optional fields when unused.",
+    'Valid success example: {"verdict":"no-bug","summary":"The inspected functions satisfy the declared requirement and meaningful tests pass."}',
+    'For a reproduced defect use verdict bug-found, issue {"kind":"translation","description":"the concrete defect"}, and affectedTargets containing the exact requested path, name, and signature.',
+  ].join("\n");
+}
+
+function traceEvent(runId: string, event: string, fields: Record<string, unknown> = {}) {
+  return { at: new Date().toISOString(), runId, event, ...fields };
+}
+
+function workEvent(
+  runId: string,
+  event: Parameters<typeof emitAgentWorkLog>[1]["event"],
+  fields: Record<string, unknown> = {},
+) {
+  return { at: new Date().toISOString(), runId, event, ...fields };
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.round(performance.now() - startedAt);
+}
+
+/** The Host failure type may be wrapped by framework middleware; follow the cause chain. */
+function typedRunFailure(error: unknown): AgentRunFailure | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    if (current instanceof AgentRunFailure) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorFields(error: unknown): Record<string, unknown> {
+  return {
+    error: errorMessage(error),
+    errorType: error instanceof Error ? error.name : typeof error,
+  };
+}

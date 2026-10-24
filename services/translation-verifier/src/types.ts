@@ -78,7 +78,7 @@ export type FunctionGroupVerificationInput = {
   unmatchedFunctions?: VerificationFunction[];
   /** Bounded shared protocol view; advisory context only. */
   moduleProtocol?: ModuleProtocol;
-  /** Host facts carried across verifier attempts; never inferred from terminal claims. */
+  /** Host failure facts preserved across module retries. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -91,6 +91,7 @@ export type RequirementFunctionGroupVerificationInput = {
   requirement: string;
   functions: RequirementFunctionGroupVerificationFunction[];
   moduleProtocol?: ModuleProtocol;
+  /** Host failure facts preserved across module retries. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -126,6 +127,7 @@ export type TargetFunctionCoverage = {
 };
 
 export type VerificationResult = {
+  testEvidence?: VerificationTestEvidence;
   status: "success" | "failure";
   issue?: VerificationIssue;
   targetFunction?: TargetFunctionCoverage;
@@ -158,6 +160,7 @@ export type FunctionGroupVerificationResult = {
   functions: FunctionGroupFunctionResult[];
   reason?: VerificationReason;
   protocolChecks?: ProtocolCheck[];
+  /** Host failure facts and automatic correction decisions. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -181,6 +184,7 @@ export type VerificationTestCorrection = {
   requirementEvidence: string;
 };
 
+/** Minimal failure history retained for retries and changed-assertion checks. */
 export type VerificationTestEvidence = {
   runs: Array<{
     id: string;
@@ -199,7 +203,7 @@ export type VerificationTestEvidence = {
     versions: VerificationTestVersion[];
     status: "unresolved" | "resolved";
     resolution?: {
-      kind: "unchanged-test-replayed" | "reviewed-test-correction";
+      kind: "unchanged-test-replayed" | "reviewed-test-correction" | "suite-revalidated";
       runId: string;
       reason: string;
       requirementEvidence?: string;

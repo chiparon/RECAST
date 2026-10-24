@@ -2,7 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { nativeCmakeSettings, cmakeLiteral as quote } from '../../../../scripts/native-cmake.mjs';
-import { counter, jsonReport, percent } from './coverage-reports.js';
+import { counter, jsonReport, percent } from './testing/coverage-reports.js';
 import { assertTestPath, resolveSafePath, type ToolRuntimeContext } from './tools/common.js';
 import type { TargetFunctionCoverage, VerificationFunction } from '../types.js';
 

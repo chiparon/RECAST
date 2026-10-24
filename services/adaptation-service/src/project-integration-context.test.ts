@@ -47,16 +47,10 @@ describe('integration independent checks and Host audit', () => {
       await mkdir(scratch, { recursive: true });
       await writeFile(join(scratch, 'coverage.md'), 'PUBLIC SOURCE -> EXPECTATION -> CASE');
       await writeFile(join(scratch, 'execution.log'), 'x'.repeat(70_000));
-      await writeFile(join(root, 'outside.txt'), 'MUST NOT FOLLOW');
-      if (process.platform === 'win32') {
-        // Junctions exercise the same lstat boundary without requiring Windows
-        // Developer Mode or administrator privileges for a file symlink.
-        await mkdir(join(root, 'outside-directory'));
-        await writeFile(join(root, 'outside-directory', 'private.txt'), 'MUST NOT FOLLOW');
-        await symlink(join(root, 'outside-directory'), join(scratch, 'linked.txt'), 'junction');
-      } else {
-        await symlink(join(root, 'outside.txt'), join(scratch, 'linked.txt'));
-      }
+      const outside = join(root, 'outside');
+      await mkdir(outside);
+      await writeFile(join(outside, 'outside.txt'), 'MUST NOT FOLLOW');
+      await symlink(outside, join(scratch, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
       const checkSource = 'assert(result === expected);\n'.repeat(2_500);
       await writeFile(join(scratch, 'Check.ts'), checkSource);
       await writeFile(join(scratch, 'binary.class'), 'ignore binary');
@@ -65,7 +59,7 @@ describe('integration independent checks and Host audit', () => {
       expect(evidence.files.find(file => file.path.endsWith('Check.ts'))).toMatchObject({ content: checkSource, truncated: false });
       expect(evidence.files.find(file => file.path.endsWith('coverage.md'))?.content).toContain('PUBLIC SOURCE');
       expect(evidence.files.find(file => file.path.endsWith('execution.log'))).toMatchObject({ truncated: true });
-      expect(evidence.omissions).toContain('linked.txt: symlink omitted');
+      expect(evidence.omissions).toContain('linked: symlink omitted');
       expect(JSON.stringify(evidence)).not.toContain('MUST NOT FOLLOW');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
