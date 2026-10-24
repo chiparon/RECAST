@@ -40,11 +40,24 @@ export function discoverExecutableFunctions(fileContents: Readonly<Record<string
       while (node && node.type !== declaration.declarationNodeType) node = node.parent;
       if (!node || !(node.childForFieldName("body") || node.namedChildren.some(child =>
         ["block", "statement_block", "function_body", "expression_body", "arrow_expression_clause"].includes(child.type)))) continue;
+      const native = ['c', 'cpp'].includes(language.languageId);
+      if (native && /^\s*static\b/.test(declaration.signature) && node.parent?.type !== 'field_declaration_list') continue;
+      if (native && node.parent?.type === 'field_declaration_list') {
+        const container = node.parent;
+        let access = container.parent?.type === 'class_specifier' ? 'private' : 'public';
+        for (const sibling of container.namedChildren) {
+          if (sibling.startIndex >= node.startIndex) break;
+          if (sibling.type === 'access_specifier') access = sibling.text.replace(':', '').trim();
+        }
+        if (access !== 'public') continue;
+      }
       const siblings = index.declarations.filter(item => item.kind === declaration.kind &&
         item.qualifiedName === declaration.qualifiedName);
-      const parameters = node.childForFieldName("parameters")?.text;
-      functions.push({ path, name: declaration.name,
-        signature: declaration.qualifiedName + (siblings.length > 1 && parameters ? parameters : "") });
+      const parameters = node.childForFieldName("parameters")?.text ?? node.childForFieldName('declarator')?.childForFieldName('parameters')?.text;
+      const qualifiers = native ? node.childForFieldName('declarator')?.namedChildren.filter(child => ['type_qualifier', 'ref_qualifier'].includes(child.type)).map(child => child.text).join(' ') : '';
+      functions.push({ path, name: native ? declaration.name.split('::').at(-1)! : declaration.name,
+        signature: (native ? declaration.qualifiedName.replaceAll('::', '.') : declaration.qualifiedName) + (siblings.length > 1 && parameters ? parameters + (qualifiers ? ` ${qualifiers}` : '') : ""),
+        ...(native ? { startLine: range.startLine } : {}) });
     }
   }
   return deduplicateFunctions(functions);
@@ -354,10 +367,10 @@ export function buildModuleFunctionMapping(
   const unmatchedFunctions: VerificationFunction[] = [];
   const nonExecutableFunctions: VerificationFunction[] = [];
   const diagnostics: FunctionMappingDiagnostic[] = [];
-  for (const targetApi of targetApis) {
+  for (const [targetIndex, targetApi] of targetApis.entries()) {
     const sourceMatches = sourceByName.get(targetApi.compareName) ?? [];
     const targetMatches = targetByName.get(targetApi.compareName) ?? [];
-    const targetFunction = asVerificationFunction(targetApi, targetModule.sourceFiles[0]);
+    const targetFunction = currentTargets ? { ...currentTargets[targetIndex]! } : asVerificationFunction(targetApi, targetModule.sourceFiles[0]);
     if (!currentTargets && isNonExecutableTargetApi(targetApi, targetFileContents, targetFunction.path)) {
       nonExecutableFunctions.push(targetFunction);
       continue;

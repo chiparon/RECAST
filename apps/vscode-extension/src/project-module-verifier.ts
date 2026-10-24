@@ -2,12 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ModuleProtocol, SearchCandidate, WorkspaceHistoryView } from '@forexplore/contracts';
 import { buildModuleFunctionMapping, discoverExecutableFunctions, expandClassLevelFunctions } from '../../../scripts/module-function-mapping';
-
-
-
-
 import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput, FunctionGroupVerificationResult } from '../../../services/translation-verifier/src/types';
 import type { ProjectPipelineModule } from './project-pipeline-types';
+import type { TestRetention, RetainedTestSuite, VerificationTestEvidence } from '../../../services/translation-verifier/src/types';
 
 // Match the extension's existing runtime bridges: backend implementations are bundled,
 // while their independent TypeScript projects retain their own compiler options.
@@ -19,6 +16,7 @@ export interface PipelineModuleVerification {
   attempts: FunctionGroupVerificationResult[];
   /** The complete assembled project hash, not just the module's owned files. */
   sourceHash?: string;
+  testSuite?: RetainedTestSuite;
 }
 
 /** Bounded Agent work metadata the extension is allowed to forward to its output log. */
@@ -42,6 +40,7 @@ type FunctionGroupVerifier = (
 /** Options the extension passes to the LangChain function-group Host. */
 type VerifierHostOptions = {
   model: unknown;
+  retainTests?: TestRetention;
   signal: AbortSignal;
   workLogger(event: VerifierWorkEvent): void;
 };
@@ -56,13 +55,13 @@ type VerifierHostOptions = {
  * call contract at the boundary instead of type-checking that project inline.
  */
 function requireVerifierRuntime(): {
-  createTranslationVerifierChatModel(options: PipelineModel & { maxOutputTokens: number }): unknown;
+  createTranslationVerifierChatModel(options: PipelineModel & { maxOutputTokens: number; onOutputLimitRetry?: (attempt: number, maxRetries: number) => void }): unknown;
   createLangChainFunctionGroupAgentHost(options: VerifierHostOptions): unknown;
   createFunctionGroupVerifier(host: unknown): FunctionGroupVerifier;
 } {
   return {
     createTranslationVerifierChatModel: (require('../../../services/translation-verifier/src/host/agent/chat-model') as {
-      createTranslationVerifierChatModel(options: PipelineModel & { maxOutputTokens: number }): unknown;
+      createTranslationVerifierChatModel(options: PipelineModel & { maxOutputTokens: number; onOutputLimitRetry?: (attempt: number, maxRetries: number) => void }): unknown;
     }).createTranslationVerifierChatModel,
     createLangChainFunctionGroupAgentHost: (require('../../../services/translation-verifier/src/host/agent/langchain-runtime') as {
       createLangChainFunctionGroupAgentHost(options: VerifierHostOptions): unknown;
@@ -107,6 +106,9 @@ export function verifierWorkLogMessage(event: VerifierWorkEvent): string | undef
     }
     case 'agent.feedback.appended':
       return `Verifier：向同一 Agent 追加反馈${round}（${event.messageCount ?? 0} 项）`;
+    case 'test-change-review.started': return 'Verifier：正在检查失败测试的修改是否保留需求断言';
+    case 'test-change-review.completed':
+      return event.outcome === 'accepted' ? 'Verifier：测试纠错检查通过' : 'Verifier：测试纠错仍有未确认的失败证据';
     case 'run.completed': return `Verifier：验证运行完成，结论 ${event.outcome ?? 'unknown'}`;
     case 'run.failed': return 'Verifier：验证运行失败';
     default: return undefined;
@@ -148,6 +150,8 @@ export async function verifyPipelineModule(input: {
   root: string; module: ProjectPipelineModule; requirement: string; model: PipelineModel;
   candidates: SearchCandidate[]; historyView?: WorkspaceHistoryView; protocol?: ModuleProtocol;
   signal: AbortSignal; previous?: PipelineModuleVerification; log(message: string): void;
+  retainTests?: TestRetention;
+  testEvidence?: VerificationTestEvidence;
 }): Promise<PipelineModuleVerification> {
   input.signal.throwIfAborted();
   const files = [...new Set([...(input.module.target.module?.sourceFiles ?? []), ...(input.module.changedFiles ?? [])])];
@@ -169,13 +173,17 @@ export async function verifyPipelineModule(input: {
   if (!functions.length) return { mode, attempts, disposition: mapping.nonExecutableFunctions.length ? 'not-applicable' : 'agent-uncertain' };
   const runtime = requireVerifierRuntime();
   const host = runtime.createLangChainFunctionGroupAgentHost({
-    model: runtime.createTranslationVerifierChatModel({ ...input.model, maxOutputTokens: 16_384 }),
+    model: runtime.createTranslationVerifierChatModel({ ...input.model, maxOutputTokens: 16_384,
+      onOutputLimitRetry: (attempt, maxRetries) => input.log(`Verifier 单次输出达到 Token 上限，已丢弃不完整回复，正在小步重试（${attempt}/${maxRetries}）`),
+    }),
+    retainTests: input.retainTests,
     signal: input.signal,
     workLogger: (event: VerifierWorkEvent) => { const message = verifierWorkLogMessage(event); if (message) input.log(message); },
   });
+  const previousEvidence = input.testEvidence ?? input.previous?.result?.testEvidence;
   const common = { schemaVersion: '3.1' as const, targetLanguage: input.module.target.language,
     targetProjectPath: input.root, requirement: input.requirement, moduleProtocol: input.protocol,
-    ...(input.previous?.result?.testEvidence ? { testEvidence: input.previous.result.testEvidence } : {}) };
+    ...(previousEvidence ? { testEvidence: previousEvidence } : {}) };
   let result: FunctionGroupVerificationResult;
   try {
     result = await runtime.createFunctionGroupVerifier(host)(fidelity ? {

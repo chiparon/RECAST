@@ -26,6 +26,7 @@ function toVerificationResult(
     status: result.verdict === "no-bug" ? "success" : "failure",
     ...(result.issue ? { issue: result.issue } : {}),
     ...(result.targetFunction ? { targetFunction: { ...result.targetFunction } } : {}),
+    ...(result.testEvidence ? { testEvidence: result.testEvidence } : {}),
   };
 }
 
@@ -33,6 +34,7 @@ function toVerificationResult(
 export function createFinalReportTask(input: VerificationInput): AgentTask {
   return {
     taskContext: {
+      requirement: input.subject.requirement,
       sourceLanguage: input.sourceLanguage,
       targetLanguage: input.targetLanguage,
       sourceProjectPath: input.sourceProjectPath,

@@ -15,6 +15,14 @@ afterEach(async () => {
 });
 
 describe('scanRepositoryStructuralIndex', () => {
+  it('excludes delivered verifier harnesses and module test namespaces from production modeling', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'code-indexer-retained-tests-')); temporaryRoots.push(root);
+    for (const file of ['src/main.ts', 'src/recast/product.ts', '.recast-tests/module/Generated.ts', '.recast-tests-delivery/staged/Generated.ts', 'checks/recast/123456789012345678901234/Generated.ts']) {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true }); await writeFile(path.join(root, file), 'export const value=1;');
+    }
+    const result = await scanRepositoryStructuralIndex({ repositoryId: 'retained', analysisRevision: 'one', repositoryRoot: root });
+    expect(result.index.files.map(file => file.relativePath)).toEqual(['src/main.ts', 'src/recast/product.ts']);
+  });
   it('reports snapshot verification and rejects source changed after capture', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'code-indexer-snapshot-verification-'));
     temporaryRoots.push(root);

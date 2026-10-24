@@ -17,8 +17,9 @@ async function setup(existing = false) {
   const capabilities = { service: 'recast-adaptation', version: 1, retrievalRerank: true, semanticPlanning: true, workspaceTranslation: true, workspaceRoot: root, semanticQueryUrl: 'http://127.0.0.1:8790' };
   let running = existing;
   const child = Object.assign(new EventEmitter(), { connected: true, kill: vi.fn(), send: vi.fn(), stdout: { resume() {} }, stderr: { resume() {} } });
+  child.on('exit', () => { running = false; });
   const launch = vi.fn(() => { running = true; return child; });
-  const transport = vi.fn(async (url: Parameters<typeof fetch>[0]) => running ? Response.json(String(url).endsWith('/configuration') ? { workspaceRoot: root } : capabilities) : new Response('', { status: 503 }));
+  const transport = vi.fn(async (url: Parameters<typeof fetch>[0]) => running ? Response.json(String(url).endsWith('/configuration') ? { workspaceRoot: capabilities.workspaceRoot } : capabilities) : new Response('', { status: 503 }));
   const manager = new BackendProcess(() => config, vi.fn(), launch as any, transport);
   return { root, config, capabilities, child, launch, manager, transport };
 }
@@ -48,10 +49,15 @@ it('starts planning services without a target and enables translation after targ
   expect(launch).toHaveBeenCalledTimes(2);
   expect((launch.mock.calls[1] as any)[2].env.ADAPTATION_WORKSPACE_TRANSLATION_ENABLED).toBe('true');
   expect(transport.mock.calls.some(([url]) => String(url).endsWith('/configuration'))).toBe(true);
-  // Real target ownership remains protected, even after service bootstrap.
+  // A real running translation remains protected after service bootstrap.
   const otherRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'recast-other-target-'))); roots.push(otherRoot);
   config.workspaceRoot = otherRoot;
-  await expect(manager.ensure()).rejects.toThrow('另一目标');
+  child.send.mockImplementation(message => queueMicrotask(() => child.emit('message', {
+    type: 'shutdown-if-idle-result', requestId: message.requestId, status: 'busy',
+  })));
+  await expect(manager.ensure()).rejects.toThrow('仍有翻译任务');
+  expect(launch).toHaveBeenCalledTimes(2);
+  expect(child.kill).not.toHaveBeenCalled();
   config.workspaceRoot = root;
   manager.dispose();
 });
@@ -147,6 +153,73 @@ it('uses only the child-announced port for an owned dynamic backend', async () =
   expect((launch.mock.calls[0] as any)[2].env.ADAPTATION_PORT).toBe('0');
   expect(manager.url).toBe('http://127.0.0.1:45678');
   expect(transport.mock.calls.slice(1).every(([url]) => String(url).startsWith(manager.url!))).toBe(true);
+  // Settings may restore the actual dynamic endpoint on refresh.
+  config.url = manager.url!;
+  await expect(manager.ensure()).resolves.toBeDefined();
+  expect(launch).toHaveBeenCalledTimes(1);
+  expect(child.send).not.toHaveBeenCalled();
+  manager.dispose();
+});
+
+it.each(['target', 'origin', 'semantic-port'] as const)('automatically replaces an idle owned backend after a %s change', async change => {
+  const { manager, config, capabilities, child, launch } = await setup();
+  await manager.ensure();
+  if (change === 'target') {
+    const otherRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'recast-new-target-'))); roots.push(otherRoot);
+    config.workspaceRoot = capabilities.workspaceRoot = otherRoot;
+  } else if (change === 'origin') config.url = 'http://127.0.0.1:9876';
+  else {
+    config.semanticPort = 9876;
+    capabilities.semanticQueryUrl = 'http://127.0.0.1:9876';
+  }
+  child.send.mockImplementation(message => {
+    if (message.type === 'shutdown-if-idle') queueMicrotask(() => {
+      child.emit('message', { type: 'shutdown-if-idle-result', requestId: message.requestId, status: 'closing' });
+      child.emit('exit', 0, null);
+    });
+  });
+  const pending = manager.ensure();
+  expect(manager.ensure()).toBe(pending);
+  await expect(pending).resolves.toMatchObject({ workspaceRoot: config.workspaceRoot });
+  expect(launch).toHaveBeenCalledTimes(2);
+  expect((launch.mock.calls[1] as any)[2]).toMatchObject({ cwd: config.workspaceRoot,
+    env: { SEMANTIC_QUERY_PORT_URL: `http://127.0.0.1:${config.semanticPort}` } });
+  expect(child.kill).not.toHaveBeenCalled();
+  manager.dispose();
+});
+
+it('preserves a busy backend and retries the requested change after the task finishes', async () => {
+  const { manager, config, capabilities, child, launch } = await setup();
+  await manager.ensure();
+  const previousUrl = manager.url;
+  config.semanticPort = 9876;
+  let busy = true;
+  child.send.mockImplementation(message => {
+    if (message.type !== 'shutdown-if-idle') return;
+    queueMicrotask(() => {
+      child.emit('message', { type: 'shutdown-if-idle-result', requestId: message.requestId, status: busy ? 'busy' : 'closing' });
+      if (!busy) child.emit('exit', 0, null);
+    });
+  });
+  await expect(manager.ensure()).rejects.toThrow('完成或取消后会自动切换');
+  expect(manager.url).toBe(previousUrl);
+  expect(child.kill).not.toHaveBeenCalled();
+  expect(launch).toHaveBeenCalledTimes(1);
+  busy = false;
+  capabilities.semanticQueryUrl = 'http://127.0.0.1:9876';
+  await expect(manager.ensure()).resolves.toMatchObject({ semanticQueryUrl: capabilities.semanticQueryUrl });
+  expect(launch).toHaveBeenCalledTimes(2);
+  manager.dispose();
+});
+
+it('does not replace a backend when its IPC connection cannot confirm idleness', async () => {
+  const { manager, config, child, launch } = await setup();
+  await manager.ensure();
+  config.semanticPort = 9876;
+  child.connected = false;
+  await expect(manager.ensure()).rejects.toThrow('控制连接暂不可用');
+  expect(child.kill).not.toHaveBeenCalled();
+  expect(launch).toHaveBeenCalledTimes(1);
   manager.dispose();
 });
 

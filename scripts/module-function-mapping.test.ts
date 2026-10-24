@@ -8,6 +8,22 @@ const target = (coreApis: string[], sourceFiles = ["src/OrderService.cs", "src/P
 });
 
 describe("module function mapping", () => {
+  it('discovers native public callables and gives overloads distinct identities', () => {
+    const functions = discoverExecutableFunctions({
+      'price.hxx': 'class Price { int hidden() {return 0;} public: int run(int x) {return x;} double run(double x) {return x;} protected: int helper() {return 1;} };',
+      'price.c': 'static int helper(void) {return 1;}\nint run(void) {return helper();}',
+    });
+    expect(functions.map(fn => fn.name)).toEqual(['run', 'run', 'run']);
+    expect(new Set(functions.map(fn => fn.signature)).size).toBe(3);
+    expect(functions.every(fn => fn.startLine !== undefined)).toBe(true);
+  });
+  it('retains both const and non-const C++ overloads through pipeline API mapping', () => {
+    const contents = { 'price.hpp': 'struct Price {\nint run() {return 1;}\nint run() const {return 2;}\n};' };
+    const functions = discoverExecutableFunctions(contents);
+    expect(functions.map(fn => fn.signature)).toEqual(['Price.run()', 'Price.run() const']);
+    const result = buildModuleFunctionMapping({ ...target([], ['price.hpp']) }, undefined, contents, functions);
+    expect(result.unmatchedFunctions).toEqual(functions);
+  });
   it("discovers new concrete services independently of stale interface APIs", () => {
     const functions = discoverExecutableFunctions({
       "Attachment.java": `public interface Attachment { void scan(); }

@@ -3,11 +3,31 @@ import type { AnalysisReport, FilePatch, ModuleProtocol } from "@forexplore/cont
 export type JsonValue =
   string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+export type RetainedTestSuite = {
+  schemaVersion: 1;
+  id: string;
+  directory: string;
+  framework: 'maven' | 'gradle' | 'pytest' | 'jest' | 'vitest' | 'cmake' | 'dotnet';
+  testRoots: string[];
+  testPaths: string[];
+  files: Array<{ path: string; sha256: string }>;
+  status: 'not-run' | 'passed' | 'failed' | 'unverified';
+  command: string;
+};
+
+export type TestRetention = {
+  /** Stable caller-owned identity, normally a pipeline module ID. */
+  id: string;
+  onUpdate?(root: string, suite: RetainedTestSuite, evidence?: VerificationTestEvidence): Promise<void>;
+};
+
 export type VerificationFunction = {
   /** Project-relative file path containing the function. */
   path: string;
   name: string;
   signature?: string;
+  /** Host-discovered declaration location, used to distinguish C++ overloads. */
+  startLine?: number;
 };
 
 export type VerificationSubject = {
@@ -58,7 +78,7 @@ export type FunctionGroupVerificationInput = {
   unmatchedFunctions?: VerificationFunction[];
   /** Bounded shared protocol view; advisory context only. */
   moduleProtocol?: ModuleProtocol;
-  /** @deprecated Legacy caller metadata; ignored by verification and never emitted. */
+  /** Host failure facts preserved across module retries. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -71,7 +91,7 @@ export type RequirementFunctionGroupVerificationInput = {
   requirement: string;
   functions: RequirementFunctionGroupVerificationFunction[];
   moduleProtocol?: ModuleProtocol;
-  /** @deprecated Legacy caller metadata; ignored by verification and never emitted. */
+  /** Host failure facts preserved across module retries. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -107,6 +127,7 @@ export type TargetFunctionCoverage = {
 };
 
 export type VerificationResult = {
+  testEvidence?: VerificationTestEvidence;
   status: "success" | "failure";
   issue?: VerificationIssue;
   targetFunction?: TargetFunctionCoverage;
@@ -139,7 +160,7 @@ export type FunctionGroupVerificationResult = {
   functions: FunctionGroupFunctionResult[];
   reason?: VerificationReason;
   protocolChecks?: ProtocolCheck[];
-  /** @deprecated Retained for callers reading older results; current runs never emit history. */
+  /** Host failure facts and automatic correction decisions. */
   testEvidence?: VerificationTestEvidence;
 };
 
@@ -163,7 +184,7 @@ export type VerificationTestCorrection = {
   requirementEvidence: string;
 };
 
-/** @deprecated Shape of previously stored failure history; no longer produced or consumed by the verifier. */
+/** Minimal failure history retained for retries and changed-assertion checks. */
 export type VerificationTestEvidence = {
   runs: Array<{
     id: string;

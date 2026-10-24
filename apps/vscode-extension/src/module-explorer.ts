@@ -24,15 +24,16 @@ const summaryRelativePath = '.forexplore/module-summary.json' as const;
 const targetSymbolKinds = new Set(['class', 'interface', 'record', 'struct', 'method', 'constructor', 'function']);
 const visibleSymbolKinds = new Set([...targetSymbolKinds, 'enum']);
 const ignoredDirectoryNames = new Set([
-  '.git', '.forexplore', '.gradle', '.idea', '.next', '.svn', '.vscode',
+  '.git', '.forexplore', '.gradle', '.idea', '.next', '.svn', '.vscode', '.recast-build', '.recast-tests', '.recast-tests-delivery', '.translation-verifier-tests', '.translation-verifier-coverage',
   'bin', 'build', 'dist', 'node_modules', 'obj', 'out', 'target', '__pycache__',
 ]);
 const languageByExtension = new Map<string, StaticAnalysisFile['language']>([
   ['.ts', 'TypeScript'], ['.tsx', 'TypeScript'], ['.js', 'TypeScript'], ['.jsx', 'TypeScript'],
-  ['.py', 'Python'], ['.java', 'Java'], ['.cs', 'C#'], ['.rs', 'Rust'], ['.go', 'Go'],
+  ['.py', 'Python'], ['.java', 'Java'], ['.cs', 'C#'], ['.rs', 'Rust'], ['.go', 'Go'], ['.c', 'C'], ['.h', 'C'],
+  ['.cc', 'C++'], ['.cpp', 'C++'], ['.cxx', 'C++'], ['.hpp', 'C++'], ['.hh', 'C++'], ['.hxx', 'C++'],
 ]);
-const moduleSummaryLanguages = new Set(['TypeScript', 'Python', 'Java', 'C#', 'Rust', 'Go', 'Mixed', 'Unknown']);
-const configurationFilePattern = /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|[^/]+\.(?:csproj|sln))$/i;
+const moduleSummaryLanguages = new Set(['TypeScript', 'Python', 'Java', 'C#', 'Rust', 'Go', 'C', 'C++', 'Mixed', 'Unknown']);
+const configurationFilePattern = /(?:^|\/)(?:CMakeLists\.txt|\.recast-native\.json|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|[^/]+\.(?:csproj|sln|cmake))$/i;
 const maxExplorerFiles = 4_000;
 const maxExplorerFileBytes = 2 * 1024 * 1024;
 
@@ -197,6 +198,7 @@ async function analyzeRepositoryForExplorer(
       if (discovered.length >= maxExplorerFiles) break;
       if (entry.isSymbolicLink()) continue;
       const absolutePath = path.join(directory, entry.name);
+      if (/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(path.relative(root, absolutePath).replaceAll('\\', '/'))) continue;
       if (entry.isDirectory()) {
         if (!ignoredDirectoryNames.has(entry.name.toLowerCase())) await visit(absolutePath);
         continue;
@@ -446,7 +448,7 @@ function legacyLanguage(languageId: string): StaticAnalysisFile['language'] | un
     javascript: 'TypeScript',
     python: 'Python',
     java: 'Java',
-    csharp: 'C#',
+    csharp: 'C#', c: 'C', cpp: 'C++', 'c++': 'C++',
     go: 'Go',
     rust: 'Rust',
   };

@@ -1,4 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai";
+import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
+import type { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager";
+import type { ChatResult } from "@langchain/core/outputs";
 
 /** Credential is a caller-owned value or a late resolver; it never becomes prompt text. */
 export type TranslationVerifierApiKey = string | (() => string);
@@ -33,6 +36,8 @@ export type TranslationVerifierChatModelOptions = {
   request?: typeof globalThis.fetch;
   /** Total transport attempts for one model call; the transport owns the only retry loop. */
   requestRetry?: TranslationVerifierRequestRetry;
+  maxOutputLimitRetries?: number;
+  onOutputLimitRetry?: (attempt: number, maxRetries: number) => void;
 };
 
 /**
@@ -54,13 +59,18 @@ export function createTranslationVerifierChatModel(
   const request = createRetryingFetch(transport, retry);
   const apiKey = options.apiKey;
 
-  return new ChatOpenAI({
+  const outputRetries = options.maxOutputLimitRetries ?? 3;
+  if (!Number.isInteger(outputRetries) || outputRetries < 0 || outputRetries > 8) {
+    throw new Error("Invalid verifier output-limit recovery budget.");
+  }
+  const model = new OutputRecoveringChatOpenAI({
     apiKey: typeof apiKey === "function" ? async () => apiKey() : apiKey,
     model: options.model ?? DEFAULT_MODEL,
     maxTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     // ChatOpenAI defaults its outer AsyncCaller to six retries; disable it.
     maxRetries: 0,
+    disableStreaming: true,
     configuration: {
       baseURL: apiBase,
       // The official SDK defaults to two retries; disable it explicitly.
@@ -69,6 +79,43 @@ export function createTranslationVerifierChatModel(
     },
     modelKwargs: { thinking: { type: "disabled" } },
   });
+  model.outputLimitRetries = outputRetries;
+  model.onOutputLimitRetry = options.onOutputLimitRetry;
+  return model;
+}
+
+/** Recover before LangChain can dispatch any tool in a truncated response. */
+class OutputRecoveringChatOpenAI extends ChatOpenAI {
+  outputLimitRetries = 3;
+  onOutputLimitRetry?: (attempt: number, maxRetries: number) => void;
+
+  override withConfig(config: Parameters<ChatOpenAI["withConfig"]>[0]): ReturnType<ChatOpenAI["withConfig"]> {
+    // The SDK's implementation constructs ChatOpenAI directly, losing subclass
+    // behavior during bindTools. Keep recovery on every configured instance.
+    const model = new OutputRecoveringChatOpenAI(this.fields);
+    model.defaultOptions = { ...this.defaultOptions, ...config };
+    model.outputLimitRetries = this.outputLimitRetries;
+    model.onOutputLimitRetry = this.onOutputLimitRetry;
+    return model;
+  }
+
+  override async _generate(messages: BaseMessage[], options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun): Promise<ChatResult> {
+    for (let retry = 0; ; retry++) {
+      options.signal?.throwIfAborted();
+      const input = retry === 0 ? messages : [...messages, new HumanMessage(
+        `The previous response reached its output token limit and was discarded. None of its tool calls executed. Continue from the last valid tool results. Recovery ${retry}/${this.outputLimitRetries}: emit one focused tool call at a time, keep arguments below ${retry > 1 ? 2000 : 4000} characters and split large tests into smaller files. Preserve requirement assertions; do not report success without running tests.`,
+      )];
+      const result = await super._generate(input, options, runManager);
+      if (!result.generations.some(item => (item.generationInfo as Record<string, unknown> | undefined)?.finish_reason === "length" ||
+          (item.message.response_metadata as Record<string, unknown> | undefined)?.finish_reason === "length")) return result;
+      if (retry >= this.outputLimitRetries) {
+        throw new Error(`Verifier model output limit: ${this.outputLimitRetries} small-step retries were truncated; no incomplete tool calls executed. Retry the failed module.`);
+      }
+      try { this.onOutputLimitRetry?.(retry + 1, this.outputLimitRetries); }
+      catch { /* Logging cannot interrupt recovery. */ }
+    }
+  }
 }
 
 type NormalizedRetry = { maxAttempts: number; delayMs: number };

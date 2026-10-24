@@ -46,6 +46,14 @@ async function finished(runtime: WorkspaceTranslationRuntime, id: string) {
 }
 
 describe('workspace behavioral acceptance', () => {
+  it('refuses idle shutdown while a run executes and closes admission after completion', async () => {
+    const { runtime } = await setup(scripted([...prefix(), call('finish')]), false);
+    const run = runtime.start(request);
+    expect(await runtime.shutdownIfIdle()).toBe(false);
+    expect((await finished(runtime, run.id)).status).toBe('completed');
+    expect(await runtime.shutdownIfIdle()).toBe(true);
+    expect(() => runtime.start(request)).toThrow('shutting down');
+  });
   it('rejects compile-only completion, repairs a real failed behavior, and supports restart-safe rollback', async () => {
     const { runtime, root, options } = await setup(scripted([...prefix(bad), call('run_tests'), call('finish'), messages => {
       expect(messages.at(-1)?.content).toContain('passing behavioral verification');

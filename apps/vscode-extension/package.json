@@ -268,7 +268,7 @@
             }
           },
           "scope": "machine",
-          "description": "目标工程编译命令，仅使用用户设置。默认自动识别 Python、Go、Rust、.NET；其他工程请配置 executable、args。"
+          "description": "目标工程编译命令，仅使用用户设置。默认自动识别 C/C++（CMake）、Java（Maven）、Python、Go、Rust、.NET；其他工程请配置 executable、args。"
         },
         "forexplore.backend.verification": {
           "type": "object",

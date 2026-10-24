@@ -98,16 +98,26 @@ export class ProjectPipelineHost {
         await this.files.assertWriteScope(run);
         const protectedBefore = await this.protectedHashes(root, config.verification?.protectedFiles ?? []);
         const compilation = await runtimeService().compileWorkspace(root, config.compileCommand, signal);
-        const verification = compilation.success && config.verification ? await runtimeService().compileWorkspace(root, config.verification.command, signal) : undefined;
+        let verification = compilation.success && config.verification ? await runtimeService().compileWorkspace(root, config.verification.command, signal) : undefined;
+        await this.files.assertWriteScope(run);
+        const productionHash = await this.files.productionHash(run);
+        const modules = compilation.success && (!verification || verification.success)
+          ? (await backend.verifyFinal(run, productionHash, signal, log ?? (() => {}))).map(module => ({ id: module.id, verification: module.moduleVerification! })) : undefined;
+        await this.files.assertWriteScope(run);
+        const suites = await this.files.testSuites(run);
+        const beforeReplay = await this.files.sourceHash(run);
+        const retainedTests = compilation.success && suites.length
+          ? await runtimeService().compileWorkspace(root, { executable: process.execPath, args: ['.recast-tests/run.cjs'], timeoutMs: 2 * 60 * 60 * 1000 }, signal) : undefined;
+        if (modules && suites.length && config.verification) verification = await runtimeService().compileWorkspace(root, config.verification.command, signal);
+        if (retainedTests) log?.(`交付测试重放：${retainedTests.success ? '通过' : '失败'}，共 ${suites.length} 个模块测试目录。`);
+        const retainedTestFailures = suites.filter(suite => retainedTests?.output.includes(`RECAST_SUITE_FAILED ${JSON.stringify(suite.id)}`)).map(suite => suite.id);
         await this.files.assertWriteScope(run);
         const sourceHash = await this.files.sourceHash(run);
-        const modules = compilation.success && (!verification || verification.success)
-          ? (await backend.verifyFinal(run, sourceHash, signal, log ?? (() => {}))).map(module => ({ id: module.id, verification: module.moduleVerification! })) : undefined;
-        await this.files.assertWriteScope(run);
-        if (await this.files.sourceHash(run) !== sourceHash) throw new Error('最终验证期间生产文件发生变化，禁止发布。');
+        if (await this.files.productionHash(run) !== productionHash || sourceHash !== beforeReplay) throw new Error('最终验证期间生产代码或交付测试发生变化，禁止发布。');
+        for (const module of modules ?? []) module.verification.sourceHash = sourceHash;
         const protectedAfter = await this.protectedHashes(root, config.verification?.protectedFiles ?? []);
         return { compilation, ...(verification ? { verification } : {}), protectedFilesUnchanged: JSON.stringify(protectedBefore) === JSON.stringify(protectedAfter),
-          sourceHash, coverage: null, ...(modules ? { modules } : {}) };
+          sourceHash, coverage: null, ...(modules ? { modules } : {}), ...(retainedTests ? { retainedTests, retainedTestFailures } : {}) };
       },
       sourceHash: run => this.files.sourceHash(run), publish: (run, signal) => this.files.publish(run, signal),
       save: async run => { await this.files.save(run); await options.context.globalState.update(lastRunKey, run.id); },

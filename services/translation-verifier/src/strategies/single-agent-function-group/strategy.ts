@@ -28,6 +28,7 @@ function toVerificationResult(
     functions: result.functions,
     ...(result.reason ? { reason: result.reason } : {}),
     ...(result.protocolChecks ? { protocolChecks: result.protocolChecks } : {}),
+    ...(result.testEvidence ? { testEvidence: result.testEvidence } : {}),
   };
 }
 

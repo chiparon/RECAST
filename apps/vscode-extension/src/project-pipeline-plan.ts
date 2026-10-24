@@ -2,7 +2,7 @@ import { indexModuleHierarchy, type Language, type ProjectModule, type Structura
 import { orderModulesByDependency } from './module-order';
 import type { ProjectPipelineModule } from './project-pipeline-types';
 
-const source = /\.(java|kt|kts|cs|ts|tsx|js|jsx|mjs|cjs|py|go|rs|c|cc|cpp|h|hpp)$/i;
+const source = /\.(java|kt|kts|cs|ts|tsx|js|jsx|mjs|cjs|py|go|rs|c|cc|cpp|cxx|h|hpp|hh|hxx)$/i;
 const testDirectory = /(?:^|\/)(?:test|tests|__tests__|spec)(?:\/|$)/i;
 const testName = /(?:Test|Tests|Spec)\.[^.]+$|\.(?:test|spec)\.[^.]+$/;
 
@@ -42,8 +42,12 @@ export function buildProjectPipelineModules(index: StructuralIndex, projectId: s
     const files = [...new Set(modules.flatMap(module => module.sourceFiles))];
     if (files.length > 128) throw new Error(`模块 ${modules[0]!.name} 含 ${files.length} 个生产文件，超过单次生成上限 128；请细化模块划分。`);
     const name = modules.map(module => module.name).join(' + '), id = group[0]!;
-    const languageName = modules[0]!.language ?? production.find(file => file.relativePath === files[0])?.languageId ?? 'unknown';
-    const language = ({ java: 'Java', csharp: 'C#', 'c#': 'C#', typescript: 'TypeScript', javascript: 'TypeScript', python: 'Python', rust: 'Rust', go: 'Go' } as Record<string, Language>)[languageName.toLowerCase()];
+    const nativeFiles = files.every(file => /\.(c|cc|cpp|cxx|h|hpp|hh|hxx)$/i.test(file));
+    // A shared .h file does not turn a C++ or mixed native module into C.
+    const languageName = nativeFiles
+      ? (files.some(file => /\.(cc|cpp|cxx|hpp|hh|hxx)$/i.test(file)) || modules.some(module => ['cpp', 'c++'].includes(module.language?.toLowerCase() ?? '')) ? 'cpp' : 'c')
+      : modules[0]!.language ?? production.find(file => file.relativePath === files[0])?.languageId ?? 'unknown';
+    const language = ({ java: 'Java', csharp: 'C#', 'c#': 'C#', typescript: 'TypeScript', javascript: 'TypeScript', python: 'Python', rust: 'Rust', go: 'Go', c: 'C', cpp: 'C++', 'c++': 'C++' } as Record<string, Language>)[languageName.toLowerCase()];
     if (!language) throw new Error(`当前生成契约尚不支持目标语言：${languageName}`);
     const dependsOn = [...new Set(group.flatMap(member => dependencies.get(member) ?? []).map(dependency => groupOf.get(dependency)!).filter(dependency => dependency !== id))];
     return { id, name, dependsOn, status: 'pending' as const, candidates: [],

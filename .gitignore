@@ -13,6 +13,9 @@ coverage/
 *.vsix
 .forexplore/
 .forexpore/
+.recast-build/
+.translation-verifier-tests/
+.translation-verifier-coverage/
 .recast-preloaded/
 backups/
 

@@ -61,5 +61,7 @@ export async function runFunctionGroupTests(
     reportPaths: observation.reportPaths ?? [],
   };
   context.budget?.assertActive();
+  await context.testHistory?.observe(result);
+  await context.recordArtifacts?.();
   return result;
 }

@@ -7,6 +7,9 @@ import { emptyGlobalProtocol, type SearchCandidate, type WorkspaceHistoryView, t
 import { ProjectPipelineBackend, type CodexRuntime } from './project-pipeline-backend';
 import type { ProjectPipelineModule, ProjectPipelineRun } from './project-pipeline-types';
 import type { PipelineModuleVerification } from './project-module-verifier';
+import { createHash } from 'node:crypto';
+import { retainedTestDirectory, RETAINED_TEST_README, RETAINED_TEST_RUNNER } from '../../../services/translation-verifier/src/host/test-artifacts';
+import type { RetainedTestSuite, VerificationTestEvidence } from '../../../services/translation-verifier/src/types';
 
 vi.mock('./local-fetch', () => ({ localFetch: vi.fn(async (_url, init) => {
   const request = JSON.parse(init.body);
@@ -187,5 +190,29 @@ it('does not send environment failures to the Translator and propagates cancella
     await expect(f.backend.generate(f.module, f.run, f.hooks)).rejects.toThrow('cancelled by user');
     expect(f.runtime.cancel).toHaveBeenCalledWith('module-run');
     expect(f.runtime.shutdown).toHaveBeenCalledTimes(2);
+  } finally { await f.backend.close(); }
+});
+
+it('restores unresolved failure facts after an interrupted verifier never returned a module result', async () => {
+  const f = await fixture();
+  const facts: VerificationTestEvidence = { runs: [], revisions: [], failures: [{ id: 'executed-failure', runId: 'original-run', testId: 'must-double', message: 'expected 42', versions: [], status: 'unresolved' }] };
+  f.drivers.verify.mockImplementationOnce(async input => {
+    const directory = retainedTestDirectory(input.module.id), runner = `${directory}/run.cjs`, content = 'process.exitCode=1;';
+    await mkdir(path.join(input.root, directory, 'tests'), { recursive: true });
+    await writeFile(path.join(input.root, runner), content);
+    const suite: RetainedTestSuite = { schemaVersion: 1, id: input.module.id, directory, framework: 'maven', testRoots: [`${directory}/tests`], testPaths: [],
+      files: [{ path: runner, sha256: createHash('sha256').update(content).digest('hex') }], status: 'failed', command: `node ${runner}` };
+    await writeFile(path.join(input.root, directory, 'manifest.json'), JSON.stringify(suite));
+    await writeFile(path.join(input.root, '.recast-tests/run.cjs'), RETAINED_TEST_RUNNER); await writeFile(path.join(input.root, '.recast-tests/README.md'), RETAINED_TEST_README);
+    await input.retainTests!.onUpdate!(input.root, suite, facts);
+    throw new Error('interrupted before terminal result');
+  });
+  try {
+    await f.backend.prepare(f.run, f.controller.signal, () => {});
+    await expect(f.backend.generate(f.module, f.run, f.hooks)).rejects.toThrow('interrupted before terminal result');
+    expect(f.module.moduleVerification).toBeUndefined();
+    await f.backend.close(); await f.backend.prepare(f.run, f.controller.signal, () => {}, true);
+    f.drivers.verify.mockImplementationOnce(async input => { expect(input.testEvidence).toEqual(facts); return verified(); });
+    await f.backend.verifyFinal(f.run, 'final-source', f.controller.signal, () => {});
   } finally { await f.backend.close(); }
 });

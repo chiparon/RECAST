@@ -44,7 +44,7 @@ export async function compileWorkspace(
       stopped = true;
       failure = reason;
       if (child.pid && process.platform === "win32") {
-        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
         killer.on("error", () => child.kill("SIGKILL"));
       } else if (child.pid) {
         try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }

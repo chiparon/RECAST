@@ -234,6 +234,8 @@ export interface WorkspaceTranslationRun {
       patchTool?: { attempts: number; failures: number; durationMs: number; errors: string[] };
       /** Host-checked Analyzer excerpts handed to this stage; stale sources require fresh reads. */
       analysisEvidence?: { entries: number; stalePaths: string[]; excerptChars: number };
+      /** Output-limit continuations share the original task deadline and staging copy. */
+      outputLimitRecovery?: { attempt: number; maxRetries: number; status: 'retrying' | 'recovered' | 'exhausted' | 'configuration' };
       /** Bounded Analyzer final output retained for invalid-plan diagnosis. */
       analyzerOutput?: string;
       /** Final coding-agent report; observed commands/compilation remain the facts. */

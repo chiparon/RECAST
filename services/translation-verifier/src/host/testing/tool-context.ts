@@ -1,3 +1,7 @@
+import { mkdir } from "node:fs/promises";
+import { retainedTestDirectory } from "../test-artifacts.js";
+import type { TestRetention } from "../../types.js";
+import { resolveSafePath } from "../tools/common.js";
 import { dirname } from "node:path";
 import { resolveTestEnvironment } from "./test-environment.js";
 import type {
@@ -17,8 +21,19 @@ export type ToolContextResolver = (
  */
 export async function defaultToolContextResolver(
   taskContext: AgentTaskContext,
+  retention?: TestRetention,
 ): Promise<ToolRuntimeContext> {
-  const testEnvironment = await resolveTestEnvironment(taskContext);
+  const directory = retention ? retainedTestDirectory(retention.id) : undefined;
+  const testEnvironment = await resolveTestEnvironment(taskContext, directory);
+  if (retention) {
+    const key = directory!.split('/')[1];
+    testEnvironment.testRoots = await Promise.all(testEnvironment.testRoots.map(async root => {
+      const owned = root.startsWith(directory! + '/') ? root : root + '/recast/' + key;
+      await mkdir(resolveSafePath(taskContext.targetProjectPath, owned), { recursive: true });
+      return owned;
+    }));
+    testEnvironment.cleanup = undefined;
+  }
   return {
     ...taskContext,
     sourceDirectory: directoryForFile(taskContext.sourcePath),

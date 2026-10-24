@@ -16,7 +16,7 @@ describe('project integration inputs', () => {
   it('exposes all current production and complete public requirements while excluding prior module records', async () => {
     const root = await mkdtemp(join(tmpdir(), 'recast-public-inputs-'));
     try {
-      for (const file of ['src/Entry.java', 'src/adapter/Store.java', 'requirements/public.md', 'pom.xml', 'evaluation/hidden.md', 'tests/Hidden.java', '.env', '.forexplore/journal.json']) {
+      for (const file of ['src/Entry.java', 'src/adapter/Store.java', 'requirements/public.md', 'pom.xml', 'evaluation/hidden.md', 'tests/Hidden.java', '.env', '.forexplore/journal.json', '.recast-tests/module/Generated.java', '.recast-tests-delivery/module/Generated.java', 'src/recast/123456789012345678901234/Generated.java']) {
         await mkdir(join(root, file, '..'), { recursive: true });
         await writeFile(join(root, file), file.startsWith('requirements/') ? 'PUBLIC BEHAVIOR' : 'CODE OR PRIVATE');
       }

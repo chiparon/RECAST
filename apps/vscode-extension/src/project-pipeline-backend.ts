@@ -1,4 +1,4 @@
-import { chmod, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -29,6 +29,8 @@ import { prepareDirectModuleTranslationScope, prepareIntegrationTranslationScope
 import { verifyPipelineModule, type PipelineModel } from './project-module-verifier';
 import type { ProjectPipelinePorts } from './project-pipeline';
 import type { ProjectPipelineModule, ProjectPipelineRun, ProjectPipelineStart } from './project-pipeline-types';
+import { copyRetainedTestSuite, readRetainedTestSuite } from '../../../services/translation-verifier/src/host/test-artifacts';
+import type { RetainedTestSuite, VerificationTestEvidence } from '../../../services/translation-verifier/src/types';
 
 type Hooks = Parameters<ProjectPipelinePorts['generate']>[2];
 
@@ -165,8 +167,11 @@ export class ProjectPipelineBackend {
           hooks.onProgress?.('verifying', `正在验证 ${module.name}，第 ${attempt} 轮。`);
           module.moduleVerification = await this.drivers.verify({ root: await this.verificationRoot(root, module.id, hooks.signal), module, requirement: run.requirement, model: this.model!, candidates: selected,
             historyView: this.history.get(module.id), protocol, signal: hooks.signal, previous: module.moduleVerification,
+            retainTests: this.testRetention(module.id, async suite => { module.retainedTests = suite; await hooks.onCheckpoint?.(); }),
+            testEvidence: await this.verifierEvidence(module.id),
             log: message => hooks.onProgress?.('verifying', message) });
           await this.preserveVerificationEvidence(module.id);
+          module.moduleVerification.testSuite = await readRetainedTestSuite(root, module.id);
           hooks.onProgress?.('verifying', `${module.name}：${module.moduleVerification.disposition}`);
           const verification = module.moduleVerification.result;
           this.protocol = recordProtocolChecks(this.protocol, verification?.protocolChecks, module.id);
@@ -211,8 +216,11 @@ export class ProjectPipelineBackend {
       }
       module.moduleVerification = await this.drivers.verify({ root: await this.verificationRoot(run.outputRoot!, module.id, signal), module, requirement: run.requirement, model: this.model!, candidates,
         historyView: this.history.get(module.id), signal, previous: module.moduleVerification,
+        retainTests: this.testRetention(module.id, async suite => { module.retainedTests = suite; }),
+        testEvidence: await this.verifierEvidence(module.id),
         protocol: projectModuleProtocol(this.protocol, { moduleId: module.id, relatedModules: module.dependsOn, ownedFiles: module.target.module?.sourceFiles }), log });
       await this.preserveVerificationEvidence(module.id);
+      module.moduleVerification.testSuite = await readRetainedTestSuite(run.outputRoot!, module.id);
       module.moduleVerification.sourceHash = sourceHash;
     }
     return modules;
@@ -230,16 +238,33 @@ export class ProjectPipelineBackend {
     }
   }
 
-  /** Keep generated tests and repair evidence outside the delivered project. Each
-   * module retains its harness across attempts; refresh all production sources
-   * before each attempt so dependency and Integration changes are verified. */
+  private testRetention(moduleId: string, updated?: (suite: RetainedTestSuite) => Promise<void>) {
+    return { id: moduleId, onUpdate: async (root: string, suite: RetainedTestSuite, evidence?: VerificationTestEvidence) => {
+      if (!this.verificationOutput) throw new Error('测试交付目录尚未绑定。');
+      if (evidence) {
+        await this.copyVerificationEvidence(path.join(root, '.forexplore', 'translation-verifier-evidence'), this.verificationArchive(moduleId));
+        const file = path.join(this.verificationArchive(moduleId), 'test-evidence.json');
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(`${file}.tmp`, JSON.stringify(evidence)); await rename(`${file}.tmp`, file);
+      }
+      await copyRetainedTestSuite(root, this.verificationOutput, suite);
+      await updated?.(suite);
+    } };
+  }
+  private async verifierEvidence(moduleId: string): Promise<VerificationTestEvidence | undefined> {
+    try { return JSON.parse(await readFile(path.join(this.verificationArchive(moduleId), 'test-evidence.json'), 'utf8')) as VerificationTestEvidence; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  }
+
+  /** Verify in isolation, but publish runnable Host-owned tests after every
+   * write/run. Restore retained suites and refresh production before retries. */
   private async verificationRoot(output: string, moduleId: string, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
     let root = this.verificationRoots.get(moduleId);
     if (!root) {
       root = await mkdtemp(path.join(tmpdir(), 'recast-verification-'));
       this.verificationRoots.set(moduleId, root);
-      const excluded = new Set(['.git', '.forexplore', '.forexpore', '.agent-tmp', '.translation-verifier-tests', '.translation-verifier-coverage', 'bin', 'obj', 'target', 'dist', 'coverage']);
+      const excluded = new Set(['.git', '.forexplore', '.forexpore', '.agent-tmp', '.translation-verifier-tests', '.translation-verifier-coverage', '.recast-build', 'bin', 'obj', 'target', 'dist', 'coverage']);
       await cp(output, root, { recursive: true, filter: from => { signal.throwIfAborted(); return !path.relative(output, from).split(path.sep).some(part => excluded.has(part)); } });
       await this.copyVerificationEvidence(this.verificationArchive(moduleId), path.join(root, '.forexplore', 'translation-verifier-evidence'));
     }
@@ -248,6 +273,10 @@ export class ProjectPipelineBackend {
       signal.throwIfAborted(); const destination = path.join(root, file);
       await mkdir(path.dirname(destination), { recursive: true }); await cp(path.join(output, file), destination);
     }
+    // Maven's isolated test harness references the real, freshly compiled
+    // classes/JAR. Build output stays in the verification copy, never delivery.
+    try { await cp(path.join(output, 'target'), path.join(root, 'target'), { recursive: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     return root;
   }
 

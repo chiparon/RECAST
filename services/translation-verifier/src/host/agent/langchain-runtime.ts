@@ -55,6 +55,9 @@ import {
   type ToolContextResolver,
 } from "../testing/tool-context.js";
 import { randomUUID } from "node:crypto";
+import { createTestArtifactRecorder } from "../test-artifact-recorder.js";
+import { createTestHistory, modelTestChangeReviewer, type TestChangeReviewer } from "../verification/test-history.js";
+import type { TestRetention } from "../../types.js";
 
 export type LangChainAgentHostOptions = {
   /** Framework chat model instance; production callers build it with createTranslationVerifierChatModel. */
@@ -66,6 +69,8 @@ export type LangChainAgentHostOptions = {
   resolveToolContext?: ToolContextResolver;
   workLogger?: AgentWorkLogger;
   traceLogger?: AgentTraceLogger;
+  retainTests?: TestRetention;
+  reviewTestChanges?: TestChangeReviewer;
 };
 
 const DEFAULT_MAX_FEEDBACK_ROUNDS = 4;
@@ -141,7 +146,7 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
 ): Promise<Result> {
   const limits: AgentRunLimits = { ...DEFAULT_AGENT_RUN_LIMITS, ...options.limits };
   const maxFeedbackRounds = options.maxFeedbackRounds ?? DEFAULT_MAX_FEEDBACK_ROUNDS;
-  const resolveToolContext = options.resolveToolContext ?? defaultToolContextResolver;
+  const resolveToolContext = options.resolveToolContext ?? (taskContext => defaultToolContextResolver(taskContext, options.retainTests));
   const runId = randomUUID();
   const startedAt = performance.now();
   const budget = createAgentRunBudget(limits, Date.now(), options.signal);
@@ -149,19 +154,36 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
   emitAgentTrace(options.traceLogger, traceEvent(runId, "run.started"));
   let cleanup: (() => Promise<void>) | undefined;
   let serializer: WorkspaceSerializer | undefined;
+  let context: ToolContext | undefined;
+  let recordArtifacts: (() => Promise<void>) | undefined;
   try {
     budget.assertActive();
     const runtime = await resolveToolContext(task.taskContext);
     cleanup = runtime.cleanup;
     budget.assertActive();
-    const context: ToolContext = {
+    const previousEvidence = task.taskContext.functionGroup?.testEvidence;
+    context = {
       budget,
       runtime,
+      state: { ...(previousEvidence ? { testEvidence: structuredClone(previousEvidence) }
+        : options.retainTests ? { testEvidence: { runs: [], failures: [], revisions: [] } } : {}) },
       ...acceptance.bindRunner({ budget, runtime }),
     };
+    const reviewer = options.reviewTestChanges ?? modelTestChangeReviewer(options.model, budget.signal);
+    context.testHistory = createTestHistory(context, async input => {
+      emitAgentWorkLog(options.workLogger, workEvent(runId, "test-change-review.started"));
+      const decision = await reviewer(input);
+      emitAgentWorkLog(options.workLogger, workEvent(runId, "test-change-review.completed", { outcome: decision.approved ? "accepted" : "uncertain" }));
+      return decision;
+    });
+    if (options.retainTests) {
+      recordArtifacts = createTestArtifactRecorder(runtime, context.state!, options.retainTests);
+      context.recordArtifacts = recordArtifacts;
+      await recordArtifacts();
+    }
     // Each factory returns one native LangChain tool bound to this run's
     // authorization context; the framework owns dispatch and validation.
-    const tools: StructuredToolInterface[] = task.tools.map(factory => factory(context));
+    const tools: StructuredToolInterface[] = task.tools.map(factory => factory(context!));
     serializer = createWorkspaceSerializer(budget);
     const agent = createAgent({
       model: options.model,
@@ -243,16 +265,22 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
 
       const feedback = [...parsed.problems, ...revalidation.feedback];
       if (feedback.length === 0 && parsed.report !== undefined) {
-        const result = acceptance.accept(parsed.report, revalidation.observation);
+        const problem = parsed.report.verdict === "bug-found" ? undefined : await context.testHistory.acceptGreenSuite();
+        const report: FinalReportClaim = problem ? { ...parsed.report, verdict: "uncertain", issue: { kind: "unknown", description: problem } } : parsed.report;
+        const result = acceptance.accept(report, revalidation.observation);
+        if (context.state?.testEvidence && result && typeof result === "object") {
+          Object.assign(result, { testEvidence: structuredClone(context.state.testEvidence), ...(problem ? { reason: "unresolved-test-failure" } : {}) });
+        }
+        await recordArtifacts?.();
         emitAgentWorkLog(options.workLogger, {
           ...workEvent(runId, "run.completed", {
             elapsedMs: elapsedMs(startedAt),
-            outcome: parsed.report.verdict,
+            outcome: report.verdict,
           }),
         });
         emitAgentTrace(options.traceLogger, traceEvent(runId, "run.completed", {
           elapsedMs: elapsedMs(startedAt),
-          verdict: parsed.report.verdict,
+          verdict: report.verdict,
         }));
         return result;
       }
@@ -272,6 +300,9 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
     }
   } catch (error) {
     const failure = classifyRunFailure(error, budget);
+    if (failure && typeof failure === "object" && context?.state?.testEvidence) {
+      Object.assign(failure, { testEvidence: structuredClone(context.state.testEvidence) });
+    }
     emitAgentWorkLog(options.workLogger, {
       ...workEvent(runId, "run.failed", {
         elapsedMs: elapsedMs(startedAt),
@@ -290,7 +321,7 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
       await serializer?.close();
     } finally {
       try {
-        await cleanup?.();
+        try { await recordArtifacts?.(); } finally { await cleanup?.(); }
       } finally {
         budget.dispose();
       }

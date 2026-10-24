@@ -1130,7 +1130,7 @@ function validateRevisionScopedModule(value: unknown, index: number, evidence: E
   if (value.domain !== undefined) assertNonEmptyString(value.domain, `modules[${index}].domain`);
   if (value.coreApis !== undefined) assertStringArray(value.coreApis, `modules[${index}].coreApis`, true);
   if (value.language !== undefined) {
-    assertEnum(value.language, ["TypeScript", "Python", "Java", "C#", "Rust", "Go", "Mixed", "Unknown"], `modules[${index}].language`);
+    assertEnum(value.language, ["TypeScript", "Python", "Java", "C#", "Rust", "Go", "C", "C++", "Mixed", "Unknown"], `modules[${index}].language`);
   }
   assertStringArray(value.sourceFiles, `modules[${index}].sourceFiles`, false);
   assertStringArray(value.symbolKeys, `modules[${index}].symbolKeys`, true);
@@ -1313,7 +1313,7 @@ function revisionScopedModulePlanSchema(): Record<string, unknown> {
       description: "string",
       purpose: "optional string",
       coreApis: ["optional API names from retrieved symbols"],
-      language: "TypeScript | Python | Java | C# | Rust | Go | Mixed | Unknown",
+      language: "TypeScript | Python | Java | C# | Rust | Go | C | C++ | Mixed | Unknown",
       domain: "optional domain",
       sourceFiles: ["retrieved repository-relative source path"],
       symbolKeys: ["retrieved stable symbolKey"],

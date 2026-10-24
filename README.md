@@ -2,6 +2,10 @@
 
 RECAST（代码库名 ForeXplore）在 VS Code 中提供需求驱动的代码复用与项目生成：导入目标骨架，配置历史参考仓库，输入需求，执行建模、检索、实现、编译、行为验证和项目集成。当前项目流水线使用全自动模式；进度、失败原因和交付结果均在工作台展示。
 
+模块 Verifier 生成的测试会随输出项目一起交付，并在最终目录重新运行；企业安装项目依赖后可用 `node .recast-tests/run.cjs` 重放。目录结构、工具链要求和断点恢复规则见 [生成测试交付说明](docs/retained-tests.zh-CN.md)。
+
+企业操作者可阅读[图文使用说明书](docs/user-guide/README.zh-CN.md)，或下载[Word 版本](docs/user-guide/RECAST企业使用说明书.docx)。
+
 ## 从零配置：先选运行平台
 
 支持 Windows 原生和 WSL2。**两种方式的源码目录、`node_modules`、扩展 `dist` 和推理运行时分别维护**。Windows 使用 Windows Node，WSL 使用 Linux Node；不要在 `/mnt/c`、`/mnt/e` 等 Windows checkout 中执行 Linux 的 `npm ci`。
@@ -14,11 +18,14 @@ RECAST（代码库名 ForeXplore）在 VS Code 中提供需求驱动的代码复
 | --- | --- |
 | Java | JDK（示例工程使用 21）、Maven；按工程设置 `JAVA_HOME` |
 | C# | .NET SDK（示例工程使用 8） |
+| C / C++ | CMake 3.21+、本平台编译器；自动行为验证使用 GCC/G++ 和同版本 gcov（Windows 可用 MinGW-w64） |
 | TypeScript / JavaScript | Node.js/npm、工程自身依赖 |
 | Python | Python 3；Windows 确认 `python --version` 可用 |
 | Go / Rust | Go / Rust 工具链，按目标工程版本安装 |
 
 只需安装实际使用的语言工具链。验证器可能需要对应测试依赖，目标工程应能先在本平台独立构建和测试。
+
+C／C++ 已接入目标工程识别、模块生成、CMake 构建及 CTest＋gcov 行为验证。默认支持提供可链接库目标的 CMake 工程；多个库可显式指定测试目标。Makefile、仅有可执行程序的工程，以及 MSVC／Clang 的覆盖率验收需要单独适配，详见 [C／C++ 配置与支持边界](docs/c-cpp-support.zh-CN.md)。
 
 ### Windows 原生
 
@@ -215,6 +222,8 @@ npm test
 ```
 
 `npm run dev` 是开发入口的别名。已有开发窗口再次启动时会重载，也可执行 **Developer: Reload Window**。当前前端项目翻译预算为每次运行 2 小时，失败以阶段记录为准。
+
+模型单次输出超限时，流水线会在原时限内自动小步续接，默认最多额外重试 3 次；恢复后继续正常编译与验收。参数不兼容会单独提示，详见[输出超限与自动恢复](docs/output-limit-recovery.zh-CN.md)。
 
 独立 HTTP / MCP 集成才使用 `npm run dev:adaptation` 或 `npm run dev:mcp`，参考各服务 `.env.example`；独立 HTTP 默认端口 `8788`。**普通扩展入口之外不要再预启动同一个适配后端。** MCP 和 Claude Code 工作流见 [MCP 服务说明](services/adaptation-mcp-server/README.md)。
 

@@ -10,6 +10,8 @@ export type AgentWorkLogEventName =
   | "agent.invocation.completed"
   | "host.revalidation.completed"
   | "agent.feedback.appended"
+  | "test-change-review.started"
+  | "test-change-review.completed"
   | "run.completed"
   | "run.failed";
 

@@ -33,11 +33,11 @@ interface ProjectIntegrationVerification {
 }
 
 const productionExtensions = new Set([
-  '.c', '.cc', '.cpp', '.cxx', '.cs', '.fs', '.go', '.h', '.hpp', '.java', '.js', '.jsx',
+  '.c', '.cc', '.cpp', '.cxx', '.cs', '.fs', '.go', '.h', '.hpp', '.hh', '.hxx', '.java', '.js', '.jsx',
   '.kt', '.kts', '.mjs', '.py', '.rb', '.rs', '.swift', '.ts', '.tsx',
 ]);
 const ignoredDirectories = new Set([
-  '.git', '.forexpore', '.forexplore', '.translation-verifier-tests', '.translation-verifier-coverage',
+  '.git', '.forexpore', '.forexplore', '.translation-verifier-tests', '.translation-verifier-coverage', '.recast-build', '.recast-tests', '.recast-tests-delivery',
   '.agent-tmp', '.codex', '.claude', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out',
   'target', 'coverage', 'test', 'tests', '__tests__', 'evaluation', 'results', '__pycache__', '.venv', 'venv',
 ]);
@@ -47,6 +47,7 @@ const privateFiles = new Set(['.env', '.npmrc', 'id_rsa', 'id_ed25519']);
  * requirements/build files remain protected; temporary tests stay in scratch. */
 export function isNewProjectIntegrationSource(path: string, existingSources: readonly string[]): boolean {
   const parts = path.split('/');
+  if (/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(path)) return false;
   if (parts.some(part => !part || part === '.' || part === '..' || ignoredDirectories.has(part.toLowerCase()))) return false;
   if (/(?:\.test|\.spec)\.[^.]+$/i.test(path) || /(?:^|[._-])tests?(?:[._-]|$)/i.test(parts.at(-1)!)) return false;
   const extensions = new Set(existingSources.map(file => extname(file).toLowerCase()));
@@ -72,6 +73,7 @@ export async function prepareProjectIntegrationContext(root: string, modules: re
     for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name;
       const lower = entry.name.toLowerCase();
+      if (/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(path)) continue;
       if (ignoredDirectories.has(lower) || lower.startsWith('.forexpore') || lower.startsWith('.forexplore') ||
           privateFiles.has(lower) || lower.startsWith('.env.') || lower.endsWith('.pem') || lower.endsWith('.key')) continue;
       if (entry.isDirectory()) { await visit(join(directory, entry.name), path); continue; }

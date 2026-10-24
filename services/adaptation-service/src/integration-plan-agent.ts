@@ -15,7 +15,7 @@ export interface IntegrationPlanAgentInput {
 }
 
 const ignored = new Set(['.git', '.forexpore', '.forexplore', '.agent-tmp', 'node_modules', 'bin', 'obj', 'target', 'build', 'dist', 'coverage', 'test', 'tests', '__tests__', 'evaluation', 'results']);
-const sourceExtensions = new Set(['.cs', '.java', '.kt', '.kts', '.ts', '.tsx', '.js', '.py', '.go', '.rs', '.cpp', '.c', '.h', '.hpp']);
+const sourceExtensions = new Set(['.cs', '.java', '.kt', '.kts', '.ts', '.tsx', '.js', '.py', '.go', '.rs', '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.hh', '.hxx']);
 
 async function skeleton(root: string, modules: readonly ProjectModule[]): Promise<string> {
   const files: string[] = [];

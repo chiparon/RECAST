@@ -630,9 +630,9 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
 }
 
 function moduleLanguage(language: string | undefined, files: string[]): ModuleTarget['language'] {
-  const names: Record<string, ModuleTarget['language']> = { typescript: 'TypeScript', javascript: 'TypeScript', python: 'Python', java: 'Java', 'c#': 'C#', csharp: 'C#', rust: 'Rust', go: 'Go' };
+  const names: Record<string, ModuleTarget['language']> = { typescript: 'TypeScript', javascript: 'TypeScript', python: 'Python', java: 'Java', 'c#': 'C#', csharp: 'C#', c: 'C', cpp: 'C++', 'c++': 'C++', rust: 'Rust', go: 'Go' };
   if (language && names[language.toLowerCase()]) return names[language.toLowerCase()]!;
-  const extensions: Record<string, ModuleTarget['language']> = { ts: 'TypeScript', js: 'TypeScript', py: 'Python', java: 'Java', cs: 'C#', rs: 'Rust', go: 'Go' };
+  const extensions: Record<string, ModuleTarget['language']> = { ts: 'TypeScript', js: 'TypeScript', py: 'Python', java: 'Java', cs: 'C#', rs: 'Rust', go: 'Go', c: 'C', h: 'C', cpp: 'C++', cc: 'C++', cxx: 'C++', hpp: 'C++', hh: 'C++', hxx: 'C++' };
   const found = files.map((file) => extensions[file.split('.').at(-1)?.toLowerCase() ?? '']).find(Boolean);
   if (!found) throw new Error(`Module source language is unsupported: ${language ?? 'unknown'}`);
   return found;

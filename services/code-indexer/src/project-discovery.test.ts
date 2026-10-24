@@ -3,6 +3,17 @@ import type { LanguageId, ProjectRecord } from '@forexplore/contracts';
 import { createProjectLookup, discoverProjects, projectForPath } from './project-discovery.js';
 
 describe('project discovery', () => {
+  it('keeps CMake subdirectories in their buildable root and recognises independent nested projects', () => {
+    const { projects } = discoverProjects({ repositoryId: 'native', analysisRevision: 'r1', files: [
+      { relativePath: 'CMakeLists.txt', content: 'project(Shop LANGUAGES C CXX)\nadd_subdirectory(src)' },
+      { relativePath: 'src/CMakeLists.txt', content: 'add_library(price price.cxx)' },
+      { relativePath: 'src/price.cxx', content: '', languageId: 'cpp' },
+      { relativePath: 'tools/CMakeLists.txt', content: 'project(Tool LANGUAGES C)' },
+    ] });
+    expect(projects.filter(project => project.kind === 'cmake').map(project => project.relativePath).sort()).toEqual(['', 'tools']);
+    expect(projectForPath(projects, 'src/price.cxx', 'cpp')?.relativePath).toBe('');
+    expect(projectForPath(projects, 'include/price.h', 'c')?.kind).toBe('cmake');
+  });
   it('recognizes repository-relative build/package boundaries and C# project references', () => {
     const result = discoverProjects({
       repositoryId: 'history-one',

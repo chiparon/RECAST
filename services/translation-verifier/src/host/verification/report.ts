@@ -6,6 +6,7 @@ import type {
   VerificationFunction,
   VerificationIssue,
   VerificationReason,
+  VerificationTestEvidence,
 } from "../../types.js";
 import type { FunctionGroupTestRun, TargetTestResult } from "../tools/common.js";
 import { messageText } from "../agent/messages.js";
@@ -27,6 +28,7 @@ export type AgentHostResult = {
   summary: string;
   issue?: VerificationIssue;
   targetFunction?: TargetFunctionCoverage;
+  testEvidence?: VerificationTestEvidence;
 };
 
 /** Accepted function-group report plus the Host's fresh per-function observation. */
@@ -37,6 +39,7 @@ export type FunctionGroupHostResult = {
   functions: FunctionGroupFunctionResult[];
   reason?: VerificationReason;
   protocolChecks?: ProtocolCheck[];
+  testEvidence?: VerificationTestEvidence;
 };
 
 export type ParsedReport = {

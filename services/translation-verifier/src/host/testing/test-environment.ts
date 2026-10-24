@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { nativeCmakeSettings } from "../../../../../scripts/native-cmake.mjs";
 import { MAVEN_COVERAGE_GOALS } from "./test-runner.js";
 import { access, lstat, mkdir, readFile, realpath, stat, readdir, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
@@ -80,19 +83,31 @@ type ProjectConfig = {
  */
 export async function resolveTestEnvironment(
   input: Pick<VerificationInput, "targetLanguage" | "targetProjectPath">,
+  retainedDirectory?: string,
 ): Promise<TestEnvironment> {
   const root = await existingDirectory(input.targetProjectPath, "target project");
   const language = normalizeLanguage(input.targetLanguage);
 
   switch (language) {
     case "java":
-      return resolveJavaEnvironment(root);
+      return resolveJavaEnvironment(root, retainedDirectory);
     case "javascript":
       return resolveNodeEnvironment(root);
     case "csharp":
-      return resolveDotnetEnvironment(root);
+      return resolveDotnetEnvironment(root, retainedDirectory);
     case "python":
       return resolvePythonEnvironment(root);
+    case "native": {
+      if (!(await fileExists(join(root, 'CMakeLists.txt')))) throw new Error('C/C++ behavior verification requires a CMakeLists.txt project with a linkable library target.');
+      const settings = nativeCmakeSettings(root);
+      for (const executable of [settings.command, process.env.GCOV_COMMAND?.trim() || 'gcov']) {
+        try { await promisify(execFile)(executable, ['--version'], { windowsHide: true, timeout: 5_000 }); }
+        catch { throw new Error('C/C++ verification tool is unavailable: ' + executable + '. Install CMake 3.21+, GCC/G++ and matching gcov on the extension platform.'); }
+      }
+      const testRoot = (retainedDirectory ?? '.translation-verifier-tests/native') + '/tests';
+      await testDirectory(root, testRoot, 'cmake', true);
+      return { framework: 'cmake', testRoots: [testRoot], targetTest: { executable: process.execPath, args: [] } };
+    }
     default:
       throw new Error(
         `Unsupported target language for test environment resolution: ${input.targetLanguage}`,
@@ -100,7 +115,7 @@ export async function resolveTestEnvironment(
   }
 }
 
-async function resolveJavaEnvironment(root: string): Promise<TestEnvironment> {
+async function resolveJavaEnvironment(root: string, retainedDirectory?: string): Promise<TestEnvironment> {
   const pom = join(root, "pom.xml");
   const gradle = join(root, "build.gradle");
   const gradleKotlin = join(root, "build.gradle.kts");
@@ -131,10 +146,10 @@ async function resolveJavaEnvironment(root: string): Promise<TestEnvironment> {
     // without adding test dependencies to the production project.
     const compiledOutput = await mavenCompiledOutput(root, config);
     if (compiledOutput) {
-      const harness = await createMavenHarness(root, config, compiledOutput);
+      const harness = await createMavenHarness(root, config, compiledOutput, retainedDirectory);
       return {
         framework: "maven",
-        testRoots: await agentTestRoots(root, [harness.testsRelative], "maven", true),
+        testRoots: retainedDirectory ? [harness.testsRelative] : await agentTestRoots(root, [harness.testsRelative], "maven", true),
         targetTest: harness.targetTest,
       };
     }
@@ -160,7 +175,7 @@ async function mavenCompiledOutput(root: string, pom: string): Promise<{ jar?: s
   return { ...(jarName ? { jar: join(target, jarName) } : {}), ...(classes ? { classes: join(target, "classes") } : {}) };
 }
 
-async function createMavenHarness(root: string, productionPom: string, compiled: { jar?: string; classes?: string }): Promise<{
+async function createMavenHarness(root: string, productionPom: string, compiled: { jar?: string; classes?: string }, retainedDirectory?: string): Promise<{
   testsRelative: string;
   targetTest: TargetTest;
 }> {
@@ -168,13 +183,14 @@ async function createMavenHarness(root: string, productionPom: string, compiled:
   const version = (productionPom.match(/<version>\s*([^<]+)\s*<\/version>/i)?.[1] ?? "0.0.0").trim();
   const release = (productionPom.match(/<maven\.compiler\.release>\s*([^<]+)\s*<\/maven\.compiler\.release>/i)?.[1] ??
     productionPom.match(/<release>\s*([^<]+)\s*<\/release>/i)?.[1] ?? "21").trim();
-  const harnessRelative = ".translation-verifier-tests/maven";
+  const harnessRelative = retainedDirectory ?? ".translation-verifier-tests/maven";
   const harnessRoot = join(root, harnessRelative);
-  const testsRelative = `${harnessRelative}/src/test/java`;
+  const testsRelative = retainedDirectory ? `${harnessRelative}/tests` : `${harnessRelative}/src/test/java`;
   const pomRelative = `${harnessRelative}/pom.xml`;
-  const productionJar = compiled.jar?.replaceAll("\\", "/");
-  const productionClasses = (compiled.classes ?? join(root, "target", "classes")).replaceAll("\\", "/");
-  const productionSources = join(root, "src", "main", "java").replaceAll("\\", "/");
+  const fromHarness = (file: string) => retainedDirectory ? `\${project.basedir}/${relative(harnessRoot, file).replaceAll(sep, "/")}` : file.replaceAll("\\", "/");
+  const productionJar = compiled.jar ? fromHarness(compiled.jar) : undefined;
+  const productionClasses = fromHarness(compiled.classes ?? join(root, "target", "classes"));
+  const productionSources = fromHarness(join(root, "src", "main", "java"));
   await testDirectory(root, testsRelative, "maven", true);
   await writeHarnessConfig(join(harnessRoot, "pom.xml"), `<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -191,7 +207,7 @@ async function createMavenHarness(root: string, productionPom: string, compiled:
   <build>
     <!-- JaCoCo report reads the Maven project's outputDirectory, not classDirectories. -->
     <outputDirectory>\${production.classes}</outputDirectory>
-    <testSourceDirectory>\${project.basedir}/src/test/java</testSourceDirectory>
+    <testSourceDirectory>\${project.basedir}/${retainedDirectory ? 'tests' : 'src/test/java'}</testSourceDirectory>
     <plugins>
       <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.0</version><configuration><useModulePath>false</useModulePath></configuration></plugin>
       <plugin><groupId>org.jacoco</groupId><artifactId>jacoco-maven-plugin</artifactId><version>0.8.13</version></plugin>
@@ -209,14 +225,14 @@ async function createMavenHarness(root: string, productionPom: string, compiled:
   };
 }
 
-async function resolveDotnetEnvironment(root: string): Promise<TestEnvironment> {
+async function resolveDotnetEnvironment(root: string, retainedDirectory?: string): Promise<TestEnvironment> {
   const entries = await readdir(root, { recursive: true });
   const projects: string[] = [];
   for (const name of entries) {
     const path = name.replaceAll("\\", "/");
     // Host harnesses are resolved explicitly below so resumed runs keep the
     // same project and test root without treating them as user test projects.
-    if (!path.endsWith(".csproj") || path.split("/").some(part => ["obj", "bin", ".git", ".translation-verifier-tests"].includes(part))) continue;
+    if (!path.endsWith(".csproj") || path.split("/").some(part => ["obj", "bin", ".git", ".translation-verifier-tests", ".recast-tests"].includes(part))) continue;
     const text = await readText(join(root, path));
     if (/<IsTestProject>\s*true\s*<\/IsTestProject>/i.test(text) || /Include=["']Microsoft\.NET\.Test\.Sdk["']/i.test(text)) projects.push(path);
   }
@@ -232,20 +248,20 @@ async function resolveDotnetEnvironment(root: string): Promise<TestEnvironment> 
   // no standard test project, without adding test dependencies to production.
   const productionProjects = entries
     .map((name) => name.replaceAll("\\", "/"))
-    .filter((name) => name.endsWith(".csproj") && !name.split("/").some((part) => ["obj", "bin", ".git", ".translation-verifier-tests"].includes(part)));
+    .filter((name) => name.endsWith(".csproj") && !name.split("/").some((part) => ["obj", "bin", ".git", ".translation-verifier-tests", ".recast-tests"].includes(part)));
   if (productionProjects.length !== 1) throw new Error("C# target project must contain one production project when no test project is present.");
   const productionProject = productionProjects[0]!;
   const productionAbsolute = join(root, productionProject);
   const productionText = await readText(productionAbsolute);
   const targetFramework = productionText.match(/<TargetFramework(?:s)?[^>]*>\s*([^<]+)\s*<\/TargetFramework(?:s)?>/i)?.[1]?.trim() ?? "net8.0";
-  const harnessRelative = ".translation-verifier-tests/dotnet";
+  const harnessRelative = retainedDirectory ?? ".translation-verifier-tests/dotnet";
   const harnessRoot = join(root, harnessRelative);
   // Keep the harness: dotnet's default TestResults directory lives beside
   // this project, and generated tests must remain available for inspection.
   const testsRelative = `${harnessRelative}/tests`;
   const projectRelative = `${harnessRelative}/AgentTests.csproj`;
   const reference = relative(harnessRoot, productionAbsolute).replaceAll(sep, "/");
-  const testRoots = await agentTestRoots(root, [testsRelative], "dotnet", true);
+  const testRoots = retainedDirectory ? [await testDirectory(root, testsRelative, "dotnet", true)] : await agentTestRoots(root, [testsRelative], "dotnet", true);
   await writeHarnessConfig(join(harnessRoot, "AgentTests.csproj"), `<Project Sdk="Microsoft.NET.Sdk">\n` +
     `  <PropertyGroup>\n` +
     `    <TargetFramework>${targetFramework}</TargetFramework>\n` +
@@ -498,12 +514,13 @@ function asStringRecord(value: unknown): Record<string, string> {
   );
 }
 
-function normalizeLanguage(value: string): "java" | "javascript" | "python" | "csharp" | "unsupported" {
+function normalizeLanguage(value: string): "java" | "javascript" | "python" | "csharp" | "native" | "unsupported" {
   const language = value.trim().toLowerCase();
   if (["c#", "csharp", "cs", "c-sharp"].includes(language)) return "csharp";
   if (language === "java") return "java";
   if (["javascript", "typescript", "node", "node.js", "js", "ts"].includes(language)) return "javascript";
   if (["python", "python3", "py"].includes(language)) return "python";
+  if (["c", "c++", "cpp", "cxx", "cc"].includes(language)) return "native";
   return "unsupported";
 }
 

@@ -145,7 +145,7 @@ async function discoverTargetReadOnlyFiles(root: string, ownedFiles: readonly st
   ]);
   const ignoredDirectories = new Set([
     '.git', '.forexplore', '.forexpore', '.translation-verifier-tests',
-    '.translation-verifier-coverage', '.agent-tmp', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out',
+    '.translation-verifier-coverage', '.recast-build', '.recast-tests', '.agent-tmp', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out',
     'target', 'coverage', 'test', 'tests', '__tests__',
   ]);
   const owned = new Set(ownedFiles.map(normalizePath).filter(Boolean));
@@ -160,6 +160,7 @@ async function discoverTargetReadOnlyFiles(root: string, ownedFiles: readonly st
       if (found.size >= maxFiles) return;
       if (entry.name === '.' || entry.name === '..' || ignoredDirectories.has(entry.name.toLowerCase())) continue;
       const relative = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      if (/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(relative)) continue;
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         await visit(absolute, relative);

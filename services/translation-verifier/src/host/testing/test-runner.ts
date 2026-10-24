@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { prepareNativeTests, parseGcovReports } from "../native-test.js";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, readdir, readFile, writeFile, rm, stat, lstat } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, writeFile, rm, stat, lstat } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
@@ -20,6 +21,7 @@ type CoverageRun = {
   previousReports: Map<string, string>;
   scriptDirectory?: string;
   args: string[];
+  env?: Record<string, string>;
   pythonFunctions?: Array<{ path: string; functions: PythonFunction[] }>;
 };
 type RunnerContext = Omit<ToolContext, "runner" | "state">;
@@ -84,6 +86,7 @@ async function isTestFile(runner: RunnerContext["runtime"]["testRunner"], path: 
     return /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)
       || (path.split("/").includes("__tests__") && /\.[cm]?[jt]sx?$/.test(name));
   }
+  if (runner === "cmake") return /\.(?:c|cc|cpp|cxx)$/i.test(name);
   if (runner === "pytest") return /^(?:test_.*|.*_test)\.py$/.test(name);
   if (runner === "maven" || runner === "gradle") {
     if (!/\.(?:java|kt)$/i.test(name)) return false;
@@ -213,7 +216,7 @@ async function runTestsForSubjects(
     const signal = context.budget?.signal;
     const command = targetProcessCommand(executable, args);
     const processResult = await new Promise<{ exitCode: number | null; signal?: string; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
-      const child = spawn(command.executable, command.args, { cwd: context.runtime.targetProjectPath, shell: false, windowsHide: true, windowsVerbatimArguments: command.windowsVerbatimArguments, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(command.executable, command.args, { cwd: context.runtime.targetProjectPath, shell: false, windowsHide: true, windowsVerbatimArguments: command.windowsVerbatimArguments, detached: context.runtime.testRunner === "cmake" && process.platform !== "win32", env: { ...process.env, ...coverageRun.env }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "", timedOut = false, settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -222,9 +225,13 @@ async function runTestsForSubjects(
         return next.length <= MAX_TEST_OUTPUT_CHARS ? next : next.slice(0, MAX_TEST_OUTPUT_CHARS);
       };
       const terminate = () => {
-        if (command.windowsVerbatimArguments && child.pid !== undefined) {
+        if ((command.windowsVerbatimArguments || context.runtime.testRunner === "cmake") && process.platform === "win32" && child.pid !== undefined) {
           const killer = spawn(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"), ["/pid", String(child.pid), "/t", "/f"], { shell: false, stdio: "ignore", windowsHide: true });
           killer.once("error", () => child.kill("SIGKILL"));
+          return;
+        }
+        if (context.runtime.testRunner === "cmake" && child.pid && process.platform !== "win32") {
+          try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
           return;
         }
         child.kill("SIGTERM");
@@ -328,6 +335,7 @@ async function reportPaths(runner: RunnerContext["runtime"]["testRunner"], root:
   }
   if (runner === "jest" || runner === "vitest") return ["tests.json", "coverage/coverage-final.json"];
   if (runner === "pytest") return ["tests.xml", "coverage.json"];
+  if (runner === "cmake") return ["tests.xml", "gcov.json"];
   const entries = await directoryEntries(root);
   const paths = entries.filter(name => /\.trx$/i.test(name));
   for (const directory of entries.filter(name => /^[0-9a-f-]{36}$/i.test(name))) {
@@ -343,11 +351,12 @@ async function prepareCoverage(context: RunnerContext, testPaths: readonly strin
   const project = runner === "dotnet" ? dotnetProject(context)
     : runner === "maven" && pomFlag >= 0 ? context.runtime.targetTest.args[pomFlag + 1]?.replaceAll("\\", "/") : undefined;
   const projectDirectory = project ? dirname(project).replaceAll("\\", "/") : ".";
-  const reportRoot = runner === "dotnet" ? resolveSafePath(root, `${projectDirectory}/TestResults`)
+  let reportRoot = runner === "dotnet" ? resolveSafePath(root, `${projectDirectory}/TestResults`)
     : runner === "maven" && projectDirectory !== "." ? resolveSafePath(root, projectDirectory) : root;
-  const scriptDirectory = runner === "gradle" ? resolveSafePath(root, `.translation-verifier-scripts/${randomUUID()}`) : undefined;
+  const scriptDirectory = runner === "gradle" || runner === "cmake" ? resolveSafePath(root, `.translation-verifier-scripts/${randomUUID()}`) : undefined;
   if (scriptDirectory) await mkdir(scriptDirectory, { recursive: true });
   try {
+    if (runner === "cmake") reportRoot = scriptDirectory!;
     const run = await configureRunnerCoverage(context, testPaths, subjects, { reportRoot, previousReports: new Map(), scriptDirectory, args: [] });
     for (const path of await reportPaths(runner, reportRoot)) {
       const identity = await reportIdentity(resolveSafePath(reportRoot, path));
@@ -370,6 +379,10 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
   if (context.runtime.targetTest.executable === process.execPath && context.runtime.targetTest.args[0] === "-e") {
     return run;
   }
+  if (runner === "cmake") {
+    const args = await prepareNativeTests(context.runtime, testPaths, run.scriptDirectory!);
+    return { ...run, args, env: { ELECTRON_RUN_AS_NODE: '1' } };
+  }
   if (runner === "maven") {
     if (!/\.(?:java|kt)$/i.test(testPath)) throw new Error(`Java test selector requires a .java or .kt file: ${testPath}`);
     const classNames = testPaths.map((path) => path.slice(path.lastIndexOf("/") + 1).replace(/\.(?:java|kt)$/i, ""));
@@ -388,6 +401,7 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
         ["-c", PYTHON_FUNCTIONS, resolveSafePath(root, subject.path)],
         {
           cwd: root,
+          windowsHide: true,
           timeout: Math.min(10_000, context.budget?.remainingMs() ?? 10_000),
           maxBuffer: 1_000_000,
           ...(context.budget ? { signal: context.budget.signal } : {}),
@@ -482,11 +496,29 @@ async function collectCoverage(context: RunnerContext, run: CoverageRun, subject
   };
   try {
     const currentPaths = await freshPaths();
-    collectedReportPaths.push(...currentPaths.map(path =>
-      relative(canonicalRoot, resolveSafePath(run.reportRoot, path)).replaceAll("\\", "/"),
-    ));
+    for (const path of currentPaths) {
+      if (runner === "cmake") {
+        // Keep diagnostics readable after the temporary native build is removed.
+        // Reuse one report location per dedicated suite, as other frameworks do.
+        const suite = createHash("sha256").update(JSON.stringify(context.runtime.testRoots)).digest("hex").slice(0, 16);
+        const destination = `.translation-verifier-reports/native-${suite}/${path}`;
+        const absolute = resolveSafePath(root, destination);
+        await mkdir(dirname(absolute), { recursive: true });
+        await copyFile(resolveSafePath(run.reportRoot, path), absolute);
+        collectedReportPaths.push(destination);
+      } else {
+        collectedReportPaths.push(relative(canonicalRoot, resolveSafePath(run.reportRoot, path)).replaceAll("\\", "/"));
+      }
+    }
     let targetFunctions: TargetCoverageResult[] = [];
-    if (runner === "jest" || runner === "vitest") {
+    if (runner === "cmake") {
+      const testReport = await read("tests.xml");
+      tests = parseJUnit(testReport);
+      executionErrors += parseExecutionErrors("junit", testReport);
+      testCases.push(...parseJUnitTestCases(testReport));
+      const coverage = await read("gcov.json");
+      targetFunctions = await parseSubjects(subject => parseGcovReports(coverage, root, subject));
+    } else if (runner === "jest" || runner === "vitest") {
       const testReport = await read("tests.json");
       tests = parseNodeTests(testReport);
       executionErrors += parseExecutionErrors("node", testReport);

@@ -67,5 +67,10 @@ export async function runTargetTests(
     reportPaths: observation.reportPaths ?? [],
   };
   context.budget?.assertActive();
+  await context.testHistory?.observe({
+    ...result, testPaths, tests: result.tests ?? { executed: 0, passed: 0, failed: 0, skipped: 0 },
+    functions: [], failures: [],
+  });
+  await context.recordArtifacts?.();
   return result;
 }

@@ -183,6 +183,13 @@ export class WorkspaceTranslationRuntime {
     return structuredClone(run);
   }
 
+  /** Stop accepting runs only if no run is owned; a busy run stays untouched. */
+  async shutdownIfIdle(): Promise<boolean> {
+    if (this.active) return false;
+    await this.shutdown();
+    return true;
+  }
+
   async shutdown(): Promise<void> {
     this.closing = true;
     const active = this.active;

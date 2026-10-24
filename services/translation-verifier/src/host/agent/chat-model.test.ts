@@ -39,6 +39,35 @@ afterEach(() => {
 });
 
 describe("createTranslationVerifierChatModel", () => {
+  it("discards truncated tool calls through bindTools and retries the last valid transcript", async () => {
+    const truncated = structuredClone(completion) as any;
+    truncated.choices[0] = { index: 0, finish_reason: "length", message: { role: "assistant", content: "", tool_calls: [
+      { id: "discard-me", type: "function", function: { name: "write_target_test", arguments: '{"path":"tests/a.test.ts","content":"partial"}' } },
+    ] } };
+    const { calls, request } = recordingFetch([
+      new Response(JSON.stringify(truncated), { headers: { "Content-Type": "application/json" } }), okResponse(),
+    ]);
+    const onOutputLimitRetry = vi.fn();
+    const model = createTranslationVerifierChatModel({ apiKey: 'test', request, onOutputLimitRetry });
+    const configured = model.bindTools([{ type: 'function', function: { name: 'write_target_test', description: 'write', parameters: { type: 'object', properties: {} } } }]);
+    await expect(configured.invoke('continue from saved work')).resolves.toMatchObject({ content: 'ok' });
+    expect(calls).toHaveLength(2); expect(onOutputLimitRetry).toHaveBeenCalledWith(1, 3);
+    expect(JSON.stringify(calls[1]!.body)).toContain('None of its tool calls executed');
+    expect(JSON.stringify(calls[1]!.body)).not.toContain('discard-me');
+  });
+
+  it("bounds output recovery and keeps cancellation effective between retries", async () => {
+    const truncated = structuredClone(completion); truncated.choices[0]!.finish_reason = 'length';
+    const response = () => new Response(JSON.stringify(truncated), { headers: { 'Content-Type': 'application/json' } });
+    const recorded = recordingFetch([response, response, response, response, okResponse()]);
+    await expect(createTranslationVerifierChatModel({ apiKey: 'test', request: recorded.request }).invoke('test')).rejects.toThrow('3 small-step retries');
+    expect(recorded.calls).toHaveLength(4);
+    const controller = new AbortController(), cancelled = recordingFetch([response, okResponse()]);
+    const model = createTranslationVerifierChatModel({ apiKey: 'test', request: cancelled.request, onOutputLimitRetry: () => controller.abort(new Error('stop')) });
+    await expect(model.invoke('test', { signal: controller.signal })).rejects.toThrow();
+    expect(cancelled.calls).toHaveLength(1);
+  });
+
   it("maps the current verifier model configuration onto the framework chat model", async () => {
     const { calls, request } = recordingFetch([okResponse()]);
     const model = createTranslationVerifierChatModel({

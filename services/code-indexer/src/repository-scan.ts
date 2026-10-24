@@ -57,6 +57,11 @@ export interface RepositoryStructuralScanner {
 const ignoredDirectoryNames = new Set([
   '.git',
   '.forexplore',
+  '.recast-build',
+  '.recast-tests',
+  '.recast-tests-delivery',
+  '.translation-verifier-tests',
+  '.translation-verifier-coverage',
   '.gradle',
   '.idea',
   '.next',
@@ -74,6 +79,7 @@ const ignoredDirectoryNames = new Set([
 
 const projectManifestNames = new Set([
   'cmakelists.txt',
+  '.recast-native.json',
   'compile_commands.json',
   'oh-package.json5',
   'build-profile.json5',
@@ -102,7 +108,7 @@ function toRelativePath(repositoryRoot: string, absolutePath: string): string {
 
 function isProjectManifest(relativePath: string): boolean {
   const name = path.posix.basename(relativePath).toLowerCase();
-  return projectManifestNames.has(name) || /\.(?:csproj|sln)$/i.test(relativePath);
+  return projectManifestNames.has(name) || /\.(?:csproj|sln|cmake)$/i.test(relativePath);
 }
 
 function shouldReadFile(relativePath: string, registry: LanguageRegistry): boolean {
@@ -131,7 +137,7 @@ async function collectSourceFiles(
       if (entry.isSymbolicLink()) continue;
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!ignoredDirectoryNames.has(entry.name.toLowerCase())) await visit(absolutePath);
+        if (!ignoredDirectoryNames.has(entry.name.toLowerCase()) && !/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(toRelativePath(repositoryRoot, absolutePath))) await visit(absolutePath);
         continue;
       }
       if (!entry.isFile()) continue;
@@ -176,7 +182,7 @@ async function snapshotSourceFiles(request: RepositoryStructuralScanRequest, reg
       if (entry.isSymbolicLink()) continue;
       const absolutePath = path.join(parent, entry.name);
       if (entry.isDirectory()) {
-        if (!ignoredDirectoryNames.has(entry.name.toLowerCase())) await visit(absolutePath);
+        if (!ignoredDirectoryNames.has(entry.name.toLowerCase()) && !/(?:^|\/)recast\/[a-f0-9]{24}(?:\/|$)/.test(toRelativePath(request.repositoryRoot, absolutePath))) await visit(absolutePath);
         continue;
       }
       if (!entry.isFile()) continue;
