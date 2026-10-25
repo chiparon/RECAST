@@ -15,7 +15,7 @@ tsx scripts/reset-code-intelligence-index.ts --database forexplore_code_intellig
 
 旧检索表有 281,896 条符号文档、13,218 条源码文档和 9 条摘要；结构符号表还有未完成版本的重复事实。本次重置一并清除。一般性的历史版本保留上限及中断版本自动回收尚未实现；重置不应被当成长期自动清理策略。
 
-真实数据库验证脚本为 `scripts/verify-code-intelligence-reset.ts`，覆盖预览不删除、拒绝未知表、旧异步表重置、重复初始化和新增向量立即召回。
+历史真实数据库验证脚本已移入[归档分支](archive.md)。发布维护使用代码智能服务的回归测试，并在隔离数据库中验证重置操作。
 
 ## 本次执行结果
 

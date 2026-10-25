@@ -188,16 +188,13 @@ SEMANTIC_QUERY_PORT_URL=http://127.0.0.1:8790 npm run start --workspace @forexpl
 npm run dev:extension
 ```
 
-如果需要直接打开已经写入 SeekDB 的企业资产升级语料，可以使用预置入口：
+如果需要复用已完成索引及建模的企业工作区，可以显式指定预置入口：
 
 ```bash
-npm run dev:extension:preloaded
+npm run dev:extension -- --preloaded --workspace /path/to/enterprise.code-workspace --database recast
 ```
 
-它会读取 `experiments/enterprise-asset-upgrade/AssetUpgradeGateway.code-workspace`，将其中的一个目标工程和七个参考工程绑定到当前数据库
-`forexplore_asset_upgrade_20261004`，只加载已有 revision 和模块产物，不重新扫描或建模。预置入口使用被忽略的独立 VS Code 数据目录，因此不会改动普通
-`npm run dev:extension` 的工作区状态；需要换数据库或工作区时分别使用 `--database <name>` 和 `--workspace <file.code-workspace>`。默认 DeepSeek
-模型可以直接使用启动 VS Code 进程继承的 `DEEPSEEK_API_KEY`；其他服务商在预置窗口的设置中保存一次 Key 即可。
+也可设置 `FOREXPLORE_PRELOADED_WORKSPACE`。工作区中的目标和参考仓库应已完成索引及建模；该入口复用指定数据库，不随产品附带实验仓库。普通 `npm run dev:extension` 使用工作台导入企业自己的代码。
 
 插件默认使用以下 VS Code 配置：
 
@@ -266,7 +263,7 @@ npm run test:integration --workspace forexplore-vscode
 
 保存设置时只扫描新添加的仓库，已有仓库通过“刷新此仓库”检查变化。普通刷新在内容未变化时复用原 revision 和 Summary。“重新解析模块”按当前策略重新建模；小项目可使用已配置 Agent，大项目使用离线结构分组。“重试解析 / 同步”在仅投影失败时不重复建模。历史版本展示保持只读。本地 .forexplore/module-summary.json 不参与当前模块树构建。
 
-SeekDB 按行数和数据大小分批写入，项目 Summary 只替换自身的模块检索文档。宿主控制台中的 `[forexplore:performance]` 日志记录源码扫描、结构解析、数据库写入、检索投影和 Agent 分析耗时，以及文件、符号、依赖数量和 INSERT 次数。数据库写入验收可在仓库根目录运行 `npx tsx scripts/verify-indexing-performance.ts`，它使用本机 SeekDB 连接配置，创建独立临时数据库，验证索引一致性、Summary 更新范围及逐条/批量写入耗时，结束后删除测试数据库。
+SeekDB 按行数和数据大小分批写入，项目 Summary 只替换自身的模块检索文档。宿主控制台中的 `[forexplore:performance]` 日志记录源码扫描、结构解析、数据库写入、检索投影和 Agent 分析耗时，以及文件、符号、依赖数量和 INSERT 次数。历史性能评测及数据位于[完整归档分支](../../docs/archive.md)；发布回归使用 `npm test`。
 
 扩展宿主启动前配置 SeekDB：
 

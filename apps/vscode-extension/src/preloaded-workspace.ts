@@ -33,8 +33,6 @@ function pathKeys(value: string): Set<string> {
   for (const candidate of [...keys]) {
     const checkout = candidate.indexOf('/weichai/');
     if (checkout >= 0) keys.add(candidate.slice(checkout + '/weichai/'.length));
-    const dataset = candidate.indexOf('/experiments/enterprise-asset-upgrade/');
-    if (dataset >= 0) keys.add(candidate.slice(dataset + '/experiments/enterprise-asset-upgrade/'.length));
   }
   return keys;
 }

@@ -294,29 +294,8 @@ function workspaceConfiguredRoots(workspacePath) {
 }
 
 function defaultPreloadedWorkspace() {
-  const candidates = [];
-  if (process.env.FOREXPLORE_PRELOADED_WORKSPACE?.trim()) {
-    candidates.push(process.env.FOREXPLORE_PRELOADED_WORKSPACE.trim());
-  }
-  candidates.push(path.join(repoRoot, 'experiments', 'enterprise-asset-upgrade', 'AssetUpgradeGateway.code-workspace'));
-  // The source checkout and the materialized enterprise corpus can live in
-  // different platform workspaces. Prefer the workspace whose configured
-  // folders actually exist, while keeping the normal checkout as the fallback.
-  try {
-    const platforms = JSON.parse(readFileSync(path.join(repoRoot, '.recast-platforms.json'), 'utf8'));
-    if (process.platform !== 'win32' && typeof platforms.windowsMountRoot === 'string') {
-      candidates.push(path.join(platforms.windowsMountRoot, 'experiments', 'enterprise-asset-upgrade', 'AssetUpgradeGateway.code-workspace'));
-    }
-  } catch {
-    // The mapping is optional outside the two platform workspaces.
-  }
-  return candidates
-    .map((candidate) => path.resolve(repoRoot, candidate))
-    .filter((candidate, index, all) => all.indexOf(candidate) === index && existsSync(candidate))
-    .sort((left, right) => {
-      const score = (candidate) => workspaceConfiguredRoots(candidate).filter((root) => existsSync(root)).length;
-      return score(right) - score(left);
-    })[0];
+  const configured = process.env.FOREXPLORE_PRELOADED_WORKSPACE?.trim();
+  return configured && existsSync(path.resolve(repoRoot, configured)) ? path.resolve(repoRoot, configured) : undefined;
 }
 
 

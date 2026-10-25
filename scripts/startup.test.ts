@@ -234,3 +234,16 @@ it('reports readiness even while the Remote WSL launcher stays attached', async 
   await import('./run-vscode-extension.mjs');
   await vi.waitFor(() => expect(console.log).toHaveBeenCalledWith(expect.stringContaining('RECAST services ready:')));
 });
+
+it('requires an explicit preloaded workspace instead of opening an archived experiment', async () => {
+  const previousExitCode = process.exitCode;
+  vi.stubEnv('FOREXPLORE_PRELOADED_WORKSPACE', undefined);
+  process.argv.push('--preloaded');
+  try {
+    await import('./run-vscode-extension.mjs');
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledWith(expect.stringContaining('请使用 --workspace <path>')));
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});

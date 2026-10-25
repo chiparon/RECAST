@@ -1,5 +1,0 @@
-[project]
-name = "installation-demo-data-loading"
-version = "0.0.0"
-requires-python = ">=3.11"
-description = "Cross-language contract skeleton"

@@ -12,10 +12,6 @@
     "workspace:sync": "node scripts/sync-platform-worktrees.mjs",
     "prebuild:extension": "node scripts/check-platform-workspace.mjs",
     "pretest": "node scripts/check-platform-workspace.mjs",
-    "dev:extension:enterprise": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-enterprise-extension.ps1",
-    "dataset:enterprise": "python experiments/enterprise-history/build.py --git-history",
-    "test:enterprise": "python -m unittest discover -s experiments/enterprise-history -v",
-    "evaluate:enterprise": "python experiments/enterprise-history/benchmark.py",
     "dev": "npm run dev:extension",
     "services:up": "node scripts/start-recast-services.mjs",
     "check:hygiene": "node scripts/check-repo-hygiene.mjs",
@@ -43,8 +39,10 @@
     "build:code-intelligence": "npm run build --workspace @forexplore/code-intelligence-service",
     "build:semantic-index-mcp": "npm run build --workspace @forexplore/semantic-index-mcp-server",
     "test:code-intelligence": "npm run test --workspace @forexplore/code-intelligence-service",
-    "test:project-analysis:live": "tsx scripts/verify-project-analysis.ts",
     "test:semantic-index-mcp": "npm run test --workspace @forexplore/semantic-index-mcp-server",
-    "test": "npm run test --workspace @forexplore/workflow-core && npm run test --workspace @forexplore/code-indexer && npm run test --workspace @forexplore/adaptation-http-adapter && npm run test --workspace @forexplore/code-intelligence-service && npm run test --workspace @forexplore/adaptation-service && npm run test --workspace @forexplore/adaptation-mcp-server && npm run test --workspace @forexplore/semantic-index-mcp-server && npm run test --workspace forexplore-vscode"
+    "test": "npm run test --workspace @forexplore/workflow-core -- --maxWorkers 2 && npm run test --workspace @forexplore/code-indexer -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-http-adapter -- --maxWorkers 2 && npm run test --workspace @forexplore/code-intelligence-service -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-service -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-mcp-server -- --maxWorkers 2 && npm run test --workspace @forexplore/semantic-index-mcp-server -- --maxWorkers 2 && npm run test --workspace forexplore-vscode -- --maxWorkers 2",
+    "test:verifier": "vitest run services/translation-verifier/src --maxWorkers 2",
+    "test:scripts": "vitest run scripts --exclude '**/*.test.mjs' --maxWorkers 2 && node --test scripts/sync-platform-worktrees.test.mjs",
+    "test:verifier:e2e": "vitest run services/translation-verifier/e2e --maxWorkers 2"
   }
 }

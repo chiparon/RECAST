@@ -249,5 +249,9 @@ npm test
 - `services/adaptation-service`：分析、实现、编译、受控写回。
 - `services/translation-verifier`：行为验证和失败证据复核。
 - `services/adaptation-mcp-server`：可选 MCP 集成。
-- `fixtures`、`experiments`：参考工程、骨架、实验材料。
-- `tests`、`scripts`、`docs`：测试、开发工具、设计文档。
+- `fixtures`：回归测试使用的参考工程和骨架源码。
+- `tests`、`scripts`、`docs`：回归测试、运行维护工具、企业使用与接口文档。
+
+## 发布分支与完整归档
+
+`main` 保留产品运行、构建、企业使用说明和必要回归测试。实验数据、第三方源码快照、研究报告、答辩材料及历史日志已完整保存在 [`codex/archive-full-20261025`](https://github.com/chiparon/weichai/tree/codex/archive-full-20261025)。归档对应分离前的版本，后续产品修复以 main 为准。访问与复现实验的方法见[归档说明](docs/archive.md)。

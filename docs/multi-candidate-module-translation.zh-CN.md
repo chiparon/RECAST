@@ -31,7 +31,7 @@ history-view/
 
 ```bash
 npm exec -- tsx scripts/run-target-module-pipeline.mts \
-  --target experiments/enterprise-asset-upgrade/target-project \
+  --target /path/to/target-project \
   --module module-policies --reuse-plan --top-k 4 \
   --candidate-ranks 1,3 \
   --retrieval-from <已经审阅的Top4报告.json> \

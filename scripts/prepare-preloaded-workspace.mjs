@@ -12,8 +12,6 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import mysql from 'mysql2/promise';
 
-const WORKSPACE_MARKER = '/experiments/enterprise-asset-upgrade/';
-
 function normalizeSlashes(value) {
   return String(value).replaceAll('\\', '/').replace(/\/+/g, '/');
 }
@@ -28,8 +26,6 @@ function pathKeys(value) {
   const mounted = /^\/mnt\/([a-z])\/(.*)$/i.exec(raw);
   if (mounted) keys.add(`${mounted[1].toLowerCase()}:/${mounted[2]}`.toLowerCase());
   for (const candidate of [...keys]) {
-    const marker = candidate.toLowerCase().indexOf(WORKSPACE_MARKER);
-    if (marker >= 0) keys.add(candidate.slice(marker + WORKSPACE_MARKER.length));
     const checkout = candidate.toLowerCase().indexOf('/weichai/');
     if (checkout >= 0) keys.add(candidate.slice(checkout + '/weichai/'.length));
   }

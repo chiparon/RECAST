@@ -1,4 +1,0 @@
-# JavaDslModelWriterTest compares generator output (LF) against .txt fixtures read as
-# raw UTF-8 bytes. Pin fixtures to LF so a Windows checkout (core.autocrlf=true) does
-# not convert them to CRLF and break the equality assertions.
-*.txt text eol=lf

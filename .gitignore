@@ -105,3 +105,10 @@ experiments/enterprise-asset-upgrade/results/*
 # Per-machine Windows/WSL workspace mapping and source sync baseline
 .recast-platforms.json
 .recast-platform-sync.json
+
+# Full experimental materials live on codex/archive-full-20261025.
+/experiments/
+/research/
+/fixtures/code-corpus/**/bin/
+.translation-verifier-scripts/
+.translation-verifier-reports/

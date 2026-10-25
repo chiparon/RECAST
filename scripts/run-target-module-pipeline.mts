@@ -12,7 +12,7 @@
  *   host-created history-view -> CodexWorkspaceTranslationRuntime ->
  *   host compile/verification gates
  *
- *   npx tsx scripts/run-target-module-pipeline.mts --target experiments/enterprise-asset-upgrade/target-project --dry-run
+ *   npx tsx scripts/run-target-module-pipeline.mts --target /path/to/target-project --dry-run
  *   npx tsx scripts/run-target-module-pipeline.mts --target <path> --top-k 1 --out results/module-pipeline.json
  *
  * Options
@@ -139,7 +139,6 @@ if (flag('integration-feedback')) throw new Error('--integration-feedback is not
 const outputPath = resolve(argument('out', 'results/target-module-pipeline.json')!);
 const adaptationApiUrl = argument('adaptation', process.env.ADAPTATION_API_URL ?? 'http://127.0.0.1:8788')!;
 const semanticPort = Number(argument('semantic-port', process.env.FOREXPLORE_SEMANTIC_QUERY_PORT ?? '8790'));
-const assetRoot = resolve('experiments/enterprise-asset-upgrade/source-repositories');
 
 function classifyVerifierDisposition(result: FunctionGroupVerificationResult): ModuleReport['verificationDisposition'] {
   if (result.status === 'success') return 'verified';
@@ -628,10 +627,9 @@ const historyRepositories = registered
   .filter((row) => row.role === 'history' && row.activeRevision && existsSync(row.localPath))
   .map((row) => ({ localPath: row.localPath, displayName: row.displayName, repositoryId: row.repositoryId }));
 const assetNames = argument('repos')?.split(',').map((value) => value.trim()).filter(Boolean);
-const assets = historyRepositories.filter((row) => row.localPath.startsWith(assetRoot) &&
-  (!assetNames || assetNames.includes(row.localPath.replaceAll('\\', '/').split('/').at(-1) ?? '')));
+const assets = historyRepositories.filter((row) => !assetNames || assetNames.includes(row.localPath.replaceAll('\\', '/').split('/').at(-1) ?? ''));
 if (assetNames) {
-  const availableAssets = historyRepositories.filter((row) => row.localPath.startsWith(assetRoot))
+  const availableAssets = historyRepositories
     .map((row) => row.localPath.replaceAll('\\', '/').split('/').at(-1));
   const unknown = assetNames.filter((name) => !availableAssets.includes(name));
   if (unknown.length) throw new Error(`--repos names repositories without an active revision: ${unknown.join(', ')}. Indexed assets: ${availableAssets.join(', ')}`);
