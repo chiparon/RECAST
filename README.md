@@ -1,11 +1,5 @@
 # RECAST
 
-RECAST（代码库名 ForeXplore）在 VS Code 中提供需求驱动的代码复用与项目生成：导入目标骨架，配置历史参考仓库，输入需求，执行建模、检索、实现、编译、行为验证和项目集成。当前项目流水线使用全自动模式；进度、失败原因和交付结果均在工作台展示。
-
-模块 Verifier 生成的测试会随输出项目一起交付，并在最终目录重新运行；企业安装项目依赖后可用 `node .recast-tests/run.cjs` 重放。目录结构、工具链要求和断点恢复规则见 [生成测试交付说明](docs/retained-tests.zh-CN.md)。
-
-企业操作者可阅读[图文使用说明书](docs/user-guide/README.zh-CN.md)，或下载[Word 版本](docs/user-guide/RECAST企业使用说明书.docx)。
-
 ## 从零配置：先选运行平台
 
 支持 Windows 原生和 WSL2。**两种方式的源码目录、`node_modules`、扩展 `dist` 和推理运行时分别维护**。Windows 使用 Windows Node，WSL 使用 Linux Node；不要在 `/mnt/c`、`/mnt/e` 等 Windows checkout 中执行 Linux 的 `npm ci`。
