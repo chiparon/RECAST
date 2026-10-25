@@ -42,7 +42,7 @@
     "test:semantic-index-mcp": "npm run test --workspace @forexplore/semantic-index-mcp-server",
     "test": "npm run test --workspace @forexplore/workflow-core -- --maxWorkers 2 && npm run test --workspace @forexplore/code-indexer -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-http-adapter -- --maxWorkers 2 && npm run test --workspace @forexplore/code-intelligence-service -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-service -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-mcp-server -- --maxWorkers 2 && npm run test --workspace @forexplore/semantic-index-mcp-server -- --maxWorkers 2 && npm run test --workspace forexplore-vscode -- --maxWorkers 2",
     "test:verifier": "vitest run services/translation-verifier/src --maxWorkers 2",
-    "test:scripts": "vitest run scripts --exclude '**/*.test.mjs' --maxWorkers 2 && node --test scripts/sync-platform-worktrees.test.mjs",
+    "test:scripts": "vitest run --dir scripts --exclude '**/*.test.mjs' --maxWorkers 2 && node --test scripts/sync-platform-worktrees.test.mjs",
     "test:verifier:e2e": "vitest run services/translation-verifier/e2e --maxWorkers 2"
   }
 }
