@@ -71,6 +71,8 @@ export type LangChainAgentHostOptions = {
   traceLogger?: AgentTraceLogger;
   retainTests?: TestRetention;
   reviewTestChanges?: TestChangeReviewer;
+  /** Model context window for test-correction batching; overrides profile/environment. */
+  testChangeReviewContextTokens?: number;
 };
 
 const DEFAULT_MAX_FEEDBACK_ROUNDS = 4;
@@ -169,7 +171,8 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
         : options.retainTests ? { testEvidence: { runs: [], failures: [], revisions: [] } } : {}) },
       ...acceptance.bindRunner({ budget, runtime }),
     };
-    const reviewer = options.reviewTestChanges ?? modelTestChangeReviewer(options.model, budget.signal);
+    const reviewer = options.reviewTestChanges ?? modelTestChangeReviewer(options.model, budget.signal,
+      { contextTokens: options.testChangeReviewContextTokens });
     context.testHistory = createTestHistory(context, async input => {
       emitAgentWorkLog(options.workLogger, workEvent(runId, "test-change-review.started"));
       const decision = await reviewer(input);

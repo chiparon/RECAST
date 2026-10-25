@@ -70,3 +70,43 @@ it('carries failed assertions through an interrupted run and checks them after r
   const result = await createFunctionGroupVerifier(createLangChainFunctionGroupAgentHost({ model: new ScriptedChatModel([final]), resolveToolContext: f.resolveToolContext, reviewTestChanges: review }))({ ...f.input, testEvidence: error.testEvidence }, 'requirement-function-group', 'verify');
   expect(result.status).toBe('failure'); expect(review).toHaveBeenCalledOnce();
 });
+
+it('reaches correction review for evidence above the former local size limit', async () => {
+  const f = await fixture(`class BehaviorTest { /* FAILING ${'x'.repeat(170_000)} */ }`);
+  const review = vi.fn(async (_input: TestChangeReview) => ({ approved: true, note: 'The fixture correction preserves rejection.' }));
+  const model = new ScriptedChatModel([
+    () => call('run_function_group_tests'),
+    () => call('write_target_test', { path: TEST_PATH, content: 'class BehaviorTest { /* corrected boundary */ }' }),
+    final,
+  ]);
+  const result = await createFunctionGroupVerifier(createLangChainFunctionGroupAgentHost({ model, resolveToolContext: f.resolveToolContext, reviewTestChanges: review }))(f.input, 'requirement-function-group', 'verify');
+  expect(result.status).toBe('success');
+  expect(review).toHaveBeenCalledOnce();
+  expect(JSON.stringify(review.mock.calls[0]![0]).length).toBeGreaterThan(160_000);
+  expect(result.testEvidence!.failures.every(failure => failure.status === 'resolved')).toBe(true);
+});
+
+it('uses the default model reviewer to deduplicate a large batch through the real Host', async () => {
+  const f = await fixture(`class BehaviorTest { /* FAILING ${'x'.repeat(28_000)} */ }`);
+  const runner = await readFile(join(f.root, 'fake-runner.cjs'), 'utf8');
+  const cases = Array.from({ length: 12 }, (_, i) => `<testcase classname="BehaviorTest" name="case${i}"><failure message="expected rejection"/></testcase>`).join('');
+  await writeFile(join(f.root, 'fake-runner.cjs'), runner.replace('process.exitCode = 1;',
+    `fs.writeFileSync(surefire, ${JSON.stringify(`<testsuite tests="12" failures="12" errors="0" skipped="0">${cases}</testsuite>`)}); process.exitCode = 1;`));
+  const model = new ScriptedChatModel([
+    () => call('run_function_group_tests'),
+    () => call('write_target_test', { path: TEST_PATH, content: 'class BehaviorTest { /* corrected boundary */ }' }), final,
+    messages => {
+      const payload = JSON.parse(String(messages.at(-1)!.content));
+      expect(payload.failures).toHaveLength(12);
+      expect(payload.files).toHaveLength(3);
+      expect(new Set(payload.failures.flatMap((failure: { original: string[] }) => failure.original)).size).toBe(1);
+      return new AIMessage({ content: JSON.stringify({ approved: true, note: 'The corrected boundary retains the scenarios.' }) });
+    },
+  ]);
+  vi.spyOn(model, 'getNumTokens').mockImplementation(async content => Math.ceil(String(content).length / 4));
+  const result = await createFunctionGroupVerifier(createLangChainFunctionGroupAgentHost({ model, resolveToolContext: f.resolveToolContext }))(f.input, 'requirement-function-group', 'verify');
+  expect(result.status).toBe('success');
+  expect(result.testEvidence!.failures).toHaveLength(12);
+  expect(result.testEvidence!.failures.every(failure => failure.resolution?.kind === 'reviewed-test-correction')).toBe(true);
+  expect(model.observations).toHaveLength(4);
+});
