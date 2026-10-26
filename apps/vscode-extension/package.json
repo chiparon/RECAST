@@ -4,7 +4,7 @@
   "description": "在 VS Code 中运行 RECAST 智能检索与代码复用工作流：定位实现、组织上下文、生成目标代码并审阅回填。",
   "version": "0.1.0",
   "publisher": "forexplore",
-  "license": "MIT",
+  "license": "SEE LICENSE IN ../../LICENSE",
   "private": true,
   "engines": {
     "vscode": "^1.90.0"

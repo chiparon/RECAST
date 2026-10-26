@@ -11,5 +11,6 @@
     "fast-xml-parser": "^5.0.0",
     "langchain": "1.5.19",
     "zod": "4.4.3"
-  }
+  },
+  "license": "SEE LICENSE IN ../../LICENSE"
 }
