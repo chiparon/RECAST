@@ -44,5 +44,6 @@
     "test:verifier": "vitest run --dir services/translation-verifier/src --maxWorkers 2",
     "test:scripts": "vitest run --dir scripts --exclude '**/*.test.mjs' --maxWorkers 2 && node --test scripts/sync-platform-worktrees.test.mjs",
     "test:verifier:e2e": "vitest run --dir services/translation-verifier/e2e --maxWorkers 2"
-  }
+  },
+  "license": "SEE LICENSE IN LICENSE"
 }

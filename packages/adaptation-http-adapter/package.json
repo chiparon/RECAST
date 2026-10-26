@@ -16,5 +16,6 @@
   },
   "devDependencies": {
     "vitest": "^4.1.10"
-  }
+  },
+  "license": "SEE LICENSE IN ../../LICENSE"
 }
