@@ -318,8 +318,8 @@ export async function searchModules(store: IndexStore, request: ModuleMatchReque
     stage = next;
     stageStarted = now;
   };
-  // The queue wait is outside the per-search 60s database budget. Once admitted,
-  // one request still receives the same bounded search time as before.
+  // Admission queue wait is outside the whole-search budget. SQL statements
+  // retain their own shorter deadline inside the multi-step search.
   let release: (() => void) | undefined;
   const controller = new AbortController();
   let databaseSlotReleased = false;
@@ -338,6 +338,9 @@ export async function searchModules(store: IndexStore, request: ModuleMatchReque
     return result;
   } catch (error) {
     timing.failedStage = stage;
+    if (!parentSignal?.aborted && error instanceof Error && error.name === 'TimeoutError') {
+      throw new Error(`Module search timeout during ${stage} after ${Math.round(performance.now() - started)}ms`, { cause: error });
+    }
     throw error;
   } finally {
     const finished = performance.now();

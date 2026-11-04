@@ -1790,7 +1790,11 @@ export class SeekDbIndexStore implements IndexStore {
   }): Promise<RowDataPacket[]> {
     const { scope, embedding, kinds, candidateLimit, signal } = input;
     const kindFilter = kinds.length === 1 ? 'kind = ?' : `kind IN (${kinds.map(() => '?').join(',')})`;
-    // project_id sits in idx_search_documents_scope, so the vector pre-filter applies it before the top-N cut.
+    // These lookups are scoped to one repository revision/view. Exact distance
+    // ranking lets the scope index bound the work before top-N. SeekDB's
+    // adaptive APPROXIMATE plan can time out even for a few thousand matching
+    // rows in a table containing many repository revisions. Keep all scope
+    // filters and candidate budgets; exact ranking also avoids recall loss.
     const projectFilter = scope.projectId ? ' AND project_id = ?' : '';
     // Filter whitespace-only and very short fragments before top-N without
     // reading their long source text. The stored flag uses the original byte
@@ -1803,7 +1807,6 @@ export class SeekDbIndexStore implements IndexStore {
         FROM ${this.#tables.searchDocuments}
         WHERE repository_id = ? AND analysis_revision = ? AND ${kindFilter}${projectFilter}${implementationFilter}
         ORDER BY cosine_distance(embedding, ${vectorHex(embedding)})
-        APPROXIMATE
         LIMIT ?
       `, [...filterValues, candidateLimit], signal);
   }

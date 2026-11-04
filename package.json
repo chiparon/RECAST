@@ -8,6 +8,10 @@
     "services/*"
   ],
   "scripts": {
+    "skills:build": "node scripts/build-agent-skills.mjs",
+    "skills:check": "node scripts/build-agent-skills.mjs --check",
+    "test:skills": "vitest run scripts/agent-skills.test.ts --maxWorkers 2",
+    "graph:studio": "node scripts/check-platform-workspace.mjs && npx --yes @langchain/langgraph-cli@1.5.7 dev --config langgraph.json --host 127.0.0.1 --port 2024 --no-browser",
     "workspace:check": "node scripts/check-platform-workspace.mjs",
     "workspace:sync": "node scripts/sync-platform-worktrees.mjs",
     "prebuild:extension": "node scripts/check-platform-workspace.mjs",

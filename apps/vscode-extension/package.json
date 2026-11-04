@@ -340,6 +340,8 @@
     "@forexplore/code-intelligence-service": "0.1.0",
     "@forexplore/contracts": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",
+    "@langchain/core": "1.2.20",
+    "@langchain/langgraph": "1.5.2",
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"

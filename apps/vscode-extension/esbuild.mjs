@@ -4,6 +4,7 @@ import esbuild from 'esbuild';
 import { cp, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { agentSkillNames, buildAgentSkills } from '../../scripts/build-agent-skills.mjs';
 
 // The bundled verification runtime is LangChain, whose packages require Node
 // >= 20. VS Code 1.90 (the declared engine floor) ships Electron 29 / Node
@@ -28,6 +29,7 @@ const nativeRuntimePackages = [
   'tree-sitter-typescript',
 ];
 
+await buildAgentSkills();
 await esbuild.build({
   entryPoints: [path.join(extensionDirectory, 'src', 'extension.ts')],
   bundle: true,
@@ -57,6 +59,10 @@ for (const worker of ['structural-parse-worker', 'structural-assembly-worker']) 
 });
 
 const nativeModulesDirectory = path.join(extensionOutputDirectory, 'node_modules');
+// Publish the editable sources alongside the embedded runtime instructions.
+for (const name of agentSkillNames) {
+  await cp(path.join(workspaceDirectory, 'skills', name), path.join(extensionOutputDirectory, 'skills', name), { recursive: true });
+}
 for (const [source, output] of [
   [path.join(workspaceDirectory, 'services/adaptation-service/src/server.ts'), 'adaptation-server.cjs'],
   [path.join(extensionDirectory, 'src/workspace-compile.ts'), 'workspace-compile.cjs'],

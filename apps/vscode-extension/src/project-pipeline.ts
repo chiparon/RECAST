@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { WorkspaceTranslationPlan, WorkspaceTranslationRun } from '@forexplore/contracts';
 import type { ProjectPipelineCheckpoint, ProjectPipelineModule, ProjectPipelineRun, ProjectPipelineStart } from './project-pipeline-types';
+import { createProjectPipelineGraph, type ProjectPipelineGraphSteps } from './project-pipeline-graph';
 
 export interface ProjectPipelinePorts {
   initialize?(run: ProjectPipelineRun, signal: AbortSignal, log: (message: string) => void): Promise<void>;
@@ -133,97 +135,143 @@ export class ProjectPipeline {
   private async execute(input: ProjectPipelineStart, signal: AbortSignal, previous?: ProjectPipelineRun): Promise<void> {
     const run = this.run!;
     let recoveryReady = !previous;
+    let modules: ProjectPipelineModule[] = [];
+    let integrations: ProjectPipelineModule[] = [];
     try {
-      if (previous) {
-        await this.ports.restore?.(previous, signal, message => this.event(message));
-        recoveryReady = true;
-        run.configuration = previous.configuration;
-        for (const restored of previous.modules) {
-          const module = run.modules.find(module => module.id === restored.id)!;
-          if (restored.authorizedFiles) module.authorizedFiles = [...new Set([...(module.authorizedFiles ?? []), ...restored.authorizedFiles])];
-          if (restored.changedFiles) module.changedFiles = [...new Set([...(module.changedFiles ?? []), ...restored.changedFiles])];
-        }
-        this.event(`断点已恢复，保留 ${run.modules.filter(module => !module.taskKind && module.status === 'completed').length} 个已完成模块。`);
-      } else {
-        const prepared = await this.ports.prepare(input, signal, message => this.event(message));
-        Object.assign(run, prepared); signal.throwIfAborted();
-        await this.captureCheckpoint();
-        await this.ports.initialize?.(structuredClone(run), signal, message => this.event(message));
-      }
-      if (!run.modules.length) throw new Error('目标项目没有可执行的生产代码模块。请完成项目建模后重试。');
-      this.event(`建模完成：${run.projectName}，共 ${run.modules.length} 个模块，按依赖顺序串行执行。`);
-      await this.flush(); signal.throwIfAborted();
-      for (const module of run.modules.filter(module => !module.taskKind)) {
-        if (module.status === 'completed') continue;
-        signal.throwIfAborted(); run.currentModuleId = module.id; module.status = 'running'; run.stage = 'retrieving'; this.event(`开始检索模块：${module.name}`);
-        await this.captureCheckpoint(); signal.throwIfAborted();
-        module.candidates = await this.ports.search(module, input, signal); signal.throwIfAborted();
-        module.selectedCandidateId = module.selectedCandidateIds?.[0] ?? module.candidates[0]?.id;
-        this.event(`找到 ${module.candidates.length} 个候选${module.candidates.length ? `，已自动选择 ${module.selectedCandidateIds?.length ?? 1} 份参考。` : '，将依据需求和目标契约直接生成。'}`);
-        await this.flush(); signal.throwIfAborted();
-        run.stage = 'analyzing'; this.event(`正在分析 ${module.name} 的接口映射与修改计划。`);
-        const result = await this.ports.generate(module, structuredClone(run), { signal,
-          onCheckpoint: async () => { this.changed(); await this.flush(); },
-          onProgress: (stage, message) => { run.stage = stage; this.event(message); },
-          onPlan: async plan => {
-            module.plan = plan; run.stage = 'analyzing';
-            this.changed(); await this.flush(); signal.throwIfAborted();
-            run.stage = 'generating'; this.event(`开始生成与编译修复：${module.name}`);
-          },
-          onRun: result => {
-            this.recordTranslation(module, result);
-            const latest = result.events?.at(-1);
-            if (latest) this.event(latest.message);
-            else this.changed();
-          },
-        });
-        signal.throwIfAborted(); this.recordTranslation(module, result);
-        if (result.status !== 'completed') { module.status = 'failed'; throw new Error(result.error || `模块 ${module.name} 生成未完成：${result.status}`); }
-        module.status = 'completed'; this.event(`模块已完成：${module.name}，改动 ${module.changedFiles?.length ?? 0} 个文件。`);
-        await this.captureCheckpoint();
-      }
-      if (this.ports.proactiveIntegration && !run.modules.some(module => module.id === 'pipeline-integration')) {
-        const first = run.modules[0]!;
-        const integration: ProjectPipelineModule = { id: 'pipeline-integration', taskKind: 'project-integration', name: '项目 Integration',
-          dependsOn: run.modules.map(module => module.id), status: 'running', candidates: [],
-          target: { ...first.target, module: { ...first.target.module!, sourceFiles: [...new Set(run.modules.flatMap(module => module.target.module?.sourceFiles ?? []))] } } };
-        run.modules.push(integration);
-      }
-      for (const module of run.modules.filter(module => module.taskKind && module.status !== 'completed')) await this.generateIntegration(module, signal);
-      delete run.currentModuleId; run.stage = 'verifying'; this.event('正在对完整输出项目执行编译与最终验证。');
-      for (let attempt = 0; ; attempt++) {
-        run.validation = await this.ports.validate(structuredClone(run), signal, message => this.event(message)); signal.throwIfAborted();
-        (run.validationHistory ??= []).push(structuredClone(run.validation));
-        if (!run.validation.protectedFilesUnchanged) throw new Error('固定验收文件发生变化，禁止发布输出。');
-        if (run.validation.retainedTests && !run.validation.retainedTests.success) throw new Error('交付目录中的生成测试未通过，已保留代码、测试和诊断，禁止发布。');
-        if (run.validation.compilation.success && (!run.validation.verification || run.validation.verification.success)) break;
-        if (attempt >= 2) throw new Error('联合验收在集成修复后仍未通过，请查看报告中的实际诊断。');
-        const files = [...new Set(run.modules.flatMap(module => module.target.module?.sourceFiles ?? []))];
-        if (files.length > 128) throw new Error('联合验收未通过，项目修复范围超过 128 个文件；请细化项目范围后重试。');
-        const first = run.modules[0]!;
-        const repairNumber = 1 + Math.max(0, ...run.modules.map(module => Number(/^pipeline-integration-repair-(\d+)$/.exec(module.id)?.[1] ?? 0)));
-        const repair: ProjectPipelineModule = { id: `pipeline-integration-repair-${repairNumber}`, taskKind: 'project-integration', name: `项目集成修复 ${repairNumber}`, dependsOn: run.modules.map(module => module.id),
-          status: 'running', candidates: [], target: { ...first.target, id: `pipeline-integration-repair-${repairNumber}`, name: '完整项目集成修复',
-            module: { ...first.target.module!, sourceFiles: files, dependsOn: [] } } };
-        run.modules.push(repair); run.currentModuleId = repair.id; run.stage = 'analyzing';
-        this.event(`联合验收未通过，开始第 ${attempt + 1} 次项目集成修复；固定测试和构建配置不可修改。`);
-        repair.repairDiagnostics = [run.validation.compilation.output, run.validation.verification?.output].filter(Boolean).join('\n').slice(-16000);
-        await this.generateIntegration(repair, signal);
-        delete run.currentModuleId; run.stage = 'verifying'; this.event('重新执行完整项目联合验收。');
-      }
-      const finalModules = run.validation.modules;
-      if (finalModules?.some(item => item.verification.disposition === 'production-defect')) throw new Error('最终模块验证仍发现生产代码缺陷，已保留输出和证据，禁止发布。');
-      const expected = run.modules.filter(module => !module.taskKind);
-      const allVerified = finalModules?.length === expected.length && expected.length > 0 && expected.every(module =>
-        finalModules?.some(item => item.id === module.id && item.verification.sourceHash === run.validation!.sourceHash && ['verified', 'not-applicable'].includes(item.verification.disposition)));
-      run.acceptance = ((allVerified && (finalModules?.some(item => item.verification.disposition === 'verified') || run.validation.verification?.success)) || (!finalModules && run.validation.verification?.success)) ? 'behavior-verified' : 'compilation-only';
-      this.event(run.acceptance === 'behavior-verified' ? '最终项目的配置验收门槛已通过；详细行为证据见报告。' : '项目编译通过；部分行为验证未完成或不可用，详见报告。');
-      await this.flush(); signal.throwIfAborted();
-      run.stage = 'publishing';
-      if (await this.ports.sourceHash(run) !== run.validation.sourceHash) throw new Error('验收后的输出文件发生变化，请重新执行验证。');
-      await this.saving; if (this.persistenceError) throw this.persistenceError;
-      run.commit = await this.ports.publish(structuredClone(run), signal);
-      run.status = 'completed'; run.stage = 'complete'; this.event('项目已在独立输出副本中原子提交；验收报告已生成。');
+      const steps: ProjectPipelineGraphSteps = {
+        prepare: async () => {
+          if (previous) {
+            await this.ports.restore?.(previous, signal, message => this.event(message));
+            recoveryReady = true;
+            run.configuration = previous.configuration;
+            for (const restored of previous.modules) {
+              const module = run.modules.find(module => module.id === restored.id)!;
+              if (restored.authorizedFiles) module.authorizedFiles = [...new Set([...(module.authorizedFiles ?? []), ...restored.authorizedFiles])];
+              if (restored.changedFiles) module.changedFiles = [...new Set([...(module.changedFiles ?? []), ...restored.changedFiles])];
+            }
+            this.event(`断点已恢复，保留 ${run.modules.filter(module => !module.taskKind && module.status === 'completed').length} 个已完成模块。`);
+          } else {
+            const prepared = await this.ports.prepare(input, signal, message => this.event(message));
+            Object.assign(run, prepared); signal.throwIfAborted();
+            await this.captureCheckpoint();
+            await this.ports.initialize?.(structuredClone(run), signal, message => this.event(message));
+          }
+          if (!run.modules.length) throw new Error('目标项目没有可执行的生产代码模块。请完成项目建模后重试。');
+          this.event(`建模完成：${run.projectName}，共 ${run.modules.length} 个模块，按依赖顺序串行执行。`);
+          await this.flush(); signal.throwIfAborted();
+          modules = run.modules.filter(module => !module.taskKind);
+          return modules.length;
+        },
+        moduleCompleted: index => modules[index]!.status === 'completed',
+        retrieve: async index => {
+          const module = modules[index]!;
+          signal.throwIfAborted(); run.currentModuleId = module.id; module.status = 'running'; run.stage = 'retrieving'; this.event(`开始检索模块：${module.name}`);
+          await this.captureCheckpoint(); signal.throwIfAborted();
+          for (let attempt = 0; ; attempt++) {
+            try {
+              module.candidates = await this.ports.search(module, input, signal);
+              break;
+            } catch (error) {
+              signal.throwIfAborted();
+              const message = error instanceof Error ? error.message : String(error);
+              const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+              if (attempt >= 2 || !/timeout|timed out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|HTTP 50[234]/i.test(`${code} ${message}`)) throw error;
+              this.event(`模块检索遇到临时故障，正在自动重试（${attempt + 1}/2）：${message}`);
+              await this.flush();
+              await delay(250 * 2 ** attempt, undefined, { signal });
+            }
+          }
+          signal.throwIfAborted();
+          module.selectedCandidateId = module.selectedCandidateIds?.[0] ?? module.candidates[0]?.id;
+          this.event(`找到 ${module.candidates.length} 个候选${module.candidates.length ? `，已自动选择 ${module.selectedCandidateIds?.length ?? 1} 份参考。` : '，将依据需求和目标契约直接生成。'}`);
+          await this.flush(); signal.throwIfAborted();
+        },
+        generate: async index => {
+          const module = modules[index]!;
+          run.stage = 'analyzing'; this.event(`正在分析 ${module.name} 的接口映射与修改计划。`);
+          const result = await this.ports.generate(module, structuredClone(run), { signal,
+            onCheckpoint: async () => { this.changed(); await this.flush(); },
+            onProgress: (stage, message) => { run.stage = stage; this.event(message); },
+            onPlan: async plan => {
+              module.plan = plan; run.stage = 'analyzing';
+              this.changed(); await this.flush(); signal.throwIfAborted();
+              run.stage = 'generating'; this.event(`开始生成与编译修复：${module.name}`);
+            },
+            onRun: result => {
+              this.recordTranslation(module, result);
+              const latest = result.events?.at(-1);
+              if (latest) this.event(latest.message);
+              else this.changed();
+            },
+          });
+          signal.throwIfAborted(); this.recordTranslation(module, result);
+          if (result.status !== 'completed') { module.status = 'failed'; throw new Error(result.error || `模块 ${module.name} 生成未完成：${result.status}`); }
+          module.status = 'completed'; this.event(`模块已完成：${module.name}，改动 ${module.changedFiles?.length ?? 0} 个文件。`);
+          await this.captureCheckpoint();
+        },
+        prepareIntegration: () => {
+          if (this.ports.proactiveIntegration && !run.modules.some(module => module.id === 'pipeline-integration')) {
+            const first = run.modules[0]!;
+            const integration: ProjectPipelineModule = { id: 'pipeline-integration', taskKind: 'project-integration', name: '项目 Integration',
+              dependsOn: run.modules.map(module => module.id), status: 'running', candidates: [],
+              target: { ...first.target, module: { ...first.target.module!, sourceFiles: [...new Set(run.modules.flatMap(module => module.target.module?.sourceFiles ?? []))] } } };
+            run.modules.push(integration);
+          }
+          integrations = run.modules.filter(module => module.taskKind && module.status !== 'completed');
+          return integrations.length;
+        },
+        integrate: index => this.generateIntegration(integrations[index]!, signal),
+        startValidation: () => {
+          delete run.currentModuleId; run.stage = 'verifying'; this.event('正在对完整输出项目执行编译与最终验证。');
+        },
+        validate: async () => {
+          run.validation = await this.ports.validate(structuredClone(run), signal, message => this.event(message)); signal.throwIfAborted();
+          (run.validationHistory ??= []).push(structuredClone(run.validation));
+          if (!run.validation.protectedFilesUnchanged) throw new Error('固定验收文件发生变化，禁止发布输出。');
+          if (run.validation.retainedTests && !run.validation.retainedTests.success) throw new Error('交付目录中的生成测试未通过，已保留代码、测试和诊断，禁止发布。');
+          return run.validation.compilation.success && (!run.validation.verification || run.validation.verification.success);
+        },
+        repair: async attempt => {
+          if (attempt >= 2) throw new Error('联合验收在集成修复后仍未通过，请查看报告中的实际诊断。');
+          const files = [...new Set(run.modules.flatMap(module => module.target.module?.sourceFiles ?? []))];
+          if (files.length > 128) throw new Error('联合验收未通过，项目修复范围超过 128 个文件；请细化项目范围后重试。');
+          const first = run.modules[0]!;
+          const repairNumber = 1 + Math.max(0, ...run.modules.map(module => Number(/^pipeline-integration-repair-(\d+)$/.exec(module.id)?.[1] ?? 0)));
+          const repair: ProjectPipelineModule = { id: `pipeline-integration-repair-${repairNumber}`, taskKind: 'project-integration', name: `项目集成修复 ${repairNumber}`, dependsOn: run.modules.map(module => module.id),
+            status: 'running', candidates: [], target: { ...first.target, id: `pipeline-integration-repair-${repairNumber}`, name: '完整项目集成修复',
+              module: { ...first.target.module!, sourceFiles: files, dependsOn: [] } } };
+          run.modules.push(repair); run.currentModuleId = repair.id; run.stage = 'analyzing';
+          this.event(`联合验收未通过，开始第 ${attempt + 1} 次项目集成修复；固定测试和构建配置不可修改。`);
+          repair.repairDiagnostics = [run.validation!.compilation.output, run.validation!.verification?.output].filter(Boolean).join('\n').slice(-16000);
+          await this.generateIntegration(repair, signal);
+          delete run.currentModuleId; run.stage = 'verifying'; this.event('重新执行完整项目联合验收。');
+        },
+        publish: async () => {
+          const validation = run.validation!;
+          const finalModules = validation.modules;
+          if (finalModules?.some(item => item.verification.disposition === 'production-defect')) throw new Error('最终模块验证仍发现生产代码缺陷，已保留输出和证据，禁止发布。');
+          const expected = run.modules.filter(module => !module.taskKind);
+          const allVerified = finalModules?.length === expected.length && expected.length > 0 && expected.every(module =>
+            finalModules?.some(item => item.id === module.id && item.verification.sourceHash === validation.sourceHash && ['verified', 'not-applicable'].includes(item.verification.disposition)));
+          run.acceptance = ((allVerified && (finalModules?.some(item => item.verification.disposition === 'verified') || validation.verification?.success)) || (!finalModules && validation.verification?.success)) ? 'behavior-verified' : 'compilation-only';
+          this.event(run.acceptance === 'behavior-verified' ? '最终项目的配置验收门槛已通过；详细行为证据见报告。' : '项目编译通过；部分行为验证未完成或不可用，详见报告。');
+          await this.flush(); signal.throwIfAborted();
+          run.stage = 'publishing';
+          if (await this.ports.sourceHash(run) !== validation.sourceHash) throw new Error('验收后的输出文件发生变化，请重新执行验证。');
+          await this.saving; if (this.persistenceError) throw this.persistenceError;
+          run.commit = await this.ports.publish(structuredClone(run), signal);
+          run.status = 'completed'; run.stage = 'complete'; this.event('项目已在独立输出副本中原子提交；验收报告已生成。');
+        },
+      };
+      // start/resume have always entered preparation before queued saves settle.
+      // Let the first graph node adopt that operation without delaying its start.
+      const preparation = steps.prepare();
+      void preparation.catch(() => {}); // Observed by the graph, including early failures.
+      const graph = createProjectPipelineGraph({ ...steps, prepare: () => preparation });
+      // Finite module lists and the existing repair limit bound execution. Do not
+      // add LangGraph's default step cap as a new project-size gate. Cancellation
+      // stays with the operations above so finally cannot overtake a running child.
+      await graph.invoke({}, { recursionLimit: Number.MAX_SAFE_INTEGER });
     } catch (cause) {
       run.status = signal.aborted ? 'cancelled' : 'failed';
       run.error = cause instanceof Error ? cause.message : String(cause);

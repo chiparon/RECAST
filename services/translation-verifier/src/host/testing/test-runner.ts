@@ -391,7 +391,11 @@ async function configureRunnerCoverage(context: RunnerContext, testPaths: readon
     return { ...run, args: ["-Djacoco.append=false", "-Dmaven.test.failure.ignore=true", "-DfailIfNoTests=true", `-Dtest=${classNames.join(",")}`] };
   }
   if (runner === "jest") return { ...run, args: ["--runTestsByPath", ...testPaths, `--roots=${realpathSync(root)}`, "--coverage", ...subjects.map((subject) => `--collectCoverageFrom=${subject.path}`), "--coverageReporters=json", "--json", "--outputFile=tests.json"] };
-  if (runner === "vitest") return { ...run, args: ["--run", ...testPaths, "--coverage", `--coverage.include=${subjects.map((subject) => subject.path).join(",")}`, "--coverage.reporter=json", "--reporter=json", "--outputFile=tests.json"] };
+  if (runner === "vitest") {
+    // Vitest accepts repeated include flags, not comma-separated path lists.
+    const paths = [...new Set(subjects.map(subject => subject.path))];
+    return { ...run, args: ["--run", ...testPaths, "--coverage", ...paths.map(path => `--coverage.include=${path}`), "--coverage.reporter=json", "--reporter=json", "--outputFile=tests.json"] };
+  }
   if (runner === "pytest") {
     const pythonFunctions: Array<{ path: string; functions: PythonFunction[] }> = [];
     for (const subject of subjects) {

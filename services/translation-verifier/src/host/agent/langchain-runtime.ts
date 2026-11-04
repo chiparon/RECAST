@@ -1,3 +1,4 @@
+import { skillInstruction } from "../../../../../skills/compiled.mjs";
 import {
   createAgent,
   createMiddleware,
@@ -269,23 +270,30 @@ async function runLangChainTask<Observation extends ObservationSummary, Result>(
       const feedback = [...parsed.problems, ...revalidation.feedback];
       if (feedback.length === 0 && parsed.report !== undefined) {
         const problem = parsed.report.verdict === "bug-found" ? undefined : await context.testHistory.acceptGreenSuite();
-        const report: FinalReportClaim = problem ? { ...parsed.report, verdict: "uncertain", issue: { kind: "unknown", description: problem } } : parsed.report;
-        const result = acceptance.accept(report, revalidation.observation);
-        if (context.state?.testEvidence && result && typeof result === "object") {
-          Object.assign(result, { testEvidence: structuredClone(context.state.testEvidence), ...(problem ? { reason: "unresolved-test-failure" } : {}) });
-        }
-        await recordArtifacts?.();
-        emitAgentWorkLog(options.workLogger, {
-          ...workEvent(runId, "run.completed", {
+        // A rejected correction is actionable feedback, just like a failed
+        // Host replay. Let the same Agent preserve/restore the requirement
+        // assertions within its existing feedback budget before concluding.
+        if (problem && parsed.report.verdict === "no-bug" && round <= maxFeedbackRounds) {
+          feedback.push(`Test correction is not yet accepted: ${problem}. Inspect the original failure and current tests; correct mistaken fixtures/APIs or restore missing requirement assertions, rerun the suite, and report the result. Do not change production merely to satisfy an incorrect test or weaken required behavior.`);
+        } else {
+          const report: FinalReportClaim = problem ? { ...parsed.report, verdict: "uncertain", issue: { kind: "unknown", description: problem } } : parsed.report;
+          const result = acceptance.accept(report, revalidation.observation);
+          if (context.state?.testEvidence && result && typeof result === "object") {
+            Object.assign(result, { testEvidence: structuredClone(context.state.testEvidence), ...(problem ? { reason: "unresolved-test-failure" } : {}) });
+          }
+          await recordArtifacts?.();
+          emitAgentWorkLog(options.workLogger, {
+            ...workEvent(runId, "run.completed", {
+              elapsedMs: elapsedMs(startedAt),
+              outcome: report.verdict,
+            }),
+          });
+          emitAgentTrace(options.traceLogger, traceEvent(runId, "run.completed", {
             elapsedMs: elapsedMs(startedAt),
-            outcome: report.verdict,
-          }),
-        });
-        emitAgentTrace(options.traceLogger, traceEvent(runId, "run.completed", {
-          elapsedMs: elapsedMs(startedAt),
-          verdict: report.verdict,
-        }));
-        return result;
+            verdict: report.verdict,
+          }));
+          return result;
+        }
       }
       if (round > maxFeedbackRounds) {
         throw new AgentRunFailure(
@@ -448,7 +456,7 @@ function classifyRunFailure(error: unknown, budget: AgentRunBudget): unknown {
   return error;
 }
 
-function withRuntimeInstructions(
+export function withRuntimeInstructions(
   systemPrompt: string,
   runtime: ToolRuntimeContext,
   setup: readonly string[],
@@ -462,12 +470,7 @@ function withRuntimeInstructions(
     ...setup,
     "- After your final report the Host reruns the complete dedicated folder itself and may append feedback; your report is a candidate conclusion, not an accepted result.",
     "",
-    "Completion policy: Existing meaningful tests can satisfy the task; do not rewrite or rerun unchanged tests after a passing observation solely to repeat the workflow.",
-    "Once you have inspected the requested functions and observed meaningful passing tests with execution evidence for every target, end the current call immediately with a no-bug report, or uncertain if you can name a concrete requirement ambiguity. Do not keep exploring speculative requirements.",
-    "Once a valid requirement-backed assertion reproduces a production defect, preserve that failing test and end immediately with a bug-found report; a passing baseline is not required to report a reproduced defect.",
-    "The final assistant content must start with { and end with }. No introduction, analysis, Markdown fences, or text outside the JSON. Omit optional fields when unused.",
-    'Valid success example: {"verdict":"no-bug","summary":"The inspected functions satisfy the declared requirement and meaningful tests pass."}',
-    'For a reproduced defect use verdict bug-found, issue {"kind":"translation","description":"the concrete defect"}, and affectedTargets containing the exact requested path, name, and signature.',
+    skillInstruction("verifier", "completion/instructions"),
   ].join("\n");
 }
 

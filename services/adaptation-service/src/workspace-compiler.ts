@@ -9,8 +9,8 @@ export function validateWorkspaceCompileCommand(value: unknown): asserts value i
   if (typeof command.executable !== "string" || !command.executable.trim() || command.executable.includes("\0") ||
     !Array.isArray(command.args) || !command.args.every((arg) => typeof arg === "string" && !arg.includes("\0")) ||
     (command.cwd !== undefined && (typeof command.cwd !== "string" || isAbsolute(command.cwd) || command.cwd.includes("\0"))) ||
-    (command.timeoutMs !== undefined && (!Number.isInteger(command.timeoutMs) || command.timeoutMs < 1000 || command.timeoutMs > 1_800_000))) {
-    throw new Error("Compile command needs executable, args, optional relative cwd and timeoutMs (1000..1800000).");
+    (command.timeoutMs !== undefined && (!Number.isInteger(command.timeoutMs) || command.timeoutMs < 1000 || command.timeoutMs > 7_200_000))) {
+    throw new Error("Compile command needs executable, args, optional relative cwd and timeoutMs (1000..7200000).");
   }
 }
 

@@ -307,6 +307,21 @@ fs.writeFileSync('target/site/jacoco/jacoco.xml', ${JSON.stringify(coverageXml)}
     expect(await readFile(join(root, "target/site/jacoco/jacoco.xml"), "utf8")).toBe(coverageXml);
   });
 
+  it.each(["same file", "different files"])("passes separate Vitest coverage patterns for functions in %s", async layout => {
+    const { runtime } = await fixture(`process.stdout.write(JSON.stringify(process.argv.slice(2)));`);
+    const paths = layout === "same file" ? ["src/Price.js", "src/Price.js"] : ["src/Price.js", "src/Discount.js"];
+    runtime.testRunner = "vitest";
+    runtime.functionGroup = { schemaVersion: "3.1", mode: "requirement", sourceLanguage: "JavaScript", targetLanguage: "JavaScript",
+      targetProjectPath: runtime.targetProjectPath, requirement: "Calculate totals", functions: paths.map((path, index) => ({ target: { path, name: `calculate${index}` } })) };
+    const result = await bindFunctionGroupTestRunner({ runtime }).run(["tests/price.test.js"]);
+    const args: string[] = JSON.parse(result.stdout);
+    expect(args.filter(arg => arg.startsWith("--coverage.include="))).toEqual(
+      [...new Set(paths)].map(path => `--coverage.include=${path}`),
+    );
+    expect(args).toContain("--coverage");
+    expect(args).toContain("--outputFile=tests.json");
+  });
+
   it.each(["jest", "vitest"] as const)("retains %s default reports and ignores them on the next run", async testRunner => {
     const { root, runtime } = await fixture(`const fs = require('node:fs');
 fs.mkdirSync('coverage', {recursive: true});

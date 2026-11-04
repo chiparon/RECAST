@@ -125,15 +125,15 @@ writeFileSync('target/main.js', 'exports.answer = () => 42;'); finish('Completed
     } finally { await f.close(); }
   });
 
-  it('does not apply or continue unauthorized edits made before truncation', async () => {
-    const f = await fixture("writeFileSync('target/unauthorized.cjs', 'exports.bad = true'); limit();");
+  it('isolates unauthorized edits before continuing a truncated output', async () => {
+    const f = await fixture("if (calls.length === 1) { writeFileSync('target/unauthorized.cjs', 'exports.bad = true'); limit(); } if (existsSync('target/unauthorized.cjs') || !prompt.includes('WORKSPACE SCOPE CORRECTION')) process.exit(91); writeFileSync('target/main.js', 'exports.answer = () => 42;'); finish('done');");
     try {
       const done = await f.done(f.runtime.start(f.request));
-      expect(done.status).toBe('failed');
-      expect(done.error).toContain('outside writeFiles');
-      expect(await f.calls()).toHaveLength(1);
-      expect(done.compilations).toEqual([]);
-      expect(await readFile(join(f.project, 'main.js'), 'utf8')).toContain('() => 0');
+      expect(done.status).toBe('completed');
+      expect(done.acceptance).toBe('behavior-verified');
+      expect(await f.calls()).toHaveLength(2);
+      expect(await readFile(join(f.project, 'unauthorized.cjs'), 'utf8').catch(() => null)).toBeNull();
+      expect(await readFile(join(f.project, 'main.js'), 'utf8')).toContain('() => 42');
     } finally { await f.close(); }
   });
 

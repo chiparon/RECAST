@@ -112,3 +112,4 @@ experiments/enterprise-asset-upgrade/results/*
 /fixtures/code-corpus/**/bin/
 .translation-verifier-scripts/
 .translation-verifier-reports/
+.langgraph_api/

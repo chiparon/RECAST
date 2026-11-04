@@ -205,6 +205,26 @@ describe("ToolCallingArchitectRuntime", () => {
     expect(JSON.parse(correction!.content)).toMatchObject({ error: 'invalid_arguments' });
   });
 
+  it.each([
+    { relativePath: 'src/QuoteService.java', startLine: 1, endLine: 8 },
+    '{"relativePath":',
+    null,
+  ])('recovers malformed source arguments inside the same planning conversation: %j', async argumentsValue => {
+    const port = projectPort();
+    vi.mocked(port.readSourceExcerpt).mockResolvedValue({ source: evidence({ value: { text: 'class QuoteService {}' } }) } as never);
+    const client = scriptedClient([
+      { toolCalls: [{ id: 'bad-input', name: 'read_source_excerpt', arguments: argumentsValue }] },
+      { toolCalls: [{ id: 'corrected', name: 'read_source_excerpt', arguments: { relativePath: 'src/QuoteService.java' } }] },
+      { content: JSON.stringify(proposal()) },
+    ]);
+    const result = await new ToolCallingArchitectRuntime({ queryPort: port, client })
+      .proposeModulePlan({ ...request, projectId: 'quote' });
+    expect(result).toEqual(proposal());
+    expect(port.readSourceExcerpt).toHaveBeenCalledExactlyOnceWith({ ...scope, relativePath: 'src/QuoteService.java' }, undefined);
+    const feedback = vi.mocked(client.complete).mock.calls[1]![0].find(message => message.toolCallId === 'bad-input');
+    expect(JSON.parse(feedback!.content)).toMatchObject({ error: 'invalid_arguments' });
+  });
+
   it('finishes with existing evidence when a batch exceeds the remaining query budget', async () => {
     const port = projectPort();
     const client = scriptedClient([
@@ -383,17 +403,19 @@ describe("ToolCallingArchitectRuntime", () => {
   });
 
   it("does not advertise or forward query values beyond SemanticQueryPort limits", async () => {
-    const port = queryPort();
+    const port = projectPort();
     const limitClient = scriptedClient([{
       toolCalls: [{
         id: "tool-search",
         name: "search_symbols",
         arguments: { query: "QuoteService", limit: 201 },
       }],
-    }]);
-    await expect(new ToolCallingArchitectRuntime({ queryPort: port, client: limitClient }).proposeModulePlan(request))
-      .rejects.toThrow("search_symbols.limit must be an integer between 1 and 200");
-    expect(port.searchSymbols).not.toHaveBeenCalled();
+    }, { content: JSON.stringify(proposal()) }]);
+    await new ToolCallingArchitectRuntime({ queryPort: port, client: limitClient })
+      .proposeModulePlan({ ...request, projectId: 'quote' });
+    expect(JSON.stringify(vi.mocked(limitClient.complete).mock.calls[1]![0]))
+      .toContain('search_symbols.limit must be an integer between 1 and 200');
+    expect(port.searchSymbols).toHaveBeenCalledExactlyOnceWith({ ...scope, projectIds: ['quote'], query: '', limit: 100 }, undefined);
 
     const excerptClient = scriptedClient([{
       toolCalls: [{
@@ -401,9 +423,11 @@ describe("ToolCallingArchitectRuntime", () => {
         name: "read_source_excerpt",
         arguments: { relativePath: "src/QuoteService.java", maxChars: 32_001 },
       }],
-    }]);
-    await expect(new ToolCallingArchitectRuntime({ queryPort: port, client: excerptClient }).proposeModulePlan(request))
-      .rejects.toThrow("read_source_excerpt.maxChars must be an integer between 1 and 32000");
+    }, { content: JSON.stringify(proposal()) }]);
+    await new ToolCallingArchitectRuntime({ queryPort: port, client: excerptClient })
+      .proposeModulePlan({ ...request, projectId: 'quote' });
+    expect(JSON.stringify(vi.mocked(excerptClient.complete).mock.calls[1]![0]))
+      .toContain('read_source_excerpt.maxChars must be an integer between 1 and 32000');
     expect(port.readSourceExcerpt).not.toHaveBeenCalled();
   });
 
@@ -555,17 +579,19 @@ describe("ToolCallingArchitectRuntime", () => {
   });
 
   it("enforces each declared tool input shape instead of forwarding model-invented path fields", async () => {
-    const port = queryPort();
+    const port = projectPort();
     const client = scriptedClient([{
       toolCalls: [{
         id: "tool-search",
         name: "search_symbols",
         arguments: { query: "QuoteService", filePath: "C:/private/secret" },
       }],
-    }]);
+    }, { content: JSON.stringify(proposal()) }]);
     const runtime = new ToolCallingArchitectRuntime({ queryPort: port, client });
 
-    await expect(runtime.proposeModulePlan(request)).rejects.toThrow("unsupported search_symbols argument filePath");
-    expect(port.searchSymbols).not.toHaveBeenCalled();
+    await expect(runtime.proposeModulePlan({ ...request, projectId: 'quote' })).resolves.toEqual(proposal());
+    expect(port.searchSymbols).toHaveBeenCalledExactlyOnceWith({ ...scope, projectIds: ['quote'], query: '', limit: 100 }, undefined);
+    expect(JSON.stringify(vi.mocked(client.complete).mock.calls[1]![0]))
+      .toContain('unsupported search_symbols argument filePath');
   });
 });

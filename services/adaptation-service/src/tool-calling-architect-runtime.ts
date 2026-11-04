@@ -749,9 +749,12 @@ const toolInputKeys: Readonly<Record<ToolCallingArchitectToolName, readonly stri
 function assertToolInputKeys(toolName: ToolCallingArchitectToolName, value: Record<string, unknown>): void {
   const allowed = new Set(toolInputKeys[toolName]);
   for (const key of Object.keys(value)) {
-    // An invented field may be an attempt to smuggle input the tool never declared:
-    // it stays fatal, unlike a merely empty or missing required value below.
-    if (!allowed.has(key)) throw new Error(`Tool-calling architect supplied unsupported ${toolName} argument ${key}.`);
+    // Reject undeclared input before querying, then let the model correct it
+    // within the existing evidence-query budget.
+    if (!allowed.has(key)) throw new InvalidToolArgumentsError(
+      `Tool-calling architect supplied unsupported ${toolName} argument ${key}. Allowed arguments: ${[...allowed].join(', ')}. `
+      + 'Source coordinates belong inside sourceRange: { startLine, startColumn, endLine, endColumn }.',
+    );
   }
   const requireString = (key: string): void => {
     if (typeof value[key] !== "string" || !value[key].trim()) {
@@ -780,7 +783,7 @@ function assertToolInputValues(toolName: ToolCallingArchitectToolName, value: Re
 
 function assertBoundedInteger(value: unknown, name: string, maximum: number): void {
   if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > maximum) {
-    throw new Error(`${name} must be an integer between 1 and ${maximum}.`);
+    throw new InvalidToolArgumentsError(`${name} must be an integer between 1 and ${maximum}.`);
   }
 }
 
@@ -789,10 +792,10 @@ function parseToolArguments(value: unknown): Record<string, unknown> {
     try {
       value = JSON.parse(value) as unknown;
     } catch {
-      throw new Error("Tool-calling architect supplied invalid JSON tool arguments.");
+      throw new InvalidToolArgumentsError("Tool-calling architect supplied invalid JSON tool arguments.");
     }
   }
-  if (!isRecord(value)) throw new Error("Tool-calling architect tool arguments must be an object.");
+  if (!isRecord(value)) throw new InvalidToolArgumentsError("Tool-calling architect tool arguments must be an object.");
   return value;
 }
 

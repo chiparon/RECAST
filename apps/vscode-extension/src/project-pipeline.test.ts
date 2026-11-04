@@ -25,6 +25,36 @@ function fixture(overrides: Partial<ProjectPipelinePorts> = {}) {
 async function until(check: () => boolean) { for (let index = 0; index < 200; index++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); } throw new Error('State did not arrive'); }
 
 describe('host-owned project pipeline', () => {
+  it('recovers transient retrieval failures inside the current module before continuing the project', async () => {
+    const search = vi.fn().mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      .mockResolvedValue([]);
+    const { pipeline, ports } = fixture({ search });
+    pipeline.start(input); await pipeline.idle();
+    expect(pipeline.current).toMatchObject({ status: 'completed', acceptance: 'behavior-verified' });
+    expect(search).toHaveBeenCalledTimes(3);
+    expect(search.mock.calls.slice(0, 2).map(call => call[0].id)).toEqual(['upload', 'upload']);
+    expect(pipeline.current!.events.some(event => event.message.includes('自动重试（1/2）'))).toBe(true);
+    expect(ports.generate).toHaveBeenCalledTimes(2);
+  });
+  it('bounds repeated retrieval timeouts and does not retry non-transient failures', async () => {
+    for (const [message, attempts] of [['request timeout', 3], ['invalid target revision', 1]] as const) {
+      const search = vi.fn().mockRejectedValue(new Error(message));
+      const { pipeline, ports } = fixture({ search });
+      pipeline.start(input); await pipeline.idle();
+      expect(pipeline.current).toMatchObject({ status: 'failed', error: message });
+      expect(search).toHaveBeenCalledTimes(attempts);
+      expect(ports.generate).not.toHaveBeenCalled(); expect(ports.publish).not.toHaveBeenCalled();
+    }
+  });
+  it('honors cancellation during retrieval recovery without restarting the project', async () => {
+    const search = vi.fn().mockRejectedValue(new Error('request timeout'));
+    const { pipeline, ports } = fixture({ search });
+    pipeline.start(input);
+    await until(() => Boolean(pipeline.current?.events.some(event => event.message.includes('自动重试'))));
+    pipeline.cancel(pipeline.current!.id); await pipeline.idle();
+    expect(pipeline.current!.status).toBe('cancelled');
+    expect(search).toHaveBeenCalledOnce(); expect(ports.generate).not.toHaveBeenCalled();
+  });
   it('resumes a persisted failure with a new runner, skipping completed modules and keeping original input and attempt evidence', async () => {
     const first = fixture({ generate: async item => item.id === 'orders' ? { ...translated(item), status: 'failed', error: 'interrupted transport' } : translated(item) });
     first.pipeline.start(input); await first.pipeline.idle();

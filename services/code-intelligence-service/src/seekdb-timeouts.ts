@@ -15,5 +15,7 @@ export const seekDbQueryTimeoutMs = 60_000;
 /** One statement's client-side ceiling, kept just above the server's. */
 export const seekDbClientQueryTimeoutMs = seekDbQueryTimeoutMs + 5_000;
 
-/** Whole multi-repository search budget; one slow query must not be cut short. */
-export const moduleSearchBudgetMs = seekDbQueryTimeoutMs;
+/** A search includes several queued SQL waves, source previews and model ranking.
+ * Keep each statement bounded at 60 s, but do not reuse that single-statement
+ * ceiling for the entire multi-repository operation. */
+export const moduleSearchBudgetMs = 5 * seekDbQueryTimeoutMs;

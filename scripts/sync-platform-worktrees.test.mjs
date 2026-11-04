@@ -32,9 +32,11 @@ test('copies current uncommitted source in both directions', t => {
   const { source, target } = fixture(t);
   write(source, 'services/a.js', 'export const value = 2;\n');
   write(source, 'scripts/new.mjs', 'console.log(1);\n');
+  write(source, 'skills/compiled.d.mts', 'export declare const version: string;\n');
   syncWorktrees(source, target);
   assert.equal(readFileSync(path.join(target, 'services/a.js'), 'utf8'), 'export const value = 2;\n');
   assert.equal(readFileSync(path.join(target, 'scripts/new.mjs'), 'utf8'), 'console.log(1);\n');
+  assert.equal(readFileSync(path.join(target, 'skills/compiled.d.mts'), 'utf8'), 'export declare const version: string;\n');
   write(target, 'services/a.js', 'export const value = 3;\n');
   syncWorktrees(target, source);
   assert.equal(readFileSync(path.join(source, 'services/a.js'), 'utf8'), 'export const value = 3;\n');

@@ -242,6 +242,7 @@ npm test
 - `services/code-intelligence-service`、`services/code-indexer`：索引、建模、检索。
 - `services/adaptation-service`：分析、实现、编译、受控写回。
 - `services/translation-verifier`：行为验证和失败证据复核。
+- `skills`：Analyzer、Translator、Integration、Verifier 的稳定提示词；修改与构建方式见 [Agent skills](docs/agent-skills.zh-CN.md)。
 - `services/adaptation-mcp-server`：可选 MCP 集成。
 - `fixtures`：回归测试使用的参考工程和骨架源码。
 - `tests`、`scripts`、`docs`：回归测试、运行维护工具、企业使用与接口文档。

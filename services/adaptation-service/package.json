@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "predev": "node ../../scripts/build-agent-skills.mjs",
+    "prestart": "node ../../scripts/build-agent-skills.mjs",
+    "prebuild": "node ../../scripts/build-agent-skills.mjs",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "build": "tsc -p tsconfig.json",

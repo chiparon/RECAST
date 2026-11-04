@@ -1,0 +1,10 @@
+{
+  "node_version": "20",
+  "graphs": {
+    "recast_project_structure": "./scripts/langsmith-project-graph.ts:graph"
+  },
+  "env": {
+    "LANGSMITH_TRACING": "false",
+    "LANGCHAIN_TRACING_V2": "false"
+  }
+}

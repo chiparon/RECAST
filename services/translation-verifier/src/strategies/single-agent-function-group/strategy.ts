@@ -1,3 +1,4 @@
+import { skillInstruction } from "../../../../../skills/compiled.mjs";
 import type { AgentHost, AgentTask } from "../../host/agent/task.js";
 import type { FunctionGroupHostResult } from "../../host/verification/report.js";
 import {
@@ -41,17 +42,6 @@ export function createSingleAgentFunctionGroupStrategy(
   };
 }
 
-const FUNCTION_GROUP_REPORT_RULES = [
-  "The Host records a separate result for every listed target function and owns all test counts and coverage values; never invent, infer or repeat coverage numbers.",
-  "After your final report the Host reruns the complete dedicated test folder itself, checks every listed target function and may append feedback. Your report is a candidate conclusion, not an accepted result.",
-  "A no-bug report requires the complete current suite to compile and pass without skips and every listed target function to have execution evidence.",
-  "A bug-found report requires a valid failing assertion that reproduces the defect, an issue with kind \"translation\" and a concrete description, and a non-empty affectedTargets list using the requested path, name and signature. Other listed targets that did not execute may stay unverified; do not claim they were verified and do not keep running only to complete them.",
-  "If the complete suite passes with execution evidence for every listed target but a concrete requirement ambiguity remains, report uncertain with an issue of kind \"unknown\" that names the missing contract or evidence. Do not guess the requirement from the implementation.",
-  "Include at most three protocolChecks entries with ruleId and passed, failed, ambiguous, or not-applicable. A failed or ambiguous check prevents a no-bug result.",
-  "End the current Agent call with an ordinary final assistant message containing ONLY this JSON object (no tool call):",
-  '{"verdict":"no-bug"|"bug-found"|"uncertain","summary":"<required>","issue":{"kind":"translation"|"unknown","description":"..."},"affectedTargets":[{"path":"...","name":"...","signature":"..."}],"protocolChecks":[{"ruleId":"...","status":"passed"|"failed"|"ambiguous"|"not-applicable","testName":"...","note":"..."}]}',
-];
-
 /** Function-group task for the LangChain Host: no terminal tools, a plain JSON report ends the call. */
 export function createFunctionGroupFinalReportTask(
   input: FunctionGroupVerificationInput,
@@ -69,17 +59,7 @@ export function createFunctionGroupFinalReportTask(
       targetFunction: { ...first.target },
       functionGroup: input,
     },
-    systemPrompt: [
-      "You are a translation verification agent for a group of target functions.",
-      "Compare each source function with its mapped target function and determine whether the target preserves the required behavior.",
-      "The listed target functions define this run's acceptance scope. The full project requirement is context, not an instruction to verify all project modules. Inspect dependencies to understand these functions, but test behavior through the listed functions; do not add independent tests of unrelated service entry points or attribute their failures to this function group.",
-      "Use only the provided tools and project-relative paths.",
-      "Inspect the relevant source and target files before making a judgment.",
-      "First run ALL existing tests in the dedicated authorized test folder with run_function_group_tests and paths omitted. If the folder is empty, create tests next.",
-      "Establish a passing baseline with no skipped tests: diagnose compilation and assertion failures. Update stale tests only when a source/API or declared contract change justifies it. Never erase a valid requirement failure by copying current implementation behavior.",
-      "Then write or update meaningful tests for EVERY listed target function, run them with run_function_group_tests, and use the Host result as the test status.",
-      ...FUNCTION_GROUP_REPORT_RULES,
-    ].join("\n"),
+    systemPrompt: [skillInstruction("verifier", "source-group/instructions"), skillInstruction("verifier", "report/function-group")].join("\n"),
     userPrompt: [
       `Source language: ${input.sourceLanguage}`,
       `Target language: ${input.targetLanguage}`,
@@ -133,18 +113,7 @@ export function createRequirementFunctionGroupFinalReportTask(
       targetFunction: { ...first.target },
       functionGroup: input,
     },
-    systemPrompt: [
-      "You are a requirement verification agent for a group of target functions.",
-      "Judge whether the target implementation satisfies the stated requirement and its existing target contracts.",
-      "The listed target functions define this run's acceptance scope. The full project requirement is context, not an instruction to verify all project modules. Inspect dependencies to understand these functions, but test behavior through the listed functions; do not add independent tests of unrelated service entry points or attribute their failures to this function group.",
-      "There is no historical source implementation in this mode. Do not claim translation equivalence or invent source evidence.",
-      "Use only the provided target and test tools.",
-      "Inspect the relevant target files before making a judgment.",
-      "First run ALL existing tests in the dedicated authorized test folder with run_function_group_tests and paths omitted. If the folder is empty, create tests next.",
-      "Establish a passing baseline with no skipped tests: diagnose compilation and assertion failures. Repair test-authoring mistakes and stale tests, but keep a failing requirement assertion as evidence of a production defect.",
-      "Then write or update meaningful tests for EVERY listed target function, run them with run_function_group_tests, and use the Host result as the test status.",
-      ...FUNCTION_GROUP_REPORT_RULES,
-    ].join("\n"),
+    systemPrompt: [skillInstruction("verifier", "requirement-group/instructions"), skillInstruction("verifier", "report/function-group")].join("\n"),
     userPrompt: [
       `Target language: ${input.targetLanguage}`,
       `Requirement: ${input.requirement}`,
