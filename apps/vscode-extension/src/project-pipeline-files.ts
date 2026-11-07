@@ -88,8 +88,12 @@ export class ProjectPipelineFiles {
   }
   async assertResumable(run: ProjectPipelineRun): Promise<void> {
     const root = this.output(run);
+    // Windows realpath expands 8.3 directory names even when there is no link.
+    // Reject actual links (including junctions) before recovery writes any files.
+    for (let directory = path.resolve(root); directory !== path.dirname(directory); directory = path.dirname(directory)) {
+      if ((await lstat(directory)).isSymbolicLink()) throw new Error('输出项目路径已改变，无法继续原任务。');
+    }
     for (const module of run.modules.filter(module => !module.taskKind)) await recoverRetainedTestDelivery(root, module.id);
-    if (path.relative(await realpath(root), path.resolve(root)) !== '') throw new Error('输出项目路径已改变，无法继续原任务。');
     if (!run.baselineCommit || (await git(root, ['rev-parse', `${run.baselineCommit}^{commit}`])).trim() !== run.baselineCommit) throw new Error('原任务的骨架基线不存在，无法继续。');
     if (!run.checkpoint) { await this.assertWriteScope(run); return; } // Older runs still require fresh final validation.
     const current = await this.checkpoint(run);

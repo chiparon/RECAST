@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -306,7 +306,7 @@ it('binds an import to a registered workspace root before indexing and keeps hid
   const registered = await instance.synchronize({ repositories: inputs, scan: false });
   const id = await instance.registeredRepositoryIdForPath(target);
   expect(id).toBe(registered.presentation.repositories.find(repository => repository.role === 'target')!.repositoryId);
-  expect((await instance.sourceRootForRepository(id!)).toLowerCase()).toBe(target.toLowerCase());
+  expect(await instance.sourceRootForRepository(id!)).toBe(await realpath(target));
   await expect(instance.activeScopeForPath(target)).rejects.toThrow('no active analysis revision');
   const historyId = await instance.registeredRepositoryIdForPath(history);
   await expect(instance.sourceRootForRepository(historyId!)).rejects.toThrow('不在当前工作区');

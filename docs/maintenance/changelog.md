@@ -6,3 +6,4 @@
 - 针对主线 `a772db67` 的 LangGraph 项目流水线、恢复快照、角色指令和归档布局更新工程文档。保留主线已有的指令编译、LangGraph Studio、验证器和项目流水线测试入口。
 - 增加 PR 双平台质量检查、覆盖率测量、发布版本校验与独立构建的 VSIX 打包流程。变更记录对应工程建设提交前的工作树，扩展清单版本为 0.1.0。
 - 增加[需求与测试映射](../requirements/README.md)、[系统架构](../architecture/system-overview.md)、[ADR](../decisions/ADR-001-host-owned-translation-scope.md)和[工程手册](../engineering/handbook.md)。后续发布在此记录用户可见变化、版本、兼容要求与回退方式。
+- 修复 Windows 临时目录采用 8.3 短路径时的项目恢复与历史参考读取。恢复前会检查输出路径中的目录联接，避免将待恢复的测试写入其他位置。
