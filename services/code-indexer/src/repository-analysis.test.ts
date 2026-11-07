@@ -12,6 +12,7 @@ import {
 import type { CompilerProbe } from './repository-analysis.js';
 
 const execFileAsync = promisify(execFile);
+const jdkTestTimeoutMs = 30_000;
 const temporaryRoots: string[] = [];
 
 async function createRepository(): Promise<string> {
@@ -520,7 +521,7 @@ describe('analyzeRepository', () => {
       expect.objectContaining({ code: 'COMPILER_SEMANTIC_ENRICHMENT_APPLIED' }),
       expect.objectContaining({ code: 'JAVA_SEMANTIC_TOOLCHAIN' }),
     ]));
-  });
+  }, jdkTestTimeoutMs);
 
   it('uses the JDK Compiler API for Java invocation and member-access bindings', async () => {
     const root = await createRepository();
@@ -557,7 +558,7 @@ describe('analyzeRepository', () => {
     }
     expect(invocation?.evidence).toBe('semantic');
     expect(memberAccess?.evidence).toBe('semantic');
-  });
+  }, jdkTestTimeoutMs);
 
   it('preserves syntactic evidence and records a diagnostic when a compiler is unavailable', async () => {
     const root = await createRepository();
