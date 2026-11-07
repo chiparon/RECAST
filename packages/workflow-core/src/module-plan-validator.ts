@@ -264,7 +264,7 @@ function findDependencyCycles(
         visit(next);
       } else if (onStack.has(next)) {
         const start = stack.indexOf(next);
-        const cycle = [...stack.slice(start)].sort((left, right) => left.localeCompare(right));
+        const cycle = stack.slice(start).sort((left, right) => left.localeCompare(right));
         cycles.set(moduleIdTupleKey(cycle), cycle);
       }
     }

@@ -1,5 +1,6 @@
 import { skillInstruction } from "../../../skills/compiled.mjs";
 import { createHash, randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -159,7 +160,7 @@ export class CodexWorkspaceTranslationRuntime {
     catch (error) { throw new CodexWorkspaceTranslationError(400, errorMessage(error)); }
     const request = structuredClone(input);
     for (const path of new Set([...request.workspaceFiles, ...request.writeFiles])) this.files.read(path);
-    this.validateHistoryView(request.historyView);
+    if (request.historyView) this.validateHistoryView(request.historyView);
     if (this.options.verification && request.writeFiles.some(path => this.options.verification!.protectedFiles.some(protectedPath => path.toLowerCase() === protectedPath.toLowerCase()))) {
       throw new CodexWorkspaceTranslationError(400, "Verification criteria cannot be included in writeFiles.");
     }
@@ -869,19 +870,11 @@ export class CodexWorkspaceTranslationRuntime {
 
   private async copyHistoryView(view: WorkspaceHistoryView | undefined, destination: string, signal: AbortSignal): Promise<void> {
     if (!view) { await mkdir(destination, { recursive: true }); return; }
-    this.validateHistoryView(view);
-    const resolvedViewRoot = await realpath(view.root).catch(() => { throw new Error("History view root does not exist."); });
-    const workspaceHistoryRoot = resolve(this.files.root, ".forexpore", "history-views");
-    const temporaryRoot = resolve(tmpdir());
-    const resolvedWorkspaceRoot = await realpath(workspaceHistoryRoot).catch(() => workspaceHistoryRoot);
-    const resolvedTemporaryRoot = await realpath(temporaryRoot).catch(() => temporaryRoot);
-    const workspaceChild = directChildName(workspaceHistoryRoot, resolvedViewRoot);
-    const temporaryChild = directChildName(temporaryRoot, resolvedViewRoot);
-    const allowedWorkspace = workspaceChild !== undefined && directChildName(resolvedWorkspaceRoot, resolvedViewRoot) !== undefined;
-    const allowedTemporary = temporaryChild?.startsWith("forexplore-history-view-") && directChildName(resolvedTemporaryRoot, resolvedViewRoot) !== undefined;
-    if (!allowedWorkspace && !allowedTemporary) throw new Error("History view root symlink escapes its allowlist.");
+    const expectedRoot = this.validateHistoryView(view);
+    const resolvedViewRoot = await realpath(expectedRoot).catch(() => { throw new Error("History view root does not exist."); });
+    if (relative(expectedRoot, resolvedViewRoot) !== "") throw new Error("History view root symlink escapes its allowlist.");
     await mkdir(destination, { recursive: true });
-    const manifestPath = join(view.root, "manifest.json");
+    const manifestPath = join(resolvedViewRoot, "manifest.json");
     let manifest: unknown;
     try {
       const manifestStat = await lstat(manifestPath);
@@ -912,7 +905,7 @@ export class CodexWorkspaceTranslationRuntime {
     const entries: Array<[string, string]> = [];
     for (const file of view.files) {
       signal.throwIfAborted();
-      const source = await safeExternalFile(view.root, join("source", ...file.split("/")));
+      const source = await safeExternalFile(resolvedViewRoot, join("source", ...file.split("/")));
       const bytes = await readFile(source);
       // Keep the same source/ layout as the host-owned view. The Analyzer and
       // Translator prompts intentionally point at history-view/source, while
@@ -1059,13 +1052,21 @@ export class CodexWorkspaceTranslationRuntime {
     }
   }
 
-  private validateHistoryView(view: WorkspaceHistoryView | undefined): void {
-    if (!view) return;
+  private validateHistoryView(view: WorkspaceHistoryView): string {
     const root = resolve(view.root);
-    const temporaryRoot = resolve(tmpdir());
-    const workspaceHistoryRoot = resolve(this.files.root, ".forexpore", "history-views");
-    const workspaceChild = directChildName(workspaceHistoryRoot, root);
-    const temporaryChild = directChildName(temporaryRoot, root);
+    const temporaryRoot = realpathSync.native(tmpdir());
+    const workspaceHistoryRoot = resolve(realpathSync.native(this.files.root), ".forexpore", "history-views");
+    // Expand Windows short names in the parent, preserving the requested leaf so
+    // staging can detect a junction that redirects a selected view.
+    let parent: string;
+    try { parent = realpathSync.native(dirname(root)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      parent = dirname(root);
+    }
+    const expectedRoot = join(parent, basename(root));
+    const workspaceChild = directChildName(workspaceHistoryRoot, expectedRoot);
+    const temporaryChild = directChildName(temporaryRoot, expectedRoot);
     const isWorkspaceView = workspaceChild !== undefined;
     const isTemporaryView = temporaryChild?.startsWith("forexplore-history-view-");
     if (!view.root || !isAbsolute(view.root) || (!isWorkspaceView && !isTemporaryView) ||
@@ -1076,6 +1077,7 @@ export class CodexWorkspaceTranslationRuntime {
       const normalized = file.replaceAll("\\", "/");
       if (!normalized || normalized.startsWith("/") || normalized.split("/").some(part => !part || part === "." || part === "..") || sensitiveFileNames.has(normalized.split("/").at(-1)!.toLowerCase())) throw new Error(`Invalid history view file: ${file}`);
     }
+    return expectedRoot;
   }
 
   private reconcile(run: WorkspaceTranslationRun, rollback = false): void {

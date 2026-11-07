@@ -48,14 +48,14 @@ C／C++ 已接入目标工程识别、模块生成、CMake 构建及 CTest＋gco
    ```powershell
    git clone https://github.com/chiparon/weichai.git E:\work\recast
    Set-Location E:\work\recast
-   npm run workspace:check
+   npm run workspace:check -- --before-install
    npm ci
    npm run workspace:check
    npm install --global @openai/codex
    codex --version
    ```
 
-   全新 checkout 的第一次 `workspace:check` 会提示缺少平台依赖，执行 `npm ci` 后应通过。若提示目录属于另一平台，先修正工作目录。npm 全局命令未找到时重新打开终端。
+   安装前的检查核对平台路径；安装后检查当前平台的原生依赖。若提示目录属于另一平台，先修正工作目录。npm 全局命令未找到时重新打开终端。
 
 3. 指定自己的索引数据库并启动：
 
@@ -101,7 +101,7 @@ C／C++ 已接入目标工程识别、模块生成、CMake 构建及 CTest＋gco
    mkdir -p ~/src
    git clone https://github.com/chiparon/weichai.git ~/src/recast
    cd ~/src/recast
-   npm run workspace:check
+   npm run workspace:check -- --before-install
    npm ci
    npm run workspace:check
    mkdir -p ~/.local
@@ -110,7 +110,7 @@ C／C++ 已接入目标工程识别、模块生成、CMake 构建及 CTest＋gco
    codex --version
    ```
 
-   第一次检查缺依赖的含义同 Windows。把上面的 PATH 设置加入 `~/.profile` 以便以后使用。Java 示例可用 `sudo apt-get install -y openjdk-21-jdk maven`；其他语言按所选工程安装 Linux SDK。
+   安装前后分别核对工作区与 Linux 原生依赖。把上面的 PATH 设置加入 `~/.profile` 以便以后使用。Java 示例可用 `sudo apt-get install -y openjdk-21-jdk maven`；其他语言按所选工程安装 Linux SDK。
 
 4. 在 WSL 工作目录启动：
 
@@ -246,6 +246,10 @@ npm test
 - `services/adaptation-mcp-server`：可选 MCP 集成。
 - `fixtures`：回归测试使用的参考工程和骨架源码。
 - `tests`、`scripts`、`docs`：回归测试、运行维护工具、企业使用与接口文档。
+
+## 工程质量与协作
+
+提交 PR 前运行 `npm run quality`，它包含静态检查、文档检查、分层测试与构建。运行特定层可使用 `npm run test:unit`、`npm run test:integration` 或 `npm run test:e2e`。发布标签前运行 `npm run release:check` 核对版本并打包 VSIX。[文档索引](docs/README.md)、[审计与实测基线](docs/maintenance/repository-audit.md)、[测试策略](docs/testing/testing-strategy.md)、[评审和发布手册](docs/engineering/handbook.md)
 
 ## 发布分支与完整归档
 

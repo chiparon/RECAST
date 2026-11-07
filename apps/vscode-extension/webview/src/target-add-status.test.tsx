@@ -1,6 +1,6 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, expect, it } from 'vitest';
 import type { HostToWebviewMessage, WebviewToHostMessage } from '../../src/protocol/messages';
 import type { ModuleExplorerPresentation } from '../../src/ui-types';
 import App from './App';
@@ -47,7 +47,7 @@ it('restores historical import logs in the same independent task area and retrie
   expect(posted.some(message => message.type === 'REFRESH_REPOSITORY')).toBe(false);
 });
 
-async function mountPanel(initialMode: 'search' | 'migration' = 'search') {
+async function mountPanel() {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   const posted: WebviewToHostMessage[] = [];
   window.acquireVsCodeApi = () => ({ getState: () => null, setState: () => {},
@@ -131,7 +131,7 @@ it('renders every target-selection phase and keeps a retry beside the failure', 
  * that started it, so it survives a Webview rebuild after the workspace change.
  */
 it('shows a live index state for a target the host is still indexing', async () => {
-  const { container, post } = await mountPanel('migration');
+  const { container, post } = await mountPanel();
   expect(container.querySelector('.project-launch-bar')?.textContent).toContain('请先导入目标代码');
   await act(async () => post({ type: 'CODE_INTELLIGENCE_STATUS', presentation: { status: 'ready', storage: 'seekdb',
     repositories: [{ repositoryId: 'repo-1', displayName: 'engine', role: 'target', analysisStatus: 'indexing',

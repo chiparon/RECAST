@@ -649,7 +649,6 @@ await new Promise<void>(resolveListen => retrievalBackend.listen(0, '127.0.0.1',
 const retrievalEndpoint = `http://127.0.0.1:${(retrievalBackend.address() as AddressInfo).port}`;
 cleanups.push(() => new Promise<void>((resolveClose, rejectClose) => retrievalBackend.close(error => error ? rejectClose(error) : resolveClose())));
 
-let semanticEndpoint: string | undefined;
 const codeIntelligence = new CodeIntelligenceHost({
   // A reviewed plan is already bounded by its explicit sourceFiles and is
   // validated by the same host path as any model plan. Do not replace it with
@@ -687,7 +686,7 @@ const codeIntelligence = new CodeIntelligenceHost({
     }
     // The revision-scoped query port must exist before the service will plan; the
     // workbench starts it the same way before asking for a plan.
-    semanticEndpoint = await codeIntelligence.startSemanticQueryServer({
+    await codeIntelligence.startSemanticQueryServer({
       port: semanticPort,
       bearerToken: process.env.SEMANTIC_QUERY_PORT_TOKEN?.trim() || undefined,
     });

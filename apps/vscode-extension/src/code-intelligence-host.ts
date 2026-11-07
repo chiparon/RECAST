@@ -28,8 +28,8 @@ import type {
 } from './ui-types';
 import { projectAnalysisPresentation } from './project-analysis-presentation';
 import { MAX_RETRIEVAL_SCOPES, MAX_SELECTED_HISTORY_MODULES, type WorkspaceEvidenceScope, type WorkspaceHistoryCandidate, type WorkspaceHistoryView } from '@forexplore/contracts';
-import type { ModuleReranker } from '../../../services/code-intelligence-service/src/module-reranker';
-import { platformLocalPath, repositoryPathIdentity } from '../../../services/code-intelligence-service/src/platform-path';
+import type { ModuleReranker } from '@forexplore/code-intelligence-service';
+import { platformLocalPath, repositoryPathIdentity } from '@forexplore/code-intelligence-service/platform-path';
 import { createIndexingProgressReporter, indexingProgressMessage, isIndexingCancellation,
   type IndexingProgress, type RepositoryIndexingProgress } from './indexing-progress';
 
@@ -642,7 +642,6 @@ export class CodeIntelligenceHost {
     if (!Number.isInteger(port) || port < 0 || port > 65_535) {
       throw new Error('Semantic query server port must be 0 (automatic) or a valid TCP port.');
     }
-    const runtime = await this.runtime();
     const server = this.#semanticQueryServerFactory({
       queryPort: await this.semanticQueryPort(),
       ...(options.bearerToken ? { bearerToken: options.bearerToken } : {}),

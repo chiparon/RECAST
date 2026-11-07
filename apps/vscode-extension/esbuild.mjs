@@ -10,6 +10,7 @@ import { agentSkillNames, buildAgentSkills } from '../../scripts/build-agent-ski
 // >= 20. VS Code 1.90 (the declared engine floor) ships Electron 29 / Node
 // 20.9, so the extension is compiled for node20 rather than node18.
 const extensionDirectory = path.dirname(fileURLToPath(import.meta.url));
+const embedSources = !process.argv.includes('--release');
 const workspaceDirectory = path.resolve(extensionDirectory, '..', '..');
 const extensionOutputDirectory = process.env.FOREXPLORE_EXTENSION_OUTPUT_DIRECTORY
   ? path.resolve(process.env.FOREXPLORE_EXTENSION_OUTPUT_DIRECTORY)
@@ -43,6 +44,7 @@ await esbuild.build({
   // __dirname and make node-gyp-build load the wrong grammar binary.
   external: ['vscode', ...nativeRuntimePackages],
   sourcemap: true,
+  sourcesContent: embedSources,
   logLevel: 'info',
 });
 
@@ -55,6 +57,7 @@ for (const worker of ['structural-parse-worker', 'structural-assembly-worker']) 
   target: 'node20',
   external: nativeRuntimePackages,
   sourcemap: true,
+  sourcesContent: embedSources,
   logLevel: 'info',
 });
 

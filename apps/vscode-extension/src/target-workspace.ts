@@ -3,7 +3,7 @@ import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { normaliseConfiguredPath, normaliseConfiguredPaths } from '@forexplore/contracts';
-import { platformLocalPath } from '../../../services/code-intelligence-service/src/platform-path';
+import { platformLocalPath } from '@forexplore/code-intelligence-service/platform-path';
 import type { TargetWorkspaceAddMode, TargetWorkspacePhase } from './protocol/messages';
 import { resolveWorkspaceConfiguredPaths } from './settings';
 

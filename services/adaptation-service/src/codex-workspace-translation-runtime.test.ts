@@ -2,7 +2,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir, symlink } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { CodexWorkspaceTranslationRuntime } from "./codex-workspace-translation-runtime";
 
@@ -16,6 +16,40 @@ async function eventually<T>(read: () => T, done: (value: T) => boolean): Promis
 }
 
 describe("CodexWorkspaceTranslationRuntime", () => {
+  it.each(['temporary', 'workspace'])('validates the selected %s history files across two spellings of the same parent', async kind => {
+    const fixture = await mkdtemp(join(tmpdir(), 'codex-history-spelling-'));
+    const directory = join(fixture, 'physical parent');
+    const alias = join(fixture, 'parent-alias');
+    let runtime: CodexWorkspaceTranslationRuntime | undefined;
+    try {
+      await mkdir(directory);
+      await symlink(directory, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      vi.stubEnv(process.platform === 'win32' ? 'TEMP' : 'TMPDIR', alias);
+      const workspace = join(directory, 'workspace');
+      await mkdir(workspace);
+      await writeFile(join(workspace, 'main.ts'), 'export const value = 0;');
+      const runId = '11111111-2222-3333-4444-555555555555';
+      const history = kind === 'temporary' ? join(directory, 'forexplore-history-view-selected')
+        : join(alias, 'workspace', '.forexpore', 'history-views', runId);
+      await mkdir(join(history, 'source'), { recursive: true });
+      await writeFile(join(history, 'source', 'legacy.ts'), 'export const value = 1;');
+      const identity = { repositoryId: 'history', analysisRevision: 'r1', moduleId: 'legacy', runId };
+      await writeFile(join(history, 'manifest.json'), JSON.stringify({ ...identity, files: [{ path: 'legacy.ts', sha256: 'a'.repeat(64) }] }));
+      runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: workspace, compileCommand: { executable: process.execPath, args: ['--version'] } });
+      const run = runtime.start({ spec: 'implement value', sourceLanguage: 'TypeScript', targetLanguage: 'TypeScript',
+        context: [], workspaceFiles: ['main.ts'], writeFiles: ['main.ts'], historyView: {
+          ...identity, root: history, files: ['legacy.ts'], manifestHash: 'b'.repeat(64),
+        } });
+      const failed = await eventually(() => runtime!.get(run.id), value => value.status === 'failed');
+      expect(failed.error).toContain('History view file hash mismatch: legacy.ts');
+      expect(failed.agent?.stages).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+      await runtime?.shutdown();
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
   it.each(['sibling', 'nested', 'outside'])('rejects a history root outside the direct-child allowlist (%s)', async kind => {
     const root = await mkdtemp(join(tmpdir(), 'codex-history-boundary-'));
     const runtime = new CodexWorkspaceTranslationRuntime({ workspaceRoot: root,

@@ -1,4 +1,3 @@
-import type { WorkspaceEvidenceScope } from "@forexplore/contracts";
 import { MAX_RETRIEVAL_SCOPES } from '@forexplore/contracts';
 import type {
   WorkspaceEvidenceExcerpt,

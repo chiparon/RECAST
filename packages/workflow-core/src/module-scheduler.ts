@@ -1,7 +1,6 @@
 import type {
   ExecutionGroup,
   ExecutionWave,
-  FunctionalModule,
   ModuleDependency,
   ModuleMigrationProposal,
   RepositoryStaticAnalysis,

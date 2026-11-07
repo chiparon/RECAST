@@ -5,18 +5,19 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "exports": {
     ".": "./src/index.ts",
-    "./module-hierarchy-planner": "./src/module-hierarchy-planner.ts"
+    "./module-hierarchy-planner": "./src/module-hierarchy-planner.ts",
+    "./platform-path": "./src/platform-path.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
     "@forexplore/code-indexer": "0.1.0",
     "@forexplore/contracts": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",
-    "js-tiktoken": "^1.0.21",
     "mysql2": "^3.15.3"
   },
   "devDependencies": {

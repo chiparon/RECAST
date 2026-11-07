@@ -1,4 +1,9 @@
 # End-to-End Tests
 
-Tests that exercise complete user workflows through a runnable application
-belong here.
+[`module-translation.test.ts`](module-translation.test.ts) starts at the extension host message boundary with a reviewed target and candidate. The real adaptation HTTP service edits a temporary target workspace. A scripted model requests the tool calls, the installed TypeScript compiler checks the result, and a separate Node process executes the behavior check. The test submits two concurrent start messages, checks they share a run, and restores the original source from a fresh host instance.
+
+The [VS Code host smoke](../../apps/vscode-extension/src/test/integration/suite.ts) exercises extension activation, command registration and panel reuse in Electron. Run `npm run test:integration --workspace forexplore-vscode` on a graphical host with VS Code available for download or `FOREXPLORE_TEST_VSCODE_PATH` pointing to the executable.
+
+The default whole-project path has [extension-host pipeline integration tests](../../apps/vscode-extension/src/project-pipeline.integration.test.ts) for isolated generation, compilation, verification, recovery and Git delivery. With configured real services, use the [product workflow](../../docs/user-guide/README.zh-CN.md) against a dedicated test database. Historical benchmark drivers are available via the [archive](../../docs/archive.md).
+
+The [Java verifier E2E](../../services/translation-verifier/e2e/translation-verifier.e2e.test.ts) uses a scripted model, a temporary Git worktree and **real Maven, JUnit and JaCoCo**. With Git, a JDK, Maven and the fixture's dependencies available, run `npm exec -- vitest run --root services/translation-verifier e2e/translation-verifier.e2e.test.ts`. The [multi-runner suite](../../services/translation-verifier/e2e/runner-coverage.e2e.test.ts) also requires pre-provisioned target runtimes and an explicit `TRANSLATION_VERIFIER_RUNNER_E2E=1`. Both use separate commands because their runtimes are outside the npm lockfile.

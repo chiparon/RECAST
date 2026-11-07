@@ -113,3 +113,19 @@ it('automatic transport does not silently choose a hybrid/default rank when sele
  const ranker=new ConfiguredModelReranker(()=> 'http://127.0.0.1:8788',async()=>{},async()=>Response.json({order:['c0','c1']}),undefined,{onSelection:()=>{throw new Error('must not reach caller');}});
  await expect(ranker.rank('parse',['storage','parser'],new AbortController().signal)).rejects.toThrow('selection');
 });
+
+it('preserves document scores and skips backend startup for zero or one document', async () => {
+  const ensure = vi.fn(async () => {});
+  const transport = vi.fn(async () => Response.json({ order: ['c2', 'c0', 'c1'] }));
+  const ranker = new ConfiguredModelReranker(() => 'http://127.0.0.1:8788', ensure, transport);
+  const signal = new AbortController().signal;
+  expect(await ranker.rank('feature', [], signal)).toEqual([]);
+  expect(await ranker.rank('feature', ['one'], signal)).toEqual([{ index: 0, score: 1 }]);
+  expect(ensure).not.toHaveBeenCalled();
+  expect(transport).not.toHaveBeenCalled();
+  expect(await ranker.rank('feature', ['one', 'two', 'three'], signal)).toEqual([
+    { index: 2, score: 1 },
+    { index: 0, score: 1 - 1 / 3 },
+    { index: 1, score: 1 - 2 / 3 },
+  ]);
+});

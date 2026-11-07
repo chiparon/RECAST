@@ -22,7 +22,6 @@ import {
   type GetSymbolRequest,
   type GetSymbolResult,
   type IndexDiagnosticRecord,
-  type IndexedFileRecord,
   type LanguageCapabilityLevel,
   type LanguageId,
   type ListProjectsRequest,

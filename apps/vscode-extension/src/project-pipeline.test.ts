@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { WorkspaceCompilation, WorkspaceTranslationPlan, WorkspaceTranslationRun } from '@forexplore/contracts';
 import { ProjectPipeline, projectPipelineMarkdown, type ProjectPipelinePorts } from './project-pipeline';
-import type { ProjectPipelineModule, ProjectPipelineRun, ProjectPipelineStart } from './project-pipeline-types';
+import type { ProjectPipelineModule, ProjectPipelineStart } from './project-pipeline-types';
 
 const input: ProjectPipelineStart = { repositoryId: 'repo', projectId: 'project', requirement: '实现租户隔离与幂等上传', topK: 4 };
 const module = (id: string): ProjectPipelineModule => ({ id, name: id, status: 'pending', candidates: [], dependsOn: [], target: {

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -20,6 +20,20 @@ it.skipIf(process.platform !== 'win32')('accepts VS Code lowercase drive paths w
   const expected = path.join(files.directory(id), 'project');
   expect(files.output({ id, outputRoot: expected.toLowerCase() } as ProjectPipelineRun)).toBe(expected);
   expect(() => files.output({ id, outputRoot: path.join(files.directory(id), 'other') } as ProjectPipelineRun)).toThrow('受管副本');
+});
+it('rejects a linked output directory before recovering a pending test delivery', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'recast-linked-output-')); roots.push(root);
+  const files = new ProjectPipelineFiles(root), id = '11111111-2222-3333-4444-555555555555';
+  const external = path.join(root, 'external');
+  const moduleId = 'second';
+  const pending = path.join(external, '.recast-tests-delivery', hash(moduleId).slice(0, 24));
+  await mkdir(pending, { recursive: true });
+  await writeFile(path.join(pending, 'ready'), '');
+  await mkdir(files.directory(id), { recursive: true });
+  const outputRoot = path.join(files.directory(id), 'project');
+  await symlink(external, outputRoot, process.platform === 'win32' ? 'junction' : 'dir');
+  await expect(files.assertResumable({ id, outputRoot, modules: [{ id: moduleId }] } as ProjectPipelineRun))
+    .rejects.toThrow('输出项目路径已改变');
 });
 it('runs real file generation, compiler, immutable tests, report persistence and an atomic isolated Git commit', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'recast-project-e2e-')); roots.push(root);

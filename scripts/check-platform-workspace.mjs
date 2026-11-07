@@ -26,8 +26,9 @@ export function checkPlatformWorkspace(root, { dependencies = true } = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-    checkPlatformWorkspace(root);
-    console.log(`Platform workspace ready: ${process.platform}-${process.arch} · ${root}`);
+    const beforeInstall = process.argv[2] === '--before-install';
+    checkPlatformWorkspace(root, { dependencies: !beforeInstall });
+    console.log(`Platform workspace ${beforeInstall ? 'selected for install' : 'ready'}: ${process.platform}-${process.arch} · ${root}`);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

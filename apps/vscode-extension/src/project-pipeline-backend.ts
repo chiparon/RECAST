@@ -11,26 +11,27 @@ export interface CodexRuntime {
   cancel(id: string): Promise<WorkspaceTranslationRun>;
   shutdown(): Promise<void>;
 }
-const codexService = () => require('../../../services/adaptation-service/src/codex-workspace-translation-runtime') as {
+const codexService = () => require('@forexplore/adaptation-service/codex-workspace-translation-runtime') as {
   CodexWorkspaceTranslationRuntime: new (options: { workspaceRoot: string; compileCommand: WorkspaceCompileCommand; codexHome: string; codexModel: string;
     codexCommand?: string; timeoutMs: number; maxVerificationRepairs: number; environment: NodeJS.ProcessEnv }) => CodexRuntime;
 };
-import { prepareDeepSeekCodexHome, type CodexHomeHandle } from '../../../services/adaptation-service/src/codex-experiment-home';
-const plannerService = () => require('../../../services/adaptation-service/src/integration-plan-agent') as {
+import {
+  loadGlobalProtocol, mergeGlobalProtocol, persistGlobalProtocol, prepareDeepSeekCodexHome,
+  prepareProjectIntegrationContext, projectModuleProtocol, recordProtocolChecks,
+  type CodexHomeHandle, type ImplementationReferenceSelection,
+} from '@forexplore/adaptation-service/project-pipeline';
+const plannerService = () => require('@forexplore/adaptation-service/integration-plan-agent') as {
   runIntegrationPlanAgent(input: { targetRoot: string; requirement: string; modules: ProjectModule[]; taskIdentity: string;
     model: { apiKey: string; modelConfig: { apiBase: string; model: string } }; signal: AbortSignal }): Promise<{ protocol: GlobalProtocol; warning?: string }>;
 };
-import { loadGlobalProtocol, mergeGlobalProtocol, persistGlobalProtocol, projectModuleProtocol, recordProtocolChecks } from '../../../services/adaptation-service/src/protocol-sidecar';
-import { prepareProjectIntegrationContext } from '../../../services/adaptation-service/src/project-integration-context';
-import type { ImplementationReferenceSelection } from '../../../services/adaptation-service/src/reference-selection-policy';
 import type { CodeIntelligenceHost } from './code-intelligence-host';
 import { ConfiguredModelReranker } from './model-reranker';
 import { prepareDirectModuleTranslationScope, prepareIntegrationTranslationScope, prepareModuleTranslationScope } from './module-translation-handoff';
 import { verifyPipelineModule, type PipelineModel } from './project-module-verifier';
 import type { ProjectPipelinePorts } from './project-pipeline';
 import type { ProjectPipelineModule, ProjectPipelineRun, ProjectPipelineStart } from './project-pipeline-types';
-import { copyRetainedTestSuite, readRetainedTestSuite } from '../../../services/translation-verifier/src/host/test-artifacts';
-import type { RetainedTestSuite, VerificationTestEvidence } from '../../../services/translation-verifier/src/types';
+import { copyRetainedTestSuite, readRetainedTestSuite } from '@forexplore/translation-verifier-service/test-artifacts';
+import type { RetainedTestSuite, VerificationTestEvidence } from '@forexplore/translation-verifier-service/types';
 
 type Hooks = Parameters<ProjectPipelinePorts['generate']>[2];
 

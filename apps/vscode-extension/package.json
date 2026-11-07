@@ -4,6 +4,10 @@
   "description": "在 VS Code 中运行 RECAST 智能检索与代码复用工作流：定位实现、组织上下文、生成目标代码并审阅回填。",
   "version": "0.1.0",
   "publisher": "forexplore",
+  "vsce": {
+    "baseContentUrl": "https://github.com/chiparon/weichai/blob/main/apps/vscode-extension",
+    "baseImagesUrl": "https://raw.githubusercontent.com/chiparon/weichai/main/apps/vscode-extension"
+  },
   "license": "MIT",
   "private": true,
   "engines": {
@@ -331,7 +335,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
     "test": "vitest run",
     "test:integration": "npm run build && node esbuild.integration.mjs && tsx src/test/integration/run-tests.ts",
-    "package": "vsce package --no-dependencies --allow-missing-repository"
+    "package": "vsce package --no-dependencies --allow-missing-repository",
+    "package:release": "node package-release.mjs"
   },
   "dependencies": {
     "@forexplore/adaptation-service": "0.1.0",
@@ -339,6 +344,7 @@
     "@forexplore/code-indexer": "0.1.0",
     "@forexplore/code-intelligence-service": "0.1.0",
     "@forexplore/contracts": "0.1.0",
+    "@forexplore/translation-verifier-service": "0.1.0",
     "@forexplore/workflow-core": "0.1.0",
     "@langchain/core": "1.2.20",
     "@langchain/langgraph": "1.5.2",

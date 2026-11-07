@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -73,7 +73,7 @@ describe('Codex command launch', () => {
       if (layout !== 'legacy') {
         await writeFile(join(platformRoot, 'package.json'), JSON.stringify({ name: `@openai/codex-win32-${arch}` }));
       }
-      const expected = { executable, args: [] };
+      const expected = { executable: await realpath(executable), args: [] };
       expect(await resolveCodexCommand('codex', { cwd: root, environment: { PATH: root }, platform: 'win32', arch }))
         .toEqual(expected);
       expect(await resolveCodexCommand(join(root, 'codex.cmd'), { cwd: root, environment: {}, platform: 'win32', arch }))

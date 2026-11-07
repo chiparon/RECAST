@@ -231,7 +231,7 @@ const host = createLangChainAgentHost({ model, traceLogger });
 
 ## Live Model E2E
 
-The deterministic fixture E2E remains network-free. The live test is opt-in and requires an explicit `TRANSLATION_VERIFIER_LIVE_E2E=1`; a configured API key alone never enables network traffic:
+The fixture E2E uses a scripted model. It creates a Git worktree and runs Maven with Surefire and JaCoCo, so an offline run requires the fixture dependencies and plugins in the Maven cache. The live test calls the configured model only when `TRANSLATION_VERIFIER_LIVE_E2E=1` is set.
 
 ```bash
 TRANSLATION_VERIFIER_LIVE_E2E=1 \
