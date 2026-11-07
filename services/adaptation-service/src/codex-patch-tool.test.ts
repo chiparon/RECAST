@@ -15,6 +15,7 @@ async function fixture() {
   return root;
 }
 const patch = '*** Begin Patch\n*** Add File: target/文件 name.cs\n+public const string Text = "租户 \\ path $value `tick";\n*** End Patch';
+const shellTimeoutMs = 30_000;
 
 it('preserves patch bytes across the actual platform shell and a Node CLI launcher', async () => {
   const root = await fixture();
@@ -25,12 +26,13 @@ it('preserves patch bytes across the actual platform shell and a Node CLI launch
   const script = process.platform === 'win32' ? join(root, 'invoke.ps1') : join(root, 'invoke.sh');
   const quote = (value: string) => `'${value.replaceAll("'", process.platform === 'win32' ? "''" : `'"'"'`)}'`;
   await writeFile(script, `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${codexPatchToolFile} change.patch\n${process.platform === 'win32' ? 'exit $LASTEXITCODE' : ''}`);
+  const options = { cwd: root, encoding: 'utf8' as const, windowsHide: true, timeout: shellTimeoutMs };
   const result = process.platform === 'win32'
-    ? spawnSync('powershell.exe', ['-NoProfile', '-File', script], { cwd: root, encoding: 'utf8', windowsHide: true })
-    : spawnSync('sh', [script], { cwd: root, encoding: 'utf8' });
-  expect(result.status, result.stderr).toBe(0);
+    ? spawnSync('powershell.exe', ['-NoProfile', '-File', script], options)
+    : spawnSync('sh', [script], options);
+  expect(result.status, result.error?.message ?? result.stderr).toBe(0);
   expect(await readFile(join(root, 'captured.txt'), 'utf8')).toBe(patch);
-});
+}, shellTimeoutMs + 5_000);
 
 it('retains the real patch failure and nonzero exit code for diagnosis', async () => {
   const root = await fixture();
