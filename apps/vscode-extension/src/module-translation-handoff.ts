@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { MAX_SELECTED_HISTORY_MODULES, type GlobalProtocol, type Language, type ModuleProtocol, type ModuleTarget, type SearchCandidate, type WorkspaceTranslationContext, type WorkspaceEvidenceScope, type WorkspaceHistoryView } from '@forexplore/contracts';
+import { MAX_SELECTED_HISTORY_MODULES, type GlobalProtocol, type ModuleProtocol, type ModuleTarget, type SearchCandidate, type WorkspaceTranslationContext, type WorkspaceEvidenceScope, type WorkspaceHistoryView } from '@forexplore/contracts';
 import { buildModuleTranslationScope } from './module-translation-scope';
 import type { WorkspaceTranslationModuleScope } from './workspace-translation-host';
 

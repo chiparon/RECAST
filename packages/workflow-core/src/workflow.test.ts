@@ -114,4 +114,15 @@ describe('workflowReducer', () => {
     expect(state.candidates).toEqual([]);
     expect(state.adaptation).toBeNull();
   });
+
+  it('keeps a failed patch available for review and discards it when the user goes back', () => {
+    const patch = { ...initialWorkflowState, stage: 'patch' as const, target,
+      candidates: [candidate], selectedCandidateId: candidate.id, adaptation };
+    const applying = workflowReducer(patch, { type: 'APPLY_START' });
+    const failed = workflowReducer(applying, { type: 'APPLY_FAILURE', message: 'Source changed' });
+    expect(failed).toMatchObject({ stage: 'patch', pending: null, error: 'Source changed', adaptation });
+    expect(workflowReducer(failed, { type: 'RETURN_TO_CANDIDATES' })).toMatchObject({
+      stage: 'candidates', selectedCandidateId: candidate.id, adaptation: null, applyResult: null, error: null,
+    });
+  });
 });

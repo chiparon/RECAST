@@ -26,7 +26,6 @@ import {
   scheduleModuleMigration,
   sha256Hex,
   stableHash,
-  transitionExecutionWaveStatus,
   transitionModulePlanWaveStatus,
   transitionWaveTransactionStatus,
   validateModuleMigrationPlan,

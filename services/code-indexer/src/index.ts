@@ -6,11 +6,9 @@
  */
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { IndexedCodeDocument, Language } from '@forexplore/contracts';
+import type { IndexedCodeDocument } from '@forexplore/contracts';
 import { discoverRepositories, resolveSourceRoot } from './discover.js';
-import type { CorpusManifest } from './discover.js';
 import { extractSymbols, fileExtensions, isTestPath } from './extractor.js';
-import type { SymbolMatch } from './extractor.js';
 
 export type { CorpusManifest } from './discover.js';
 export type { SymbolMatch } from './extractor.js';

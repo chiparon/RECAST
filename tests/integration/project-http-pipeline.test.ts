@@ -3,11 +3,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Server } from 'node:http';
 import { expect, it } from 'vitest';
-import { createCodeIntelligenceRuntime, InMemoryIndexStore, createSemanticQueryHttpServer, ProjectAnalysisCoordinator } from './index.js';
-import { ToolCallingArchitectRuntime } from '../../adaptation-service/src/tool-calling-architect-runtime';
-import { HttpSemanticQueryPort } from '../../adaptation-service/src/http-semantic-query-port';
-import { createHttpServer } from '../../adaptation-service/src/http-server';
-import { requestSemanticModuleMigrationProposal } from '../../../apps/vscode-extension/src/module-plan-client';
+import { createCodeIntelligenceRuntime, InMemoryIndexStore, createSemanticQueryHttpServer, ProjectAnalysisCoordinator, type CodeIntelligenceRuntime } from '@forexplore/code-intelligence-service';
+import { ToolCallingArchitectRuntime, HttpSemanticQueryPort, createHttpServer } from '@forexplore/adaptation-service';
+import { requestSemanticModuleMigrationProposal } from '../../apps/vscode-extension/src/module-plan-client';
 
 async function listen(server: Server) {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -17,11 +15,12 @@ async function listen(server: Server) {
 it('publishes a project summary through the actual planning HTTP route and revision-scoped tool transport', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'forexplore-http-project-'));
   const servers: Server[] = [];
+  let runtime: CodeIntelligenceRuntime | undefined;
   try {
     await writeFile(path.join(root, 'package.json'), '{"name":"fixture"}');
     await writeFile(path.join(root, 'index.ts'), 'export function add(a: number, b: number) { return a + b; }');
-    const runtime = await createCodeIntelligenceRuntime({ store: new InMemoryIndexStore() });
-    await runtime.registry.register({ repositoryId: 'history', role: 'history', localPath: root });
+    runtime = await createCodeIntelligenceRuntime({ store: new InMemoryIndexStore() });
+    await runtime.registry.register({ repositoryId: 'history', displayName: 'History', role: 'history', localPath: root });
     const run = await runtime.coordinator.run({ repositoryId: 'history' });
     const index = (await runtime.store.getStructuralIndex(run.scope))!;
     const project = index.projects[0]!;
@@ -62,6 +61,7 @@ it('publishes a project summary through the actual planning HTTP route and revis
     expect((await runtime.store.listSearchDocuments(run.scope)).some((document) => document.kind === 'summary')).toBe(true);
   } finally {
     await Promise.all(servers.map((server) => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); })));
+    await runtime?.close();
     await rm(root, { recursive: true, force: true });
   }
 });

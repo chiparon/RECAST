@@ -19,15 +19,15 @@ it.each([false, true])('packages the adapter and runs real Codex staging, compil
   let backend: Backend | undefined;
   try {
     const backendPath = path.join(import.meta.dirname, 'project-pipeline-backend.ts');
-    const runtimePath = path.resolve(import.meta.dirname, '../../../services/adaptation-service/src/codex-workspace-translation-runtime.ts');
-    const compilerPath = path.resolve(import.meta.dirname, '../../../services/adaptation-service/src/workspace-compiler.ts');
+    const runtimePath = require.resolve('@forexplore/adaptation-service/codex-workspace-translation-runtime');
+    const compilerPath = require.resolve('@forexplore/adaptation-service/workspace-compiler');
     const bundle = path.join(root, 'pipeline.cjs');
     await build({ stdin: { contents: `export { ProjectPipelineBackend } from ${JSON.stringify(backendPath)}; export { CodexWorkspaceTranslationRuntime } from ${JSON.stringify(runtimePath)}; export { compileWorkspace } from ${JSON.stringify(compilerPath)};`, resolveDir: import.meta.dirname },
       outfile: bundle, bundle: true, platform: 'node', format: 'cjs', logLevel: 'silent', plugins: [{ name: 'native-grammars', setup(build) {
         build.onResolve({ filter: /^(tree-sitter|@tree-sitter-grammars)/ }, args => ({ path: nativeRequire.resolve(args.path), external: true }));
       } }] });
     const packaged = require(bundle) as { ProjectPipelineBackend: typeof Backend; CodexWorkspaceTranslationRuntime: new (options: unknown) => CodexRuntime;
-      compileWorkspace: typeof import('../../../services/adaptation-service/src/workspace-compiler').compileWorkspace };
+      compileWorkspace: typeof import('@forexplore/adaptation-service/workspace-compiler').compileWorkspace };
     const source = path.join(root, 'source'); await mkdir(source); await mkdir(path.join(source, 'src'));
     const skeleton = 'export function answer() { return 0; }\n';
     await writeFile(path.join(source, 'src/main.mjs'), skeleton);

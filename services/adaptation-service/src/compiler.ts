@@ -144,7 +144,7 @@ export function compileIntegrated(
       output: "",
     };
   }
-  const { sourcePath, relativePath: relativeTarget } = resolvedTarget;
+  const { relativePath: relativeTarget } = resolvedTarget;
   const dotnet = findDotnet();
   if (!dotnet) {
     return {

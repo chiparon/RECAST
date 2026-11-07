@@ -2,9 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ModuleProtocol, SearchCandidate, WorkspaceHistoryView } from '@forexplore/contracts';
 import { buildModuleFunctionMapping, discoverExecutableFunctions, expandClassLevelFunctions } from '../../../scripts/module-function-mapping';
-import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput, FunctionGroupVerificationResult } from '../../../services/translation-verifier/src/types';
+import type { FunctionGroupVerificationInput, RequirementFunctionGroupVerificationInput, FunctionGroupVerificationResult,
+  TestRetention, RetainedTestSuite, VerificationTestEvidence } from '@forexplore/translation-verifier-service/types';
 import type { ProjectPipelineModule } from './project-pipeline-types';
-import type { TestRetention, RetainedTestSuite, VerificationTestEvidence } from '../../../services/translation-verifier/src/types';
 
 // Match the extension's existing runtime bridges: backend implementations are bundled,
 // while their independent TypeScript projects retain their own compiler options.
@@ -59,17 +59,7 @@ function requireVerifierRuntime(): {
   createLangChainFunctionGroupAgentHost(options: VerifierHostOptions): unknown;
   createFunctionGroupVerifier(host: unknown): FunctionGroupVerifier;
 } {
-  return {
-    createTranslationVerifierChatModel: (require('../../../services/translation-verifier/src/host/agent/chat-model') as {
-      createTranslationVerifierChatModel(options: PipelineModel & { maxOutputTokens: number; onOutputLimitRetry?: (attempt: number, maxRetries: number) => void }): unknown;
-    }).createTranslationVerifierChatModel,
-    createLangChainFunctionGroupAgentHost: (require('../../../services/translation-verifier/src/host/agent/langchain-runtime') as {
-      createLangChainFunctionGroupAgentHost(options: VerifierHostOptions): unknown;
-    }).createLangChainFunctionGroupAgentHost,
-    createFunctionGroupVerifier: (require('../../../services/translation-verifier/src/function-group-verify') as {
-      createFunctionGroupVerifier(host: unknown): FunctionGroupVerifier;
-    }).createFunctionGroupVerifier,
-  };
+  return require('@forexplore/translation-verifier-service/function-group-runtime');
 }
 
 /**

@@ -6,7 +6,7 @@ import {
   verifierDisposition,
   verifierWorkLogMessage,
 } from './project-module-verifier';
-import type { FunctionGroupVerificationResult } from '../../../services/translation-verifier/src/types';
+import type { FunctionGroupVerificationResult } from '@forexplore/translation-verifier-service/types';
 
 const target = { path: 'src/Order.java', name: 'calculatePrice' };
 const functionResult = { target, status: 'passed' as const, executed: true, lineCoverage: 100, branchCoverage: null };

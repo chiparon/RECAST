@@ -8,8 +8,8 @@ import { ProjectPipelineBackend, type CodexRuntime } from './project-pipeline-ba
 import type { ProjectPipelineModule, ProjectPipelineRun } from './project-pipeline-types';
 import type { PipelineModuleVerification } from './project-module-verifier';
 import { createHash } from 'node:crypto';
-import { retainedTestDirectory, RETAINED_TEST_README, RETAINED_TEST_RUNNER } from '../../../services/translation-verifier/src/host/test-artifacts';
-import type { RetainedTestSuite, VerificationTestEvidence } from '../../../services/translation-verifier/src/types';
+import { retainedTestDirectory, RETAINED_TEST_README, RETAINED_TEST_RUNNER } from '@forexplore/translation-verifier-service/test-artifacts';
+import type { RetainedTestSuite, VerificationTestEvidence } from '@forexplore/translation-verifier-service/types';
 
 vi.mock('./local-fetch', () => ({ localFetch: vi.fn(async (_url, init) => {
   const request = JSON.parse(init.body);

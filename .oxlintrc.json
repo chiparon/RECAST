@@ -1,0 +1,51 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": { "correctness": "warn" },
+  "ignorePatterns": ["**/dist/**", "**/coverage/**"],
+  "rules": {
+    "no-debugger": "error",
+    "no-unreachable": "error",
+    "no-dupe-keys": "error"
+  },
+  "overrides": [
+    {
+      "files": ["apps/**/*", "services/**/*", "packages/adaptation-http-adapter/**/*"],
+      "rules": {
+        "no-restricted-imports": ["error", {
+          "patterns": [{
+            "regex": "^(?:(?:\\.\\./)+(?:(?:apps|packages|services)/)?[^./][^/]*/src|@forexplore/[^/]+/src)(?:/|$)",
+            "message": "Import another workspace through its package exports."
+          }]
+        }]
+      }
+    },
+    {
+      "files": ["packages/contracts/**/*"],
+      "rules": {
+        "no-restricted-imports": ["error", {
+          "patterns": [{
+            "regex": "^(@forexplore/|forexplore-vscode(?:/|$)|(?:\\.\\./)+[^.][^/]*/src/|(?:\\.\\./)+(?:apps|packages|services)/)",
+            "message": "Contracts define shared data and must not depend on another workspace."
+          }]
+        }]
+      }
+    },
+    {
+      "files": ["packages/workflow-core/**/*"],
+      "rules": {
+        "no-restricted-imports": ["error", {
+          "patterns": [
+            {
+              "group": ["@forexplore/**", "!@forexplore/contracts"],
+              "message": "Workflow core may only depend on the contracts workspace."
+            },
+            {
+              "regex": "^(forexplore-vscode(?:/|$)|(?:\\.\\./)+[^.][^/]*/src/|(?:\\.\\./)+(?:apps|packages|services)/)",
+              "message": "Access workspace contracts through @forexplore/contracts."
+            }
+          ]
+        }]
+      }
+    }
+  ]
+}

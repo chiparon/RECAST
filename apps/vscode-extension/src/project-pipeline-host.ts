@@ -11,7 +11,6 @@ import { ProjectPipelineFiles } from './project-pipeline-files';
 import { buildProjectPipelineModules } from './project-pipeline-plan';
 import { ProjectPipelineBackend } from './project-pipeline-backend';
 import type { PipelineModel } from './project-module-verifier';
-import type { ProjectPipelineModule, ProjectPipelineRun } from './project-pipeline-types';
 
 const runtimeService = () => require('@forexplore/adaptation-service/workspace-compiler') as {
   compileWorkspace(root: string, command: WorkspaceCompileCommand, signal: AbortSignal): Promise<WorkspaceCompilation>;

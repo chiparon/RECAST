@@ -44,9 +44,26 @@
     "build:semantic-index-mcp": "npm run build --workspace @forexplore/semantic-index-mcp-server",
     "test:code-intelligence": "npm run test --workspace @forexplore/code-intelligence-service",
     "test:semantic-index-mcp": "npm run test --workspace @forexplore/semantic-index-mcp-server",
-    "test": "npm run test --workspace @forexplore/workflow-core -- --maxWorkers 2 && npm run test --workspace @forexplore/code-indexer -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-http-adapter -- --maxWorkers 2 && npm run test --workspace @forexplore/code-intelligence-service -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-service -- --maxWorkers 2 && npm run test --workspace @forexplore/adaptation-mcp-server -- --maxWorkers 2 && npm run test --workspace @forexplore/semantic-index-mcp-server -- --maxWorkers 2 && npm run test --workspace forexplore-vscode -- --maxWorkers 2",
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e",
     "test:verifier": "vitest run --dir services/translation-verifier/src --maxWorkers 2",
-    "test:scripts": "vitest run --dir scripts --exclude '**/*.test.mjs' --maxWorkers 2 && node --test scripts/sync-platform-worktrees.test.mjs",
-    "test:verifier:e2e": "vitest run --dir services/translation-verifier/e2e --maxWorkers 2"
+    "test:scripts": "vitest run --dir scripts --exclude \"**/*.test.mjs\" --maxWorkers 2 && node --test \"scripts/*.test.mjs\"",
+    "test:verifier:e2e": "vitest run --dir services/translation-verifier/e2e --maxWorkers 2",
+    "typecheck": "tsc -p tooling/tsconfig.shared.json && npm run typecheck --workspaces --if-present",
+    "test:unit": "npm run test --workspaces --if-present -- --maxWorkers 2 && npm run test:scripts && vitest run --root tests contract --maxWorkers 2",
+    "test:integration": "vitest run --root tests integration",
+    "test:e2e": "vitest run --root tests e2e",
+    "coverage:core": "vitest run --root packages/workflow-core --coverage.enabled --coverage.include=src/**/*.ts --coverage.exclude=src/**/*.test.ts",
+    "build:all": "npm run build --workspaces --if-present",
+    "lint": "oxlint --deny-warnings packages && oxlint --max-warnings 59 apps packages services scripts tests",
+    "check:docs": "node scripts/check-docs.mjs",
+    "quality": "npm run workspace:check && npm run skills:check && npm run check:hygiene && npm run lint && npm run typecheck && npm run check:docs && npm test && npm run build:all",
+    "release:package": "node scripts/check-release-version.mjs && npm run package:release --workspace forexplore-vscode",
+    "release:check": "npm run quality && npm run release:package"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "4.1.12",
+    "oxlint": "1.92.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.12"
   }
 }

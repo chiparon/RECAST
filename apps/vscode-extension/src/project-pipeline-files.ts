@@ -5,9 +5,9 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { ProjectPipelineCheckpoint, ProjectPipelineRun } from './project-pipeline-types';
 import { projectPipelineMarkdown } from './project-pipeline';
-import { isNewProjectIntegrationSource } from '../../../services/adaptation-service/src/project-integration-context';
-import { readRetainedTestSuite, retainedTestFiles, recoverRetainedTestDelivery, RETAINED_TEST_README, RETAINED_TEST_RUNNER } from '../../../services/translation-verifier/src/host/test-artifacts';
-import type { RetainedTestSuite } from '../../../services/translation-verifier/src/types';
+import { isNewProjectIntegrationSource } from '@forexplore/adaptation-service/project-pipeline';
+import { readRetainedTestSuite, retainedTestFiles, recoverRetainedTestDelivery, RETAINED_TEST_README, RETAINED_TEST_RUNNER } from '@forexplore/translation-verifier-service/test-artifacts';
+import type { RetainedTestSuite } from '@forexplore/translation-verifier-service/types';
 
 const execute = promisify(execFile);
 const ignored = new Set(['.git', '.forexpore', '.agent-tmp', '.translation-verifier-tests', '.translation-verifier-coverage', '.recast-tests-delivery', '.recast-build', '.forexplore', '.vs', '.idea', '.gradle', '.pytest_cache', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out', 'target', 'coverage', '__pycache__']);

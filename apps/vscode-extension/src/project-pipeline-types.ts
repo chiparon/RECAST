@@ -1,7 +1,7 @@
 import type { PipelineModuleVerification } from './project-module-verifier';
-import type { ImplementationReferenceSelection } from '../../../services/adaptation-service/src/reference-selection-policy';
+import type { ImplementationReferenceSelection } from '@forexplore/adaptation-service/project-pipeline';
 import type { ModuleTarget, SearchCandidate, WorkspaceCompilation, WorkspaceCompileCommand, WorkspaceTranslationPlan, WorkspaceTranslationRun } from '@forexplore/contracts';
-import type { RetainedTestSuite } from '../../../services/translation-verifier/src/types';
+import type { RetainedTestSuite } from '@forexplore/translation-verifier-service/types';
 
 export type ProjectPipelineStage = 'modeling' | 'retrieving' | 'analyzing' | 'generating' | 'verifying' | 'publishing' | 'complete';
 export interface ProjectPipelineModule {

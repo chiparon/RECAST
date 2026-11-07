@@ -253,10 +253,6 @@ export function sourceRangeForOffsets(
   };
 }
 
-function isDeclaration(node: Parser.SyntaxNode): node is Parser.SyntaxNode {
-  return declarationKinds[node.type] !== undefined;
-}
-
 function declarationKind(node: Parser.SyntaxNode): StructuralSymbolKind | undefined {
   return declarationKinds[node.type];
 }

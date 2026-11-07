@@ -3,6 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "exports": {
+    "./function-group-runtime": "./src/function-group-runtime.ts",
+    "./test-artifacts": "./src/host/test-artifacts.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "test": "vitest run src"
+  },
   "dependencies": {
     "@forexplore/contracts": "0.1.0",
     "@langchain/core": "1.2.20",
@@ -10,6 +18,9 @@
     "@langchain/openai": "1.5.7",
     "fast-xml-parser": "^5.0.0",
     "langchain": "1.5.19",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@forexplore/adaptation-service": "0.1.0"
   }
 }

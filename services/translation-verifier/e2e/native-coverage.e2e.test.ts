@@ -8,7 +8,7 @@ import { runFunctionGroupTests } from '../src/host/tools/run-function-group-test
 import { createTestHistory } from '../src/host/verification/test-history.js';
 import type { ToolContext } from '../src/host/tools/common.js';
 import { buildModuleFunctionMapping, discoverExecutableFunctions } from '../../../scripts/module-function-mapping.js';
-import { compileTargetIntegrated, compileTargetStandalone } from '../../adaptation-service/src/compiler.js';
+import { compileTargetIntegrated, compileTargetStandalone } from '@forexplore/adaptation-service/compiler';
 import { build } from 'esbuild';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
