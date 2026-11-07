@@ -1,0 +1,48 @@
+RECAST Non-Commercial License
+Custom source-available license — version 1.0
+
+1. Scope
+
+This license applies to project-owned material distributed with this license,
+except material identified as separately licensed. It is a custom non-commercial
+license, not an OSI-approved open-source license.
+
+Third-party code, dependencies, and separately licensed fixtures retain their
+own licenses, copyright notices, and attribution requirements. This license
+does not relicense them or revoke rights already granted under earlier licenses,
+including historical MIT grants. See THIRD_PARTY_NOTICES.md for scope details.
+Separate agreements are not automatically amended or superseded by this public
+license. No commercial permission is granted by this license.
+
+2. Non-commercial permission
+
+Subject to these terms, you may access, use, copy, study, research, develop,
+modify, and share the covered material solely for non-commercial purposes.
+When sharing covered material or modifications, retain this license and all
+applicable copyright and attribution notices, identify your modifications,
+and distribute the covered material and modifications under these same terms.
+You may not grant recipients broader rights in covered material under this
+license. Separately licensed material remains subject to its own terms.
+
+3. Commercial use prohibited
+
+Any direct or indirect commercial use of covered material is prohibited under
+this license, whether or not a fee is charged for the material itself. This
+includes use in internal business operations; integration into commercial
+products; paid or commercial services, including hosted services; sale,
+commercial licensing, or other commercial distribution; and commercial
+consulting or development work for clients.
+
+An activity intended for commercial advantage or monetary compensation is
+commercial use. Calling an activity learning, research, evaluation, or development
+does not exempt it when it serves a commercial purpose. There is no automatic
+exception based on the user's organization type or the absence of a direct fee.
+
+4. Disclaimer
+
+To the extent permitted by applicable law, the covered material is provided
+"AS IS", without warranties of any kind, express or implied, including
+merchantability, fitness for a particular purpose, and non-infringement.
+To the extent permitted by applicable law, the authors and copyright holders
+are not liable for claims, damages, or other liability arising from the material
+or its use.

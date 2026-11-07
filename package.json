@@ -65,5 +65,6 @@
     "oxlint": "1.92.0",
     "typescript": "7.0.2",
     "vitest": "4.1.12"
-  }
+  },
+  "license": "SEE LICENSE IN LICENSE"
 }
