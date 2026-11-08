@@ -16,6 +16,7 @@ import type { ModuleReranker } from './module-reranker.js';
 import { projectPlanHash } from './project-analysis.js';
 import { RecallKernel } from './recall-kernel.js';
 import { resolveModuleRetrievalTarget } from './module-search-query.js';
+import { searchModulesWithSag2, type Sag2SearchOptions } from './sag2-retrieval.js';
 
 export interface ModuleImplementationSearchRequest {
   target: ModuleTarget;
@@ -332,7 +333,11 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
   readonly #moduleCache = new Map<string, { expiresAt: number; revisions: Map<string, string>; value: SearchCandidate[] }>();
   static readonly #moduleCacheTtlMs = 5 * 60_000;
   static readonly #moduleCacheMaxEntries = 64;
-  constructor(private readonly store: IndexStore, private readonly reranker?: ModuleReranker) {
+  constructor(
+    private readonly store: IndexStore,
+    private readonly reranker?: ModuleReranker,
+    private readonly sag2Options?: Sag2SearchOptions & { enabled?: boolean },
+  ) {
     this.#recall = new RecallKernel(store);
   }
 
@@ -343,15 +348,22 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
       // revision must invalidate old results just like a revision change does.
       request = { ...request, target: await resolveModuleRetrievalTarget(this.store, request.target, signal) };
       const repositoryIds = [...new Set(request.repositoryIds)].sort();
+      const useSag2 = this.sag2Options?.enabled ?? (process.env.CODE_INTELLIGENCE_MODULE_RETRIEVAL_MODE ?? '').toLowerCase() === 'sag2';
       const rerankerKey = reranker?.cacheKey?.() ?? reranker?.model ?? '';
       const key = JSON.stringify({ target: request.target, requirement: request.requirement, topK: request.topK,
-        repositoryIds, reranker: rerankerKey });
+        repositoryIds, reranker: rerankerKey, mode: useSag2 ? 'sag2' : 'standard' });
       const cached = this.#moduleCache.get(key);
       if (!scopedReranker && cached && cached.expiresAt > Date.now() && await this.#cacheRevisionsCurrent(repositoryIds, cached.revisions, signal)) {
         return cloneCandidates(cached.value);
       }
       if (cached) this.#moduleCache.delete(key);
-      const result = await searchModules(this.store, { ...request, repositoryIds }, signal, reranker, this.#recall);
+      const result = useSag2
+        ? await searchModulesWithSag2(this.store, { ...request, repositoryIds }, signal, {
+            ...this.sag2Options,
+            reranker,
+            recall: this.#recall,
+          })
+        : await searchModules(this.store, { ...request, repositoryIds }, signal, reranker, this.#recall);
       const revisions = new Map((await Promise.all(repositoryIds.map(async (repositoryId) => {
         const repository = await this.store.getRepository(repositoryId, signal);
         return repository?.activeRevision ? [repositoryId, repository.activeRevision] as const : null;

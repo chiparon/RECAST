@@ -191,3 +191,26 @@ export const runtimeInternals = { languageCapabilities };
 export { ProjectAnalysisCoordinator, projectAnalysisProfile, projectAnalysisObjective, projectPlanHash, validateProjectResult } from './project-analysis.js';
 export { buildAdaptiveModuleProposal, adaptiveModuleAlgorithm, type AdaptiveModuleOptions } from './module-hierarchy.js';
 export { buildProjectModuleProposal, moduleModelingAlgorithm } from './module-modeling.js';
+export {
+  Sag2Bm25IndexStore,
+  Sag2SqliteBm25Index,
+  buildSag2FtsMatchQuery,
+  tokenizeSag2Text,
+  type Sag2Bm25Config,
+} from './sag2-bm25.js';
+export {
+  StructuralSag2JevJudge,
+  extractTargetResponsibilities,
+  orderCandidatesByJevCoverage,
+  type Sag2CandidateDecision,
+  type Sag2EvidenceVerdict,
+  type Sag2JevEvaluationInput,
+  type Sag2JevJudge,
+  type Sag2JevOutcome,
+  type Sag2Responsibility,
+} from './sag2-jev.js';
+export {
+  searchModulesWithSag2,
+  type Sag2RetrievalDiagnostics,
+  type Sag2SearchOptions,
+} from './sag2-retrieval.js';
