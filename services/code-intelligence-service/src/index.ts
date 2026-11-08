@@ -26,6 +26,7 @@ import {
   type SemanticQueryServiceOptions,
 } from './semantic-query-service.js';
 import { ModuleImplementationSearchService } from './module-implementation-search.js';
+import type { Sag2SearchOptions } from './sag2-retrieval.js';
 import { LocalModuleReranker, type ModuleRerankerConfig } from './module-reranker.js';
 import { ProjectAnalysisCoordinator, type ProjectAnalysisOptions } from './project-analysis.js';
 import type { ModuleReranker } from './module-reranker.js';
@@ -89,6 +90,8 @@ export interface CreateCodeIntelligenceRuntimeOptions {
   seekdb?: SeekDbIndexStoreConfig;
   moduleReranker?: ModuleRerankerConfig;
   moduleCandidateReranker?: ModuleReranker;
+  /** Options for module retrieval over the configured store. */
+  sag2?: Sag2SearchOptions & { enabled?: boolean };
   languageRegistry?: LanguageRegistry;
   scanner?: StructuralScanner;
   projection?: SearchProjection;
@@ -162,7 +165,7 @@ export async function createCodeIntelligenceRuntime(
     languageCapabilities: languageCapabilities(languageRegistry),
     semanticProviders,
   });
-  const moduleImplementationSearch = new ModuleImplementationSearchService(store, moduleReranker);
+  const moduleImplementationSearch = new ModuleImplementationSearchService(store, moduleReranker, options.sag2);
   const projectAnalysis = new ProjectAnalysisCoordinator({ store, ...options.projectAnalysis });
   const coordinator = new AnalysisCoordinator(
     registry,

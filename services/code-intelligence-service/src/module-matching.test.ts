@@ -73,6 +73,43 @@ async function competingModules() {
 }
 
 describe('module-to-module matching', () => {
+  it('retries SAG2 reranking after an invalid ranking and caches the successful retry', async () => {
+    const { store } = await setup();
+    const rank = vi.fn().mockResolvedValueOnce([{ index: 0, score: NaN }])
+      .mockResolvedValueOnce([{ index: 0, score: 0.8 }]);
+    const runtime = await createCodeIntelligenceRuntime({ store, moduleCandidateReranker: { model: 'local-model', rank } });
+    const request = { target, requirement: 'payment', topK: 1, repositoryIds: ['history'] };
+    vi.stubEnv('CODE_INTELLIGENCE_MODULE_RETRIEVAL_MODE', 'sag2');
+    try {
+      const search = () => runtime.moduleImplementationSearch.search(request);
+      const fallback = await search();
+      expect(fallback[0]?.moduleMatch?.reranker?.model).toMatch(/^sag2-jev:/);
+      expect((await search())[0]?.moduleMatch?.reranker).toEqual({ model: 'local-model', score: 0.8 });
+      expect((await search())[0]?.score.overall).toBe(0.8);
+      expect(rank).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+      await runtime.close();
+    }
+  });
+
+  it('rejects SAG2 results when the history revision changes during final ranking', async () => {
+    const { store } = await setup();
+    const runtime = await createCodeIntelligenceRuntime({ store, sag2: { enabled: true }, moduleCandidateReranker: {
+      model: 'revision-switch',
+      async rank(_query, documents) {
+        const repository = (await store.getRepository('history'))!;
+        await store.putRepository({ ...repository, activeRevision: 'new-revision' });
+        return documents.map((_, index) => ({ index, score: 0.8 }));
+      },
+    } });
+    try {
+      await expect(runtime.moduleImplementationSearch.search({ target, requirement: 'payment', topK: 1, repositoryIds: ['history'] }))
+        .rejects.toThrow('Repository revision changed');
+    } finally {
+      await runtime.close();
+    }
+  });
   it('reads the current reviewed target summary without requiring caller-supplied text', async () => {
     const { store, scope } = await setup();
     const read = vi.spyOn(store, 'getModuleArtifacts');

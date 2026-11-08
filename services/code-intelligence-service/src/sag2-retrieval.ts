@@ -5,13 +5,15 @@ import type {
 } from '@forexplore/contracts';
 import type { IndexStore } from './index-store.js';
 import {
+  rerankModuleCandidates,
   searchModules,
   type ModuleMatchRequest,
   type ModuleRecallObservation,
 } from './module-matching.js';
 import type { ModuleReranker } from './module-reranker.js';
 import { RecallKernel, type RecallPlan } from './recall-kernel.js';
-import { resolveModuleRetrievalTarget } from './module-search-query.js';
+import { buildModuleSearchQuery, resolveModuleRetrievalTarget } from './module-search-query.js';
+import { moduleSearchBudgetMs } from './seekdb-timeouts.js';
 import {
   orderCandidatesByJevCoverage,
   StructuralSag2JevJudge,
@@ -78,6 +80,7 @@ async function collectCandidateDependencyEdges(
       );
       result.set(key, dependencies);
     } catch {
+      signal?.throwIfAborted();
       // Structural dependency enrichment is best-effort and must never fail recall.
     }
   }
@@ -169,22 +172,6 @@ export async function searchModulesWithSag2(
           { label: 'sag2-hop2-bridge-symbol', query: bridgeQueryText, views: ['symbol'] as const, weight: 0.85 },
         ];
 
-    // Custom RecallKernel router that injects Hop-2 associative plans
-    const hop2RecallKernel = new RecallKernel({
-      searchSearchDocuments: store.searchSearchDocuments?.bind(store),
-      searchSearchDocumentsByViews: store.searchSearchDocumentsByViews?.bind(store),
-      searchSearchDocumentsBatch: store.searchSearchDocumentsBatch?.bind(store),
-    });
-    const hop2InjectedKernel = {
-      recall: (req: Parameters<RecallKernel['recall']>[0]) =>
-        hop2RecallKernel.recall({ ...req, plans: hop2Plans }),
-      recallBatch: (reqs: Parameters<RecallKernel['recallBatch']>[0], concurrency?: number) =>
-        hop2RecallKernel.recallBatch(
-          reqs.map((req) => ({ ...req, plans: hop2Plans })),
-          concurrency,
-        ),
-    } as RecallKernel;
-
     // Construct a synthetic Hop-2 target enriched with bridge terms so API matching scores Hop-2 collaborators
     const hop2Target: ModuleTarget = {
       ...resolvedTarget,
@@ -210,10 +197,11 @@ export async function searchModulesWithSag2(
       },
       signal,
       undefined,
-      hop2InjectedKernel,
+      recall,
       undefined,
       undefined,
       (hits) => recallObservations.push(...hits),
+      hop2Plans,
     );
 
     for (const candidate of hop2Candidates) {
@@ -250,7 +238,7 @@ export async function searchModulesWithSag2(
     : hop1Jev;
 
   const orderedByJev = orderCandidatesByJevCoverage(combinedCandidates, finalJev.decisions);
-  let finalCandidates = orderedByJev.map(({ candidate, decision, score }) => ({
+  let finalCandidates: SearchCandidate[] = orderedByJev.map(({ candidate, decision, score }) => ({
     ...candidate,
     score: {
       ...candidate.score,
@@ -269,29 +257,24 @@ export async function searchModulesWithSag2(
       : {}),
   }));
 
-  if (options.reranker && finalCandidates.length > 0 && signal) {
+  if (options.reranker && finalCandidates.length > 0) {
+    const timeout = AbortSignal.timeout(moduleSearchBudgetMs);
+    const rankSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
     try {
-      const documents = finalCandidates.map((c) =>
-        [c.title, c.summary, c.signature, c.preview.slice(0, 1_500)].filter(Boolean).join('\n'),
-      );
-      const ordering = await options.reranker.rank(request.requirement || resolvedTarget.name, documents, signal);
-      if (ordering.length === finalCandidates.length) {
-        finalCandidates = ordering.map(({ index, score }) => ({
-          ...finalCandidates[index]!,
-          score: { ...finalCandidates[index]!.score, overall: score },
-          ...(finalCandidates[index]!.moduleMatch
-            ? {
-                moduleMatch: {
-                  ...finalCandidates[index]!.moduleMatch!,
-                  reranker: { model: options.reranker!.model, score },
-                },
-              }
-            : {}),
-        }));
-      }
+      const { rerankQuery } = buildModuleSearchQuery(resolvedTarget, request.requirement);
+      finalCandidates = await rerankModuleCandidates(options.reranker, rerankQuery, finalCandidates, rankSignal);
     } catch {
-      signal.throwIfAborted();
+      rankSignal.throwIfAborted();
     }
+  }
+
+  signal?.throwIfAborted();
+  const currentRevisions = new Map(await Promise.all([...new Set(combinedCandidates.flatMap(
+    candidate => candidate.sourceModule ? [candidate.sourceModule.repositoryId] : [],
+  ))].map(async id => [id, (await store.getRepository(id, signal))?.activeRevision] as const)));
+  if (combinedCandidates.some(({ sourceModule }) => sourceModule &&
+    currentRevisions.get(sourceModule.repositoryId) !== sourceModule.analysisRevision)) {
+    throw new Error('Repository revision changed during SAG2 module search; retry against the current snapshot.');
   }
 
   try {

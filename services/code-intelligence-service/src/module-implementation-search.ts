@@ -342,13 +342,13 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
   }
 
   async search(request: ModuleImplementationSearchRequest, signal?: AbortSignal, scopedReranker?: ModuleReranker): Promise<SearchCandidate[]> {
-    const reranker = scopedReranker ?? this.reranker;
     if (request.target.kind === 'module') {
       // Resolve before the cache key: a re-published summary in the same source
       // revision must invalidate old results just like a revision change does.
       request = { ...request, target: await resolveModuleRetrievalTarget(this.store, request.target, signal) };
       const repositoryIds = [...new Set(request.repositoryIds)].sort();
       const useSag2 = this.sag2Options?.enabled ?? (process.env.CODE_INTELLIGENCE_MODULE_RETRIEVAL_MODE ?? '').toLowerCase() === 'sag2';
+      const reranker = scopedReranker ?? (useSag2 ? this.sag2Options?.reranker : undefined) ?? this.reranker;
       const rerankerKey = reranker?.cacheKey?.() ?? reranker?.model ?? '';
       const key = JSON.stringify({ target: request.target, requirement: request.requirement, topK: request.topK,
         repositoryIds, reranker: rerankerKey, mode: useSag2 ? 'sag2' : 'standard' });
@@ -361,7 +361,7 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
         ? await searchModulesWithSag2(this.store, { ...request, repositoryIds }, signal, {
             ...this.sag2Options,
             reranker,
-            recall: this.#recall,
+            recall: this.sag2Options?.recall ?? this.#recall,
           })
         : await searchModules(this.store, { ...request, repositoryIds }, signal, reranker, this.#recall);
       const revisions = new Map((await Promise.all(repositoryIds.map(async (repositoryId) => {
@@ -370,7 +370,7 @@ export class ModuleImplementationSearchService implements ModuleImplementationSe
       }))).filter((entry): entry is readonly [string, string] => entry !== null));
       // Do not cache a hybrid-order fallback after a model failure: a later
       // request should get a chance to rerank once the provider recovers.
-      const rerankSucceeded = !reranker || result.every((candidate) => Boolean(candidate.moduleMatch?.reranker));
+      const rerankSucceeded = !reranker || result.every((candidate) => candidate.moduleMatch?.reranker?.model === reranker.model);
       if (rerankSucceeded && !scopedReranker) {
         this.#moduleCache.set(key, { expiresAt: Date.now() + ModuleImplementationSearchService.#moduleCacheTtlMs,
           revisions, value: cloneCandidates(result) });

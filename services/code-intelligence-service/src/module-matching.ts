@@ -4,7 +4,7 @@ import type { ModuleTarget, ProjectAnalysisRecord, ProjectModule, RepositoryRevi
 import type { IndexStore } from './index-store.js';
 import { projectPlanHash } from './project-analysis.js';
 import type { ModuleReranker } from './module-reranker.js';
-import { RecallKernel, reciprocalRankOffset } from './recall-kernel.js';
+import { RecallKernel, reciprocalRankOffset, type RecallPlan } from './recall-kernel.js';
 import { buildModuleSearchQuery, resolveModuleRetrievalTarget } from './module-search-query.js';
 import { moduleSearchBudgetMs } from './seekdb-timeouts.js';
 
@@ -205,6 +205,18 @@ function rerankDocument(candidate: SearchCandidate): string {
     `Implementation evidence:\n${evidence.join('\n\n')}`].filter(Boolean).join('\n').slice(0, maxChars);
 }
 
+export async function rerankModuleCandidates(reranker: ModuleReranker, query: string, candidates: SearchCandidate[],
+  signal: AbortSignal): Promise<SearchCandidate[]> {
+  const ordering = await reranker.rank(query, candidates.map(rerankDocument), signal);
+  signal.throwIfAborted();
+  if (!Array.isArray(ordering) || ordering.length !== candidates.length ||
+      ordering.some((item) => !item || !Number.isInteger(item.index) || item.index < 0 || item.index >= candidates.length ||
+        !Number.isFinite(item.score) || item.score < 0 || item.score > 1) ||
+      new Set(ordering.map((item) => item.index)).size !== candidates.length) throw new Error('Reranker returned an invalid candidate ordering.');
+  return ordering.map(({ index, score }) => ({ ...candidates[index]!, score: { ...candidates[index]!.score, overall: score },
+    moduleMatch: { ...candidates[index]!.moduleMatch!, reranker: { model: reranker.model, score } } }));
+}
+
 function isTestFile(path: string): boolean {
   return /(?:^|\/)(?:tests?|__tests__)(?:\/|$)|(?:[._-](?:test|spec)\.[^.]+$)|(?:Tests?\.cs$)|(?:^|\/)test_[^/]+\.py$/i.test(path);
 }
@@ -306,7 +318,7 @@ const moduleSearchGate = new ModuleSearchConcurrencyGate(configuredModuleSearchC
 export async function searchModules(store: IndexStore, request: ModuleMatchRequest, parentSignal?: AbortSignal, reranker?: ModuleReranker,
   recall = new RecallKernel(store), observeTiming?: (timing: Readonly<ModuleSearchTiming>) => void,
   observeCandidates?: (candidates: readonly SearchCandidate[]) => void,
-  observeRecall?: (hits: readonly ModuleRecallObservation[]) => void): Promise<SearchCandidate[]> {
+  observeRecall?: (hits: readonly ModuleRecallObservation[]) => void, recallPlans?: readonly RecallPlan[]): Promise<SearchCandidate[]> {
   const started = performance.now();
   const timing: ModuleSearchTiming = { queueMs: 0, recallAndAggregateMs: 0, candidatePrepareMs: 0, rerankMs: 0,
     revisionCheckMs: 0, executionMs: 0, totalMs: 0, rerankCandidateCount: 0, outcome: 'error' };
@@ -333,7 +345,7 @@ export async function searchModules(store: IndexStore, request: ModuleMatchReque
     release = await moduleSearchGate.acquire(parentSignal);
     beginStage('recallAndAggregateMs');
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(moduleSearchBudgetMs), ...(parentSignal ? [parentSignal] : [])]);
-    const result = await searchModuleSnapshot(store, request, signal, reranker, recall, beginStage, timing, releaseDatabaseSlot, observeCandidates, observeRecall);
+    const result = await searchModuleSnapshot(store, request, signal, reranker, recall, beginStage, timing, releaseDatabaseSlot, observeCandidates, observeRecall, recallPlans);
     timing.outcome = 'success';
     return result;
   } catch (error) {
@@ -359,7 +371,7 @@ export async function searchModules(store: IndexStore, request: ModuleMatchReque
 async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchRequest, signal: AbortSignal, reranker: ModuleReranker | undefined,
   recall: RecallKernel, beginStage: (stage: ModuleSearchStage) => void, timing: ModuleSearchTiming,
   releaseDatabaseSlot: () => void, observeCandidates?: (candidates: readonly SearchCandidate[]) => void,
-  observeRecall?: (hits: readonly ModuleRecallObservation[]) => void): Promise<SearchCandidate[]> {
+  observeRecall?: (hits: readonly ModuleRecallObservation[]) => void, recallPlans?: readonly RecallPlan[]): Promise<SearchCandidate[]> {
   if (!Number.isInteger(request.topK) || request.topK < 1 || request.topK > 10) throw new Error('Module search topK must be between 1 and 10.');
   const repositoryIds = [...new Set(request.repositoryIds)];
   if (repositoryIds.length === 0 || repositoryIds.length > 32) throw new Error('Module search requires between 1 and 32 historical repositories.');
@@ -368,7 +380,8 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
   const configuredRecallLimit = Number(process.env.CODE_INTELLIGENCE_MODULE_RECALL_LIMIT ?? String(request.topK * 8));
   const limitPerView = Number.isInteger(configuredRecallLimit) && configuredRecallLimit >= 1 && configuredRecallLimit <= 96
     ? configuredRecallLimit : Math.min(96, Math.max(16, request.topK * 8));
-  const { plans, rerankQuery } = buildModuleSearchQuery(target, request.requirement);
+  const { plans: defaultPlans, rerankQuery } = buildModuleSearchQuery(target, request.requirement);
+  const plans = recallPlans ?? defaultPlans;
   const maximumFusion = plans.reduce((sum, plan) => sum + plan.weight * (plan.views?.length ?? 3), 0) / reciprocalRankOffset;
   const requiredApis = [...new Set(target.module?.coreApis ?? [])];
   const profile = process.env.RECAST_SEARCH_PROFILE === '1';
@@ -607,13 +620,7 @@ async function searchModuleSnapshot(store: IndexStore, request: ModuleMatchReque
     beginStage('rerankMs');
     timing.rerankCandidateCount = result.length;
     try {
-      const ordering = await reranker.rank(rerankQuery, result.map(rerankDocument), signal);
-      if (!Array.isArray(ordering) || ordering.length !== result.length ||
-          ordering.some((item) => !item || !Number.isInteger(item.index) || item.index < 0 || item.index >= result.length ||
-            !Number.isFinite(item.score) || item.score < 0 || item.score > 1) ||
-          new Set(ordering.map((item) => item.index)).size !== result.length) throw new Error('Reranker returned an invalid candidate ordering.');
-      ranked = ordering.map(({ index, score }) => ({ ...result[index]!, score: { ...result[index]!.score, overall: score },
-        moduleMatch: { ...result[index]!.moduleMatch!, reranker: { model: reranker.model, score } } }));
+      ranked = await rerankModuleCandidates(reranker, rerankQuery, result, signal);
     } catch (error) {
       // A malformed/partial model list must not erase a valid database recall.
       // Cancellation remains fatal; all other reranker failures fall back to the

@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModuleTarget, ProjectModuleProposal } from '@forexplore/contracts';
 import {
   createCodeIntelligenceRuntime,
@@ -15,6 +15,7 @@ import {
   type Sag2RetrievalDiagnostics,
 } from './index.js';
 import { searchModules } from './module-matching.js';
+import { RecallKernel } from './recall-kernel.js';
 
 const roots: string[] = [];
 
@@ -83,7 +84,12 @@ describe('SAG2 embedding-free BM25 + JEV multi-hop retrieval', () => {
     );
 
     const store = new Sag2Bm25IndexStore();
-    const runtime = await createCodeIntelligenceRuntime({ store });
+    let diagnostics: Sag2RetrievalDiagnostics | undefined;
+    const recall = new RecallKernel(store);
+    const recallBatch = vi.spyOn(recall, 'recallBatch');
+    const runtime = await createCodeIntelligenceRuntime({ store, sag2: {
+      enabled: true, recall, observeDiagnostics: (result) => { diagnostics = result; },
+    } });
     try {
       await runtime.registry.register({
         repositoryId: 'history',
@@ -191,22 +197,9 @@ describe('SAG2 embedding-free BM25 + JEV multi-hop retrieval', () => {
       // 2. SAG2 2-Hop retrieval uses JEV to detect the uncovered second responsibility,
       // extracts bridge terms ('hmacledgerenvelopessigner', 'sealcanonicalmerkledigest', 'merkle', 'ledger', 'sealer')
       // from 'workflow-dispatch', and retrieves 'merkle-ledger-sealer' in Hop 2!
-      let diagnostics: Sag2RetrievalDiagnostics | undefined;
-      const sag2Results = await searchModulesWithSag2(
-        store,
-        {
-          target,
-          requirement,
-          topK: 4,
-          repositoryIds: ['history'],
-        },
-        undefined,
-        {
-          observeDiagnostics: (d) => {
-            diagnostics = d;
-          },
-        },
-      );
+      const sag2Results = await runtime.moduleImplementationSearch.search({ target, requirement, topK: 4, repositoryIds: ['history'] });
+      expect(recallBatch).toHaveBeenCalledTimes(2);
+      expect(recallBatch.mock.calls[1]![0][0]!.plans.every(plan => plan.label.startsWith('sag2-hop2-'))).toBe(true);
 
       const sag2ModuleIds = sag2Results.map((c) => c.sourceModule?.moduleId);
       expect(sag2ModuleIds).toContain('workflow-dispatch');
@@ -217,6 +210,7 @@ describe('SAG2 embedding-free BM25 + JEV multi-hop retrieval', () => {
       expect(diagnostics!.bridgeTerms.some((term) => term.includes('merkle') || term.includes('ledger') || term.includes('seal'))).toBe(true);
     } finally {
       await runtime.close();
+      await store.close();
     }
   });
 
@@ -318,6 +312,7 @@ describe('SAG2 embedding-free BM25 + JEV multi-hop retrieval', () => {
       expect(diagnostics?.missingResponsibilities).toHaveLength(0);
     } finally {
       await runtime.close();
+      await store.close();
     }
   });
 });
