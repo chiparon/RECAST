@@ -1,8 +1,9 @@
 # License scope and existing notices
 
-The root [LICENSE](LICENSE) is the custom RECAST Non-Commercial License for
-project-owned material offered under it. It does not replace separate licenses
-or withdraw permissions already granted for previously licensed material.
+The root [LICENSE](LICENSE) is the **PolyForm Noncommercial License 1.0.0**
+(`PolyForm-Noncommercial-1.0.0`) for project-owned material offered under it.
+It does not replace separate licenses or withdraw permissions already granted
+for previously licensed material.
 
 ## Historical extension metadata
 
