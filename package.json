@@ -1,0 +1,18 @@
+{
+  "name": "recast-retrieval-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench:index": "node launch.mjs src/index-build/run-index-bench.ts",
+    "report:index": "node launch.mjs src/index-build/report.ts",
+    "verify:index": "python src/index-build/verify.py",
+    "bench": "node launch.mjs src/run-benchmark.ts",
+    "test": "node launch.mjs --test src/verify-benchmark.test.ts",
+    "report": "node launch.mjs src/report.ts",
+    "latency": "node launch.mjs src/latency.ts",
+    "check:speedup": "node launch.mjs src/check-speedup.ts"
+  },
+  "devDependencies": {
+    "tsx": "4.21.0"
+  }
+}

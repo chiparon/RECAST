@@ -1,0 +1,9 @@
+work/
+node_modules/
+*.local
+.env
+corpora/
+.board
+results/*/
+results/latest-report.json
+__pycache__/

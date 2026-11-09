@@ -1,0 +1,12 @@
+import s0 from "./s01-singlehop-early-exit.js";
+import s1 from "./s02-cjk-identifier-hybrid.js";
+import s2 from "./s03-2hop-crypto-sealer.js";
+import s3 from "./s04-attachment-quarantine-gate.js";
+import s4 from "./s05-distractor-suppression.js";
+import s5 from "./s06-structural-edge-bridge.js";
+import s6 from "./s07-preview-pascal-bridge.js";
+import s7 from "./s08-cross-repo-federation.js";
+import s8 from "./s09-whole-project-pipeline.js";
+import s9 from "./s10-scale-velocity-stress.js";
+import type { Scenario } from "./types.js";
+export const scenarios: Scenario[] = [s0, s1, s2, s3, s4, s5, s6, s7, s8, s9];
