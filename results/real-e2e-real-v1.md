@@ -2,6 +2,8 @@
 
 批次 real-v1。已校准 1 个项目，已记录 9 次终态尝试。每题采用三种模型、三种方法，每个组合运行一次。
 
+供应商共收到 70 次请求，已报告 1,067,829 tokens。缺少用量回传的请求数为 0。单次任务的最高已报告用量为 442,523 tokens。
+
 本批为先导试验，只计 Django 的九个组合。工作流使用早期模块任务说明，coverage.py 仅用于校准。正式批次使用修订后的模块任务说明。
 
 ## 交付结果
@@ -11,6 +13,10 @@
 | ALL | recast | 0/3 | 0.0% | 98.3 | 156,951 | 0 | 0 |
 | ALL | sag2sql | 0/3 | 0.0% | 36.9 | 27,336 | 0 | 0 |
 | ALL | rawagent | 1/3 | 33.3% | 85.7 | 171,657 | 0 | 0 |
+
+| 项目 | recast 通过 | sag2sql 通过 | rawagent 通过 |
+|---|---:|---:|---:|
+| django-i18n | 0/3 | 0/3 | 1/3 |
 
 | 模型 | 方法 | 通过/已测 | 交付通过率 | 平均用时（秒） | 平均 tokens/task | 调用前失败 | 待完成 |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -26,14 +32,15 @@
 
 通过率分母为有终态记录的尝试。平均用时从方法启动计至外部评分结束，包含失败、重试和 SAG2 建库。tokens/task 为各任务所有模型请求的已报告总 token 之和再取算术平均，包括输入、输出及重试。首次模型调用前发生的错误单列计数，其实际用时及零 token 计入端到端均值。回传缺失时保留观测下界（≥），待完成的任务留空。
 
-### 与 rawagent 的配对结果
+### 同任务、同模型的配对结果
 
-| 工作流 | 同模型同任务配对 | 仅工作流通过 | 仅 rawagent 通过 | 两者通过 | 两者通过的平均时间差（秒） | 平均 token 差 | 用量完整配对数 |
+| 方法 / 对照 | 配对数 | 仅方法通过 | 仅对照通过 | 两者通过 | 两者通过的平均时间差（秒） | 平均 token 差 | 用量完整配对数 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| recast | 3 | 0 | 1 | 0 | — | — | 0 |
-| sag2sql | 3 | 0 | 1 | 0 | — | — | 0 |
+| recast / rawagent | 3 | 0 | 1 | 0 | — | — | 0 |
+| sag2sql / rawagent | 3 | 0 | 1 | 0 | — | — | 0 |
+| sag2sql / recast | 3 | 0 | 0 | 0 | — | — | 0 |
 
-差值按工作流减 rawagent 计算。负值表示工作流在同一次配对中更省时或更省 token。成本差仅使用双方都完成交付的配对，token 差还要求双方用量完整。
+差值按左侧方法减右侧对照计算。负值表示左侧方法在配对中更省时或更省 token。耗时差只使用双方都交付成功的配对，token 差还要求双方用量完整。
 
 ## 任务与输入
 
@@ -71,14 +78,14 @@
 
 | 项目 | 模型 | 方法 | 结果 | 用时（秒） | 已观测 tokens | 验收与失败原因 |
 |---|---|---|---|---:|---:|---|
-| django-i18n | gpt-6-luna | recast | 失败 | 24.1 | 17,499 | 模型报告所需模块超出当前步骤的写入范围；隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）；无交付提交 |
-| django-i18n | gpt-6-luna | sag2sql | 失败 | 24.8 | 22,910 | 模型报告所需模块超出当前步骤的写入范围；隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）；无交付提交 |
-| django-i18n | gpt-6-luna | rawagent | 失败 | 80.7 | 204,673 | 公开验收失败；隐藏检查失败（browser-context-plural、browser-reload、localized-admin-calendar）；无交付提交 |
-| django-i18n | gpt-6.1-sol | recast | 失败 | 15.3 | 10,830 | 模型报告所需模块超出当前步骤的写入范围；隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）；无交付提交 |
-| django-i18n | gpt-6.1-sol | sag2sql | 失败 | 32.6 | 16,252 | 模型报告所需模块超出当前步骤的写入范围；隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）；无交付提交 |
+| django-i18n | gpt-6-luna | recast | 失败 | 24.1 | 17,499 | 模型报告所需模块超出当前步骤的写入范围。隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）。无交付提交 |
+| django-i18n | gpt-6-luna | sag2sql | 失败 | 24.8 | 22,910 | 模型报告所需模块超出当前步骤的写入范围。隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）。无交付提交 |
+| django-i18n | gpt-6-luna | rawagent | 失败 | 80.7 | 204,673 | 公开验收失败。隐藏检查失败（browser-context-plural、browser-reload、localized-admin-calendar）。无交付提交 |
+| django-i18n | gpt-6.1-sol | recast | 失败 | 15.3 | 10,830 | 模型报告所需模块超出当前步骤的写入范围。隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）。无交付提交 |
+| django-i18n | gpt-6.1-sol | sag2sql | 失败 | 32.6 | 16,252 | 模型报告所需模块超出当前步骤的写入范围。隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）。无交付提交 |
 | django-i18n | gpt-6.1-sol | rawagent | 通过 | 60.4 | 126,815 | 隐藏检查 5/5 |
 | django-i18n | deepseek-flash | recast | 失败 | 255.6 | 442,523 | 隐藏检查失败（catalog-fallback、catalog-metadata） |
-| django-i18n | deepseek-flash | sag2sql | 失败 | 53.5 | 42,845 | 模型报告所需模块超出当前步骤的写入范围；隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）；无交付提交 |
+| django-i18n | deepseek-flash | sag2sql | 失败 | 53.5 | 42,845 | 模型报告所需模块超出当前步骤的写入范围。隐藏检查失败（catalog-fallback、catalog-metadata、browser-context-plural、browser-reload、localized-admin-calendar）。无交付提交 |
 | django-i18n | deepseek-flash | rawagent | 失败 | 116.1 | 183,482 | 隐藏检查失败（catalog-fallback） |
 
 ## 模型标识与数据
@@ -87,6 +94,6 @@
 - gpt-6.1-sol → gpt-6.1-sol
 - deepseek-flash → deepseek-flash
 
-DeepSeek 将 `deepseek-flash` 映射到 V4.1 Flash；截至本次运行，官方最近一次更新为 V4.1-Flash-1017。[DeepSeek 更新日志](https://api-docs.deepseek.com/updates/)
+本次运行使用的 `deepseek-flash` 对应 DeepSeek V4.1-Flash-1017。[DeepSeek 更新日志](https://api-docs.deepseek.com/updates/)
 
 逐次 CSV 保留冻结输入指纹、交付提交、各类 token 和缺失用量请求数。汇总 CSV 同时提供按模型及跨模型等权任务平均。每题每格只有一次采样，项目、模型和方法的交互会影响排序。

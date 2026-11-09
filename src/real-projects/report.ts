@@ -281,7 +281,7 @@ function diagnosis(t: Trial) {
   if (hidden.length)
     diagnostics.push("隐藏检查失败（" + hidden.join("、") + "）");
   if (!t.commit) diagnostics.push("无交付提交");
-  return diagnostics.join("；") || "交付验收未通过";
+  return diagnostics.join("。") || "交付验收未通过";
 }
 const csv = (rows: Record<string, unknown>[]) => {
   const keys = Object.keys(rows[0]);
@@ -395,31 +395,34 @@ const overall = arms.map((arm) =>
     controls.length * PROJECT_MODELS.length,
   ),
 );
-function pairedRow(arm: "sag2sql" | "recast") {
+function pairedRow(arm: "sag2sql" | "recast", baseline: "rawagent" | "recast") {
   const pairs = trials
     .filter((t) => t.arm === arm)
     .flatMap((t) => {
-      const raw = bySlot.get(id(t.task, t.model, "rawagent"));
-      return raw ? [{ workflow: t, raw }] : [];
+      const reference = bySlot.get(id(t.task, t.model, baseline));
+      return reference ? [{ method: t, reference }] : [];
     });
   const both = pairs.filter(
-    ({ workflow, raw }) => workflow.passed && raw.passed,
+    ({ method, reference }) => method.passed && reference.passed,
   );
   const complete = both.filter(
-    ({ workflow, raw }) =>
-      workflow.usage.usageComplete && raw.usage.usageComplete,
+    ({ method, reference }) =>
+      method.usage.usageComplete && reference.usage.usageComplete,
   );
   return [
-    arm,
+    arm + " / " + baseline,
     pairs.length,
-    pairs.filter((p) => p.workflow.passed && !p.raw.passed).length,
-    pairs.filter((p) => !p.workflow.passed && p.raw.passed).length,
+    pairs.filter((p) => p.method.passed && !p.reference.passed).length,
+    pairs.filter((p) => !p.method.passed && p.reference.passed).length,
     both.length,
-    number(mean(both.map((p) => (p.workflow.wallMs - p.raw.wallMs) / 1000)), 1),
+    number(
+      mean(both.map((p) => (p.method.wallMs - p.reference.wallMs) / 1000)),
+      1,
+    ),
     number(
       mean(
         complete.map(
-          (p) => p.workflow.usage.totalTokens - p.raw.usage.totalTokens,
+          (p) => p.method.usage.totalTokens - p.reference.usage.totalTokens,
         ),
       ),
     ),
@@ -452,6 +455,22 @@ const report = [
     " 个项目，已记录 " +
     trials.length +
     " 次终态尝试。每题采用三种模型、三种方法，每个组合运行一次。",
+  "",
+  "供应商共收到 " +
+    number(trials.reduce((n, t) => n + t.calls.length, 0)) +
+    " 次请求，已报告 " +
+    number(trials.reduce((n, t) => n + t.usage.totalTokens, 0)) +
+    " tokens。缺少用量回传的请求数为 " +
+    number(
+      trials.flatMap((t) => t.calls).filter((call) => !call.usage).length,
+    ) +
+    "。单次任务的最高已报告用量为 " +
+    number(
+      trials.length
+        ? Math.max(...trials.map((t) => t.usage.totalTokens))
+        : null,
+    ) +
+    " tokens。",
   ...(pilot
     ? [
         "",
@@ -464,19 +483,40 @@ const report = [
   ...ratingHeader,
   ...overall.map((s) => tableRow(printable(s))),
   "",
+  "| 项目 | recast 通过 | sag2sql 通过 | rawagent 通过 |",
+  "|---|---:|---:|---:|",
+  ...controls.map((fixture) =>
+    tableRow(
+      [
+        fixture.taskId,
+        ...arms.map((arm) => {
+          const measured = trials.filter(
+            (trial) => trial.task === fixture.taskId && trial.arm === arm,
+          );
+          return (
+            measured.filter((trial) => trial.passed).length +
+            "/" +
+            measured.length
+          );
+        }),
+      ].join(" | "),
+    ),
+  ),
+  "",
   ...ratingHeader,
   ...groups.map((s) => tableRow(printable(s))),
   "",
   "通过率分母为有终态记录的尝试。平均用时从方法启动计至外部评分结束，包含失败、重试和 SAG2 建库。tokens/task 为各任务所有模型请求的已报告总 token 之和再取算术平均，包括输入、输出及重试。首次模型调用前发生的错误单列计数，其实际用时及零 token 计入端到端均值。回传缺失时保留观测下界（≥），待完成的任务留空。",
   "",
-  "### 与 rawagent 的配对结果",
+  "### 同任务、同模型的配对结果",
   "",
-  "| 工作流 | 同模型同任务配对 | 仅工作流通过 | 仅 rawagent 通过 | 两者通过 | 两者通过的平均时间差（秒） | 平均 token 差 | 用量完整配对数 |",
+  "| 方法 / 对照 | 配对数 | 仅方法通过 | 仅对照通过 | 两者通过 | 两者通过的平均时间差（秒） | 平均 token 差 | 用量完整配对数 |",
   "|---|---:|---:|---:|---:|---:|---:|---:|",
-  tableRow(pairedRow("recast")),
-  tableRow(pairedRow("sag2sql")),
+  tableRow(pairedRow("recast", "rawagent")),
+  tableRow(pairedRow("sag2sql", "rawagent")),
+  tableRow(pairedRow("sag2sql", "recast")),
   "",
-  "差值按工作流减 rawagent 计算。负值表示工作流在同一次配对中更省时或更省 token。成本差仅使用双方都完成交付的配对，token 差还要求双方用量完整。",
+  "差值按左侧方法减右侧对照计算。负值表示左侧方法在配对中更省时或更省 token。耗时差只使用双方都交付成功的配对，token 差还要求双方用量完整。",
   "",
   "## 任务与输入",
   "",
@@ -655,7 +695,7 @@ report.push(
   "",
   ...served,
   "",
-  "DeepSeek 将 `deepseek-flash` 映射到 V4.1 Flash；截至本次运行，官方最近一次更新为 V4.1-Flash-1017。[DeepSeek 更新日志](https://api-docs.deepseek.com/updates/)",
+  "本次运行使用的 `deepseek-flash` 对应 DeepSeek V4.1-Flash-1017。[DeepSeek 更新日志](https://api-docs.deepseek.com/updates/)",
   "",
   "逐次 CSV 保留冻结输入指纹、交付提交、各类 token 和缺失用量请求数。汇总 CSV 同时提供按模型及跨模型等权任务平均。每题每格只有一次采样，项目、模型和方法的交互会影响排序。",
   "",
