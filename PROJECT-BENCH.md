@@ -2,6 +2,26 @@
 
 本实验的单位是一次完整项目交付。每个项目的需求、起始文件、可读参考、模块边界和公开测试全部固定。在同一个模型内配对比较三种执行方式，观察通过外部验收所需的时间和 Token。
 
+## 十万行 Django 四种 harness 对照
+
+[HTML 报告](results/large-v1.html) · [逐次数据](results/large-v1-trials.csv) · [分组汇总](results/large-v1-summary.csv) · [独立回放归档](results/large-v1-evidence.json.gz) · [人民币计费依据](src/large-projects/BILLING.md)
+
+`large-v1` 在同一固定版本的 Django 生产源码上设置三个独立任务：管理后台关联字段自动补全、预填 slug、设置或禁用密码。每个任务跨 Python 与 JavaScript，在原生 Django、SQLite 和浏览器 DOM 环境中验收。仓库源码和 agent 可读取的源码分别统计。RECAST 的单模块清单最多容纳 256 个文件，四组共享这份清单。它首先包含必需的目标、参考和公开检查，再按路径邻近程度选取 20 个文件，并按生产源码行数填满余下位置。每题冻结树与实际可读生产源码均须超过十万行。
+
+四组使用同一模型来源、`low` 推理设置、公开模块接口和编辑权限。RECAST 与 SAG2-SQLite 运行产品的项目流水线，后者为每次交付重新建索引。rawagent 使用单会话工具循环。Codex 组使用真正的 Codex CLI app-server、独立工作目录和六种项目工具。Codex 原生模型循环可以决定何时检查、修改或结束，代理层只将获准的读、改、编译和测试接口提供给模型。各组的模型请求不设任务 Token 预算。每一任务、模型、方法组合采样一次，共 36 次；失败也计入交付率、平均耗时、tokens/task 和人民币费用。
+
+运行前沿用 Windows bench 空间的 `.env.local` 密钥设置，并准备 Docker 和支持 app-server 动态工具的 `codex.exe`；可用 `RECAST_CODEX_BIN` 指定可执行文件。首次需下载固定的 Django、浏览器运行依赖与容器镜像。
+
+```powershell
+npm run bench:large -- --controls
+npm run bench:large
+npm run verify:large
+npm run verify:large -- --replay
+npm run report:large
+```
+
+`--task`、`--model`、`--methods` 可选择子集，`--batch` 可另开批次。正式任务按模型串行运行，同一模型的一次 DeepSeek 账户余额观测窗口覆盖一次任务。账单字段保留请求时间、实际返回的模型、服务档位、缓存读写和输出用量。人民币定价逐请求应用再求和；DeepSeek 同时记录账户余额差，导出的证据仅含差额。
+
 ## 真实多语言项目批次
 
 [真实项目结果](results/real-e2e-real-v2.md) · [分组指标](results/real-e2e-real-v2-summary.csv) · [逐次数据](results/real-e2e-real-v2-trials.csv) · [请求用量和交付代码归档](results/real-e2e-real-v2-evidence.json.gz)
