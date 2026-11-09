@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gradeDelivery } from "../real-projects/grading.ts";
@@ -11,6 +11,10 @@ import { captureDeepSeekBalance, deepSeekBalanceChange } from "./billing.ts";
 import { fixtures } from "./case.ts";
 
 const [batch, recipe, modelName, armName] = process.argv.slice(2);
+if (existsSync(join(resultsRoot(batch), "drain.json"))) {
+  console.log("DRAIN", batch);
+  process.exit(75);
+}
 const { task, starter, frozen, identity } = JSON.parse(
   await readFile(recipe, "utf8"),
 );

@@ -62,6 +62,23 @@ const ids = portable
       .filter((p) => p.endsWith(".trial.json"))
       .map((p) => p.slice(0, -".trial.json".length));
 assert.deepEqual(ids.sort(), expected);
+const wallets = portable
+  ? portable.wallets
+  : await Promise.all(
+      (await readdir(data))
+        .filter((p) => p.endsWith(".wallet.json"))
+        .sort()
+        .map((p) => existing(join(data, p))),
+    );
+const debitedCells = wallets.flatMap((w) => w.cells);
+assert.deepEqual(
+  [...debitedCells].sort(),
+  cells
+    .filter((c) => c.model === "deepseek-flash")
+    .map((c) => c.id)
+    .sort(),
+  "Account windows must cover each DeepSeek attempt once",
+);
 const rows = [],
   controls = [];
 let passed = 0,
@@ -230,7 +247,14 @@ if (!portable)
   await writeFile(
     bundle,
     gzipSync(
-      JSON.stringify({ batch, protocol, billingProtocol, controls, rows }),
+      JSON.stringify({
+        batch,
+        protocol,
+        billingProtocol,
+        controls,
+        rows,
+        wallets,
+      }),
       { level: 9 },
     ),
   );

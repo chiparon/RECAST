@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, open, unlink } from "node:fs/promises";
+import { setTimeout as wait } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -9,6 +11,7 @@ import {
 } from "../project-bench/providers.ts";
 import { manifest } from "../real-projects/inputs.ts";
 import { fixtures } from "./case.ts";
+import { captureDeepSeekBalance, deepSeekBalanceChange } from "./billing.ts";
 import {
   arms,
   batchName,
@@ -103,6 +106,10 @@ for (const f of tasks) {
 if (!values.controls) {
   for (const m of models)
     assert(await providerAvailable(m), "Missing provider " + m);
+  const opening = models.includes("deepseek-flash")
+    ? await captureDeepSeekBalance()
+    : null;
+  const deepSeekCells: string[] = [];
   // One process per method and a serial lane per model keeps credentialed
   // transport instrumentation, per-trial Codex homes and DeepSeek balance windows isolated.
   const lanes = await Promise.allSettled(
@@ -133,6 +140,7 @@ if (!values.controls) {
                 startedAt: new Date().toISOString(),
               }),
             );
+            if (model === "deepseek-flash") deepSeekCells.push(name);
             await new Promise<void>((ok, fail) => {
               const child = spawn(
                 process.execPath,
@@ -162,5 +170,15 @@ if (!values.controls) {
       }
     }),
   );
+  if (opening && deepSeekCells.length) {
+    const close = await captureDeepSeekBalance();
+    await wait(30000);
+    const later = await captureDeepSeekBalance();
+    await json(join(root, randomUUID() + ".wallet.json"), {
+      cells: deepSeekCells,
+      closing: deepSeekBalanceChange(opening, close),
+      after30s: deepSeekBalanceChange(opening, later),
+    });
+  }
   for (const lane of lanes) if (lane.status === "rejected") throw lane.reason;
 }

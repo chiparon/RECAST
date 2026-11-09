@@ -1,0 +1,458 @@
+{
+  "runs": [
+    {
+      "id": "r-88sr8A",
+      "model": "gpt-6-luna",
+      "purpose": "Codex CLI 四方接入前的独立工具调用预检",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "ok",
+          "tools": [
+            "list_files"
+          ],
+          "elapsedMs": 2233.6493,
+          "usage": {
+            "inputTokens": 7541,
+            "outputTokens": 45,
+            "totalTokens": 7586,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 7538
+          },
+          "startedAt": "2026-11-09T13:49:51.947Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_07f90aef2bd6df48016af1cf8bf07087d199220c4f71b97216",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "ok",
+          "tools": [
+            "read_file"
+          ],
+          "elapsedMs": 1972.4284000000002,
+          "usage": {
+            "inputTokens": 7616,
+            "outputTokens": 19,
+            "totalTokens": 7635,
+            "cachedInputTokens": 7538,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 75
+          },
+          "startedAt": "2026-11-09T13:49:54.208Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_07f90aef2bd6df48016af1cf8e02ac87d18931441247dfbbe1",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "ok",
+          "tools": [
+            "write_file"
+          ],
+          "elapsedMs": 3287.8073000000004,
+          "usage": {
+            "inputTokens": 7695,
+            "outputTokens": 63,
+            "totalTokens": 7758,
+            "cachedInputTokens": 7613,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 79
+          },
+          "startedAt": "2026-11-09T13:49:56.192Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_07f90aef2bd6df48016af1cf90050487d1a0f69c3b05f36c2c",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "ok",
+          "tools": [
+            "run_tests"
+          ],
+          "elapsedMs": 1992.6699000000008,
+          "usage": {
+            "inputTokens": 7811,
+            "outputTokens": 18,
+            "totalTokens": 7829,
+            "cachedInputTokens": 7692,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 116
+          },
+          "startedAt": "2026-11-09T13:49:59.502Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_07f90aef2bd6df48016af1cf935c1887d19c153a9529ad03f8",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "ok",
+          "tools": [
+            "run_tests"
+          ],
+          "elapsedMs": 1581.2603,
+          "usage": {
+            "inputTokens": 7850,
+            "outputTokens": 40,
+            "totalTokens": 7890,
+            "cachedInputTokens": 7808,
+            "cacheReadReported": true,
+            "reasoningTokens": 24,
+            "cacheWriteTokens": 39
+          },
+          "startedAt": "2026-11-09T13:50:01.489Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_07f90aef2bd6df48016af1cf953a5087d187f0a0bde6ebe10a",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 6,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "ok",
+          "tools": [],
+          "elapsedMs": 2190.736499999999,
+          "usage": {
+            "inputTokens": 8032,
+            "outputTokens": 52,
+            "totalTokens": 8084,
+            "cachedInputTokens": 7847,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 182
+          },
+          "startedAt": "2026-11-09T13:50:03.272Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_07f90aef2bd6df48016af1cf9711b087d1bbf7471b8a7bd8a1",
+          "serviceTier": "default"
+        }
+      ]
+    },
+    {
+      "id": "r-mYjWhs",
+      "model": "deepseek-flash",
+      "purpose": "Codex CLI 四方接入前的独立工具调用预检",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "ok",
+          "tools": [
+            "read_file"
+          ],
+          "elapsedMs": 966.1698999999999,
+          "usage": {
+            "inputTokens": 7661,
+            "outputTokens": 39,
+            "totalTokens": 7700,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          },
+          "startedAt": "2026-11-09T13:50:18.723Z",
+          "httpStatus": 200,
+          "servedModel": "deepseek-flash",
+          "responseId": "40460bfa-e6b8-4891-86e6-33a56afaa144",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "ok",
+          "tools": [
+            "write_file"
+          ],
+          "elapsedMs": 1573.0991,
+          "usage": {
+            "inputTokens": 7761,
+            "outputTokens": 116,
+            "totalTokens": 7877,
+            "cachedInputTokens": 7552,
+            "cacheReadReported": true,
+            "reasoningTokens": 8
+          },
+          "startedAt": "2026-11-09T13:50:19.696Z",
+          "httpStatus": 200,
+          "servedModel": "deepseek-flash",
+          "responseId": "35e04487-c976-4342-bac4-acab1cb8f458",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "ok",
+          "tools": [
+            "run_tests"
+          ],
+          "elapsedMs": 1211.4231999999993,
+          "usage": {
+            "inputTokens": 7933,
+            "outputTokens": 39,
+            "totalTokens": 7972,
+            "cachedInputTokens": 7680,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          },
+          "startedAt": "2026-11-09T13:50:21.279Z",
+          "httpStatus": 200,
+          "servedModel": "deepseek-flash",
+          "responseId": "4bdc4b00-d3e7-4c0e-a968-2d3534b1f941",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "ok",
+          "tools": [
+            "run_tests"
+          ],
+          "elapsedMs": 1237.4170999999997,
+          "usage": {
+            "inputTokens": 7994,
+            "outputTokens": 34,
+            "totalTokens": 8028,
+            "cachedInputTokens": 7808,
+            "cacheReadReported": true,
+            "reasoningTokens": 11
+          },
+          "startedAt": "2026-11-09T13:50:22.496Z",
+          "httpStatus": 200,
+          "servedModel": "deepseek-flash",
+          "responseId": "3ff4813f-532e-4c00-93a1-5b2389d90a9b",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "ok",
+          "tools": [],
+          "elapsedMs": 802.0551999999998,
+          "usage": {
+            "inputTokens": 8178,
+            "outputTokens": 21,
+            "totalTokens": 8199,
+            "cachedInputTokens": 7936,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          },
+          "startedAt": "2026-11-09T13:50:23.916Z",
+          "httpStatus": 200,
+          "servedModel": "deepseek-flash",
+          "responseId": "25d422e9-ace5-4e3d-b97e-fb8aad76e6a7",
+          "serviceTier": "default"
+        }
+      ]
+    },
+    {
+      "id": "r-X6KKwN",
+      "model": "gpt-6.1-sol",
+      "purpose": "Codex CLI 四方接入前的独立工具调用预检",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "status": "ok",
+          "tools": [
+            "read_file"
+          ],
+          "elapsedMs": 7908.5113,
+          "usage": {
+            "inputTokens": 8233,
+            "outputTokens": 49,
+            "totalTokens": 8282,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 8230
+          },
+          "startedAt": "2026-11-09T13:50:18.743Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_05bdec9a29acb727016af1cfabf08087d182960cc46ffad80c",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "status": "ok",
+          "tools": [
+            "edit_file"
+          ],
+          "elapsedMs": 2354.6695999999993,
+          "usage": {
+            "inputTokens": 8342,
+            "outputTokens": 75,
+            "totalTokens": 8417,
+            "cachedInputTokens": 8230,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 109
+          },
+          "startedAt": "2026-11-09T13:50:26.642Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_05bdec9a29acb727016af1cfae469887d1a06618b909cbc54a",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "status": "ok",
+          "tools": [
+            "run_tests"
+          ],
+          "elapsedMs": 2554.7232000000004,
+          "usage": {
+            "inputTokens": 8470,
+            "outputTokens": 14,
+            "totalTokens": 8484,
+            "cachedInputTokens": 8339,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 128
+          },
+          "startedAt": "2026-11-09T13:50:29.006Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_05bdec9a29acb727016af1cfb0958487d19bfea6e66cc8a35d",
+          "serviceTier": "default"
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "status": "ok",
+          "tools": [],
+          "elapsedMs": 4512.120400000002,
+          "usage": {
+            "inputTokens": 8626,
+            "outputTokens": 21,
+            "totalTokens": 8647,
+            "cachedInputTokens": 8467,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 156
+          },
+          "startedAt": "2026-11-09T13:50:31.743Z",
+          "httpStatus": 200,
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_05bdec9a29acb727016af1cfb4ade487d1904b1c558d022b97",
+          "serviceTier": "default"
+        }
+      ]
+    },
+    {
+      "id": "meter-check-gpt-6-luna",
+      "model": "gpt-6-luna",
+      "purpose": "供应商计量字段连通性校验",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "status": "ok",
+          "httpStatus": 200,
+          "startedAt": "2026-11-09T13:49:02.823Z",
+          "elapsedMs": 9447.4813,
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 9,
+            "outputTokens": 6,
+            "totalTokens": 15,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 0
+          },
+          "tools": []
+        }
+      ]
+    },
+    {
+      "id": "meter-check-gpt-6.1-sol",
+      "model": "gpt-6.1-sol",
+      "purpose": "供应商计量字段连通性校验",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "status": "ok",
+          "httpStatus": 200,
+          "startedAt": "2026-11-09T13:49:12.262Z",
+          "elapsedMs": 2381.6355000000003,
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 9,
+            "outputTokens": 6,
+            "totalTokens": 15,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 0
+          },
+          "tools": []
+        }
+      ]
+    },
+    {
+      "id": "meter-check-deepseek-flash",
+      "model": "deepseek-flash",
+      "purpose": "供应商计量字段连通性校验",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "status": "ok",
+          "httpStatus": 200,
+          "startedAt": "2026-11-09T13:49:14.644Z",
+          "elapsedMs": 1262.4802,
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 33,
+            "outputTokens": 18,
+            "totalTokens": 51,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 15
+          },
+          "tools": []
+        }
+      ]
+    }
+  ],
+  "note": "与正式和诊断项目交付分开计量。另有在发出请求之前被本机拒绝的工具接入尝试，供应商调用为零。"
+}
