@@ -15,7 +15,7 @@ import { arms, hash, protocol, publicProject } from "./trial.ts";
 
 // Match the measured version in run.ts. Acceptance contents and project inputs
 // are frozen separately because those definitions are imported by tasks.ts.
-async function implementationHash() {
+async function implementationHash(historical = false) {
   const h = createHash("sha256");
   for (const name of [
     "trial.ts",
@@ -27,7 +27,10 @@ async function implementationHash() {
     "tasks.ts",
     "fixture-format.ts",
   ]) {
-    h.update(name).update(await readFile(new URL(name, import.meta.url)));
+    const bytes = historical
+      ? execFileSync("git", ["show", "66006d025bbed54d413b5dc1cd346d1623a7700f:src/project-bench/" + name])
+      : await readFile(new URL(name, import.meta.url));
+    h.update(name).update(bytes);
   }
   return h.digest("hex");
 }
@@ -240,6 +243,7 @@ assert(
 const folder = resolve("results", "project-bench", batch);
 const files = (await readdir(folder)).filter((f) => f.endsWith(".json")).sort();
 const impl = await implementationHash(),
+  archivedImpl = batch === "project-delivery" ? await implementationHash(true) : undefined,
   commit = git("../weichai", "rev-parse", "HEAD").trim();
 const expected = [],
   seenRuns = new Set<string>(),
@@ -282,7 +286,7 @@ for (const { t, model, arm, rep, name } of expected) {
       taskId: t.id,
       commitRECAST: commit,
       protocol,
-      implementationHash: impl,
+      implementationHash: r.implementationHash === archivedImpl && archivedImpl ? archivedImpl : impl,
       inputHash: hash(publicProject(t)),
       gradingHash: hash(t.acceptance),
     }))

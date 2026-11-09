@@ -1,1 +1,4 @@
 *.csv text eol=crlf
+src/project-bench/**/*.ts text eol=lf
+src/real-projects/** text eol=lf
+src/real-projects/case-one/upstream-files.txt text eol=crlf

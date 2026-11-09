@@ -1,0 +1,13 @@
+batch,model,arm,planned,attempts,pending,passed,failed,passRate,preModelFailures,meanWallSeconds,meanObservedTokensPerTask,incompleteUsageTasks,requestsMissingUsage
+real-v1,gpt-6-luna,recast,1,1,0,0,1,0,0,24.055786799999993,17499,0,0
+real-v1,gpt-6-luna,sag2sql,1,1,0,0,1,0,0,24.7516235,22910,0,0
+real-v1,gpt-6-luna,rawagent,1,1,0,0,1,0,0,80.6602669,204673,0,0
+real-v1,gpt-6.1-sol,recast,1,1,0,0,1,0,0,15.309504600000015,10830,0,0
+real-v1,gpt-6.1-sol,sag2sql,1,1,0,0,1,0,0,32.59654129999999,16252,0,0
+real-v1,gpt-6.1-sol,rawagent,1,1,0,1,0,1,0,60.36934910000001,126815,0,0
+real-v1,deepseek-flash,recast,1,1,0,0,1,0,0,255.60963220000002,442523,0,0
+real-v1,deepseek-flash,sag2sql,1,1,0,0,1,0,0,53.487328500000004,42845,0,0
+real-v1,deepseek-flash,rawagent,1,1,0,0,1,0,0,116.10622719999999,183482,0,0
+real-v1,ALL,recast,3,3,0,0,3,0,0,98.32497453333336,156950.66666666666,0,0
+real-v1,ALL,sag2sql,3,3,0,0,3,0,0,36.94516443333333,27335.666666666668,0,0
+real-v1,ALL,rawagent,3,3,0,1,2,0.3333333333333333,0,85.71194773333333,171656.66666666666,0,0

@@ -35,6 +35,8 @@ export interface ProviderCall {
   tools: string[];
 }
 interface ClientOptions {
+  /** Omit bench-imposed task, turn and response caps for the real-project suite. */
+  uncapped?: boolean;
   maxTurns?: number;
   maxTokens?: number;
   maxOutputTokens?: number;
@@ -197,9 +199,9 @@ export function createProjectClient(
     );
     const signal = AbortSignal.any(signals);
     signal.throwIfAborted();
-    if (turns >= (options.maxTurns ?? 64))
+    if (!options.uncapped && turns >= (options.maxTurns ?? 64))
       throw new Error("Project model turn budget exhausted");
-    const remaining = (options.maxTokens ?? 160_000) - usage().totalTokens;
+    const remaining = options.uncapped ? Infinity : (options.maxTokens ?? 160_000) - usage().totalTokens;
     if (remaining < 16) throw new Error("Project model token budget exhausted");
     const key = await getKey(model);
     if (!key)
@@ -215,7 +217,7 @@ export function createProjectClient(
       input: inputItems(messages),
       store: false,
       reasoning: { effort: "low" },
-      max_output_tokens: Math.min(remaining, options.maxOutputTokens ?? 8192),
+      ...(options.uncapped ? {} : { max_output_tokens: Math.min(remaining, options.maxOutputTokens ?? 8192) }),
       tools: tools.map((t) => ({
         type: "function",
         name: t.name,

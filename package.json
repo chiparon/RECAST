@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "bench:real": "node launch.mjs src/real-projects/run.ts",
+    "report:real": "node launch.mjs src/real-projects/report.ts",
+    "verify:real": "node launch.mjs src/real-projects/verify.ts",
     "bench:project": "node launch.mjs src/project-bench/run.ts",
     "report:project": "node launch.mjs src/project-bench/report.ts",
     "verify:project": "node launch.mjs src/project-bench/verify.ts",

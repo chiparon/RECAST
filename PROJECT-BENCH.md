@@ -2,6 +2,36 @@
 
 本实验的单位是一次完整项目交付。每个项目的需求、起始文件、可读参考、模块边界和公开测试全部固定。在同一个模型内配对比较三种执行方式，观察通过外部验收所需的时间和 Token。
 
+## 真实多语言项目批次
+
+[真实项目结果](results/real-e2e-real-v2.md) · [分组指标](results/real-e2e-real-v2-summary.csv) · [逐次数据](results/real-e2e-real-v2-trials.csv) · [请求用量和交付代码归档](results/real-e2e-real-v2-evidence.json.gz)
+
+Django 任务恢复德语国际化目录从 Python 视图到 JavaScript 客户端的行为，包含真实的翻译、模板和 admin 调用链。coverage.py 任务让 Python HTML 报告生成器与浏览器的执行上下文展开逻辑协同工作。前者冻结该功能的上游源码和运行依赖闭包，后者冻结上游 coverage 生产包并将两处待交付逻辑提取为模块。两题各有两个可写生产文件。Django 的 JS 使用 QuickJS，coverage.py 使用 Node VM 和覆盖相关行为的 DOM 测试替身。
+
+BullMQ 冻结上游 TypeScript 和 Lua 源码。任务要求完整交付三个协作模块，分别生成队列键、原子修改作业优先级、按优先级读回计数。验收沿用上游客户端方法，在一次性的 Redis 7.2.5 实例上验证队列隔离、任务状态、计分桶与顺序。三道题均按完整冻结项目运行对应功能。
+
+每个模型在每个任务各运行三个方法一次。同一任务共享需求、依赖清单、字节级起始树、可读文件、允许编辑的文件、公开命令和私有判分。rawagent 接收整项需求，自主选用读、写、局部编辑和测试等工具。recast 使用 ProjectPipeline 和 WorkspaceTranslationRuntime。sag2sql 在相同工作流上从本次输入的只读源码冷建 SQLite FTS5，再把检索到的模块交给生成环节。原始上游 Git 历史、参考实现和私有测例都在 agent 工具范围以外。样本的原始树与骨架只在可写模块上不同。控制实验还会逐一撤掉正确实现，验证每个模块都影响外部验收。
+
+Django 的预跑 `real-v1` 完成了九次付费尝试。最初的工作流适配器把整项需求作为单个模块的交付指令，同时只开放这一个模块的写权限。模型因此在 Python 阶段报告缺少 JavaScript 写权限。正式批次 `real-v2` 将整项需求作为共享背景，按流水线实际授权的模块分配当前工作。预跑结果单列，正式统计从新工作区重新执行所有方法。[预跑的九次记录](results/real-e2e-real-v1-trials.csv)
+
+同一任务最多三个模型并行，每个模型按轮换顺序串行运行三种方法。墙钟从执行方法开始，到外部验收结束，包含冷索引、原生构建和提交，排除一次性的下载和实验前控制验证。tokens/task 使用供应商返回的输入、输出 Token 总和，缓存输入包含在总数内。分母包括失败交付。真实项目运行不设累计 Token、模型轮数、任务总时长或费用上限；请求不发送 `max_output_tokens`。模型自身上下文窗口、原生构建命令的单次超时、HTTP 重试和工作流的正常终止条件仍生效。
+
+本次宿主为 Windows x64、Ryzen 9 7940HX（16 核）、Node 26.0.0、Python 3.12.7、Git 2.49.0 和 Docker Engine 29.4.0。RECAST 版本为 `a66af7bf3933b016e1ac2508655a009dcf923e32`。三个模型均采用 Responses API 和 `reasoning.effort=low`。SAG2 使用产品默认的结构化 JEV 判定及最多两跳扩展。BullMQ 的 Lua 命令通过 Redis 原生验收，三种方法均可直接读取 Lua 源码。产品的结构索引识别 TypeScript，Lua 不在其解析器语言表中。工作流显示的宿主类型回退为 TypeScript，任务和实际翻译请求均明确指定 Redis Lua。
+
+在 Windows 的 bench 工作区运行。首次准备需要 Git、Python、可运行 Linux 容器的 Docker，以及网络下载固定的上游版本和 Django 镜像依赖。供应商密钥沿用本地 `.env.local` 中配置的 `RECAST_KEY_FILE` 和 `DEEPSEEK_KEY_FILE`。
+
+```powershell
+npm run bench:real -- --controls
+npm run bench:real
+npm run verify:real
+npm run verify:real -- --replay
+npm run report:real
+```
+
+`--batch 新名称` 创建独立实验批次。`--fixture one` 选择 Django，`--fixture two` 选择 coverage.py，`--fixture three` 选择 BullMQ。同一批次可从完整记录继续。验证程序重新从固定上游准备骨架，对照 Git 父提交与最终提交，重新跑私有验收并核对每次请求的 Token。它还生成压缩 JSON，含生成文件、各次验收和逐请求供应商用量。`--replay` 可仅凭此归档和固定上游重放私有验收。
+
+## 小项目对照批次
+
 [正式批次报告](results/project-e2e-project-delivery.md) · [九组汇总](results/project-e2e-project-delivery-summary.csv) · [逐项目数据](results/project-e2e-project-delivery-tasks.csv)
 
 ## 三组执行方式
