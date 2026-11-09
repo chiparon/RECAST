@@ -6,6 +6,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 
 export const maxWorkspaceFileChars = 256_000;
+const journalRenameRetryMs = [10, 25, 50, 100, 200];
 
 export function validateWorkspacePath(path: unknown): asserts path is string {
   if (typeof path !== "string" || !path || path.length > 1024 ||
@@ -94,7 +95,20 @@ export class TranslationWorkspaceFiles {
     const temporary = this.checkedPath(`.forexplore/workspace-translations/${id}.${randomUUID()}.tmp`, true);
     try {
       writeFileSync(temporary, JSON.stringify(value, null, 2), { encoding: "utf8", flag: "wx", mode: 0o600 });
-      renameSync(temporary, this.recordPath(id));
+      for (let retry = 0; ; retry++) {
+        const target = this.recordPath(id);
+        try {
+          renameSync(temporary, target);
+          return;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          const delay = journalRenameRetryMs[retry];
+          if (process.platform !== "win32" || (code !== "EPERM" && code !== "EBUSY") || delay === undefined) throw error;
+          // Windows readers can briefly hold the destination without delete sharing.
+          // Keep the synchronous journal contract and publish only by atomic replacement.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+        }
+      }
     } finally {
       if (existsSync(temporary)) unlinkSync(temporary);
     }
