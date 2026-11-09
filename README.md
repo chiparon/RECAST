@@ -1,5 +1,7 @@
 # RECAST 检索与开发速度 benchmark
 
+[端到端项目交付实验](PROJECT-BENCH.md) 比较 RECAST、SAG2 SQLite 工作流和原生 Agent 在相同完整项目上的验收通过率、用时与 Tokens/task。
+
 此分支包含 benchmark 源码、实测报告和汇总数据。主程序与 benchmark 使用相邻的 Windows 工作区。首次运行可在同一个父目录下检出两个分支：
 
 ```powershell

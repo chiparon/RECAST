@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "bench:project": "node launch.mjs src/project-bench/run.ts",
+    "report:project": "node launch.mjs src/project-bench/report.ts",
+    "verify:project": "node launch.mjs src/project-bench/verify.ts",
     "bench:index": "node launch.mjs src/index-build/run-index-bench.ts",
     "report:index": "node launch.mjs src/index-build/report.ts",
     "verify:index": "python src/index-build/verify.py",
