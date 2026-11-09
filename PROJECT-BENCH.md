@@ -12,6 +12,8 @@
 
 运行前沿用 Windows bench 空间的 `.env.local` 密钥设置，并准备 Docker 和支持 app-server 动态工具的 `codex.exe`；可用 `RECAST_CODEX_BIN` 指定可执行文件。首次需下载固定的 Django、浏览器运行依赖与容器镜像。
 
+正式测量在启动命令所在进程设置 `NODE_USE_ENV_PROXY=1` 和本机已配置的 HTTP/HTTPS CONNECT 代理，`NO_PROXY` 包含 `localhost,127.0.0.1,::1`。两家模型的 HTTPS 接入域名和项目密钥与前一轮一致。任务计时前连续两次探测官方模型目录。任务中途断线后的恢复等待计入墙钟，实际发出的模型请求仍逐次计量。
+
 十万行先导批次 `large-v1` 在运行记录的原子替换中遇到 Windows 文件共享冲突，留下五个终态尝试。修订后的产品提交 `5ba062a4` 在这种冲突下重试原子写入。第二批 `large-v2` 遇到两家供应商同时连接超时，在停止派发前留下 16 个终态。正式批次 `large-v3` 使用已验证的进程级 HTTPS 代理，并在连接可用后从头运行全部 36 个组合。两个先导批次与接入预检均保留用量，单独计费。[先导用量](results/large-v1-pilot.json) · [连接异常批次用量](results/large-v2-network.json) · [接入预检用量](results/large-setup.json)
 
 ```powershell

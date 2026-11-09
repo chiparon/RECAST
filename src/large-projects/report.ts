@@ -44,6 +44,7 @@ interface Row {
   gradingError: string | null;
   wallMs: number;
   indexMs: number | null;
+  readiness?: { attempts: number; waitMs: number; status: number };
   calls: MeterCall[];
   grade: { checks: Verdict[]; integrityErrors: string[] } | null;
   usage: { totalTokens: number; requests: number; usageComplete: boolean };
@@ -283,8 +284,19 @@ const byModel = PROJECT_MODELS.flatMap((model) =>
 );
 const title = "十万行级多语言项目交付基准";
 const currencyMethod =
-  "公开价按每次供应商实际回传的输入、缓存、输出和服务层级计算。美元按 1 USD = 6.7188 CNY 折算，DeepSeek 使用人民币钱包价格。";
+  "本批固定 " +
+  RATE_CARD.asOf +
+  " 的公开价，按每次请求回传的输入、缓存、输出和服务层级计价。美元按当日国家外汇管理局中间价 1 USD = " +
+  RATE_CARD.usdToRmb +
+  " CNY 折算，DeepSeek 使用人民币钱包价格。";
 const allDeep = rows.filter((r) => r.model === "deepseek-flash");
+const deepRequests = allDeep.flatMap((r) => r.price.requests);
+const openaiLong = rows
+  .filter((r) => r.model !== "deepseek-flash")
+  .flatMap((r) => r.calls)
+  .filter(
+    (c) => c.usage && c.usage.inputTokens > RATE_CARD.openaiLongThreshold,
+  ).length;
 const realWindows = allDeep.filter((r) => r.balanceChange?.totalRmb != null);
 const deepSum = summarize(allDeep);
 if (batch === "large-v3")
@@ -308,6 +320,22 @@ const versions = [
 const codexRows = rows.filter((r) => r.arm === "codex");
 const codexStats = summarize(codexRows),
   rawStats = summarize(rows.filter((r) => r.arm === "rawagent"));
+const onlyDelivered = (a: Arm, b: Arm) =>
+  rows
+    .filter(
+      (r) =>
+        r.arm === a &&
+        r.passed &&
+        !rows.some(
+          (other) =>
+            other.arm === b &&
+            other.task === r.task &&
+            other.model === r.model &&
+            other.passed,
+        ),
+    )
+    .map((r) => r.task + " / " + r.model)
+    .join("、") || "无";
 const upstream = controls[0].upstream;
 const sections: Section[] = [
   {
@@ -325,7 +353,7 @@ const sections: Section[] = [
         " 个模型和 " +
         arms.length +
         " 种方法，每格一次。",
-      "交付成功要求得到 Git 提交并通过公开构建、项目测试、外部行为验收及完整性检查。用时为方法启动至外部验收完成的墙钟秒数，包含索引和重试，预备环境和余额查询在计时区间之外。平均指标以全部尝试为分母。串行交付/小时以通过次数除以该组全部尝试的累计用时。",
+      "交付成功要求得到 Git 提交并通过公开构建、项目测试、外部行为验收及完整性检查。用时为方法启动至外部验收完成的墙钟秒数，包含索引、重试和试验内的网络恢复等待。环境准备、试验前连续两次模型目录连通性检查和余额查询都在计时区间之外。平均指标以全部尝试为分母。串行交付/小时以通过次数除以该组全部尝试的累计用时。",
     ],
     tables: [
       metricTable(byArm),
@@ -343,7 +371,14 @@ const sections: Section[] = [
       },
     ],
   },
-  { id: "models", title: "同模型比较", tables: [metricTable(byModel)] },
+  {
+    id: "models",
+    title: "同模型比较",
+    paragraphs: [
+      "三组模型请求 ID 为 gpt-6-luna、gpt-6.1-sol 和 deepseek-flash。DeepSeek 在本批运行时将 deepseek-flash 映射至 V4.1-Flash-1017。",
+    ],
+    tables: [metricTable(byModel)],
+  },
   {
     id: "codex",
     title: "Codex harness 与配对结果",
@@ -360,6 +395,11 @@ const sections: Section[] = [
         "/" +
         rawStats.attempts +
         " 次。rawagent 在单个模型会话中自主使用项目工具。RECAST 按模块调度分析、实现和验证。SAG2-SQLite 在同一流水线中加入冷建 SQLite 检索。",
+      "在 Codex CLI 与 rawagent 的配对中，仅 Codex CLI 通过的组合为「" +
+        onlyDelivered("codex", "rawagent") +
+        "」，仅 rawagent 通过的组合为「" +
+        onlyDelivered("rawagent", "codex") +
+        "」。",
       "配对的差值均按左侧减右侧。同一模型同一需求的两种方法都通过时才计算用时与费用差。Token 差还要求双方用量完整，括号内为计入配对数。",
     ],
     tables: [
@@ -387,6 +427,14 @@ const sections: Section[] = [
     title: "人民币费用核对",
     paragraphs: [
       currencyMethod,
+      "正式批次已观测到 " +
+        num(openaiLong) +
+        " 次 OpenAI 请求达到长上下文费率。可归类的 DeepSeek 请求有 " +
+        num(deepRequests.filter((r) => r.tariff === "off-peak").length) +
+        " 次空闲、" +
+        num(deepRequests.filter((r) => r.tariff === "peak").length) +
+        " 次高峰。",
+      "下表以百万 Token 为单位。OpenAI 单次输入超过 272,000 Token 时，整次请求的输入及缓存单价乘 2、输出乘 1.5。推理 Token 已包含在输出中。DeepSeek 按请求开始时的北京时间选择费率，周一至周五 09:00–12:00、14:00–18:00 为高峰，周末及中国法定节假日全天为空闲时段。",
       "正式批次共有 " +
         num(rows.flatMap((r) => r.calls).length) +
         " 次 HTTP 尝试，报告 " +
@@ -417,6 +465,42 @@ const sections: Section[] = [
       "DeepSeek 的整段账户窗口从同一份期初余额分别计算运行结束时和约 30 秒后的累计净扣减。任务即时窗口与这两个累计读数覆盖相同活动，各自单列比较。延后读数也可能包含共享账户的其他交易。",
     ],
     tables: [
+      {
+        headers: [
+          "每百万 Token 单价",
+          "币种",
+          "未缓存输入",
+          "缓存读取",
+          "写入 30 分钟",
+          "写入 12 小时",
+          "输出",
+        ],
+        rows: [
+          ...Object.entries(RATE_CARD.openaiStandardUsdPerMillion).map(
+            ([name, r]) => [
+              name + " · 标准短上下文",
+              "USD",
+              String(r.input),
+              String(r.read),
+              String(r.input * RATE_CARD.openaiWrite30mMultiplier),
+              String(r.input * RATE_CARD.openaiWrite12hMultiplier),
+              String(r.output),
+            ],
+          ),
+          ...[1, RATE_CARD.deepSeekPeakMultiplier].map((k) => {
+            const r = RATE_CARD.deepSeekOffPeakRmbPerMillion;
+            return [
+              "deepseek-flash · " + (k === 1 ? "空闲" : "高峰"),
+              "CNY",
+              String(r.input * k),
+              String(r.read * k),
+              "—",
+              "—",
+              String(r.output * k),
+            ];
+          }),
+        ],
+      },
       {
         headers: [
           "方法",
@@ -497,7 +581,7 @@ const sections: Section[] = [
     title: "任务规模与冻结输入",
     paragraphs: [
       "每种方法使用相同的起始源码、项目需求、模块清单、受控可读文件、可写范围及验收。规模分别统计每个骨架的生产源码物理行和实际工具可读源码行。重复使用同一仓库的各题分别计数。模型请求没有任务累计 Token 或费用上限。",
-      "每项只有一个固定上游版本和三个模型各一次采样。通过率和均值描述本批需求与工具配置。",
+      "各题在固定的 Django 工程内恢复一种后台功能，每题开放两个或三个 Python、JavaScript 生产文件。每种模型和方法每题只运行一次。通过率和均值描述本批需求与工具配置。",
     ],
     tables: [
       {
@@ -636,8 +720,10 @@ if (batch === "large-v3") {
           num(all.requests) +
           " 次请求和 " +
           num(all.tokens) +
-          " 个已报告 Token，公开价总计 ¥" +
-          money(all.lowerRmb, all.upperRmb) +
+          " 个已报告 Token，公开价总计" +
+          (all.upperRmb === null
+            ? "至少 ¥" + fmtMoney(all.lowerRmb)
+            : " ¥" + money(all.lowerRmb, all.upperRmb)) +
           "。账户栏仅汇总有开始和结束快照的 DeepSeek 窗口。",
       ],
       tables: [
@@ -722,7 +808,7 @@ const lead =
   overall.successes +
   "/" +
   overall.attempts +
-  " 次通过独立交付验收，" +
+  " 次通过独立交付验收，共回传 " +
   num(overall.tokens) +
   " tokens，公开价人民币合计 ¥" +
   money(overall.lowerRmb, overall.upperRmb) +
@@ -806,6 +892,8 @@ const trials = rows.map((r) => ({
   inputHash: r.inputHash,
   passed: r.passed,
   wallSeconds: r.wallMs / 1000,
+  routeReadinessSeconds: r.readiness ? r.readiness.waitMs / 1000 : null,
+  routeReadinessProbes: r.readiness?.attempts,
   tokens: r.usage.totalTokens,
   usageComplete: r.usage.usageComplete,
   requests: r.calls.length,

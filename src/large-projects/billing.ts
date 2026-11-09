@@ -4,6 +4,15 @@ import type { MeterCall, MeterUsage } from "./meter.ts";
 export const RATE_CARD = {
   asOf: "2026-11-09",
   usdToRmb: 6.7188,
+  openaiStandardUsdPerMillion: {
+    "gpt-6-luna": { input: 0.1, read: 0.01, output: 0.5 },
+    "gpt-6.1-sol": { input: 2, read: 0.1, output: 10 },
+  },
+  openaiLongThreshold: 272_000,
+  openaiWrite30mMultiplier: 1.25,
+  openaiWrite12hMultiplier: 2.5,
+  deepSeekOffPeakRmbPerMillion: { input: 1, read: 0.02, output: 4 },
+  deepSeekPeakMultiplier: 2,
   fxSource:
     "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do?startDate=2026-11-09&endDate=2026-11-09&queryYN=true",
   openaiPrices: "https://developers.openai.com/api/docs/pricing",
@@ -16,11 +25,8 @@ export const RATE_CARD = {
     "https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm",
 } as const;
 const million = 1_000_000;
-const usdRates = {
-  "gpt-6-luna": { input: 0.1, read: 0.01, output: 0.5 },
-  "gpt-6.1-sol": { input: 2, read: 0.1, output: 10 },
-};
-const longThreshold = 272_000;
+const usdRates = RATE_CARD.openaiStandardUsdPerMillion;
+const longThreshold = RATE_CARD.openaiLongThreshold;
 
 type Usage = MeterUsage & { cacheReadReported?: boolean };
 type Call = Omit<MeterCall, "usage"> & {
@@ -75,12 +81,14 @@ function deepSeekPrice(u: Usage, startedAt: string): RequestPrice {
   const period = deepSeekTier(startedAt);
   if (!period)
     return unavailable("No applicable 2026 Asia/Shanghai tariff period");
-  const multiplier = period === "peak" ? 2 : 1;
+  const multiplier = period === "peak" ? RATE_CARD.deepSeekPeakMultiplier : 1;
   const cachedKnown = u.cacheReadReported !== false;
   const cached = cachedKnown ? u.cachedInputTokens : 0;
-  const output = 4 * u.outputTokens;
-  const upper = output + cached * 0.02 + (u.inputTokens - cached);
-  const lower = cachedKnown ? upper : output + u.inputTokens * 0.02;
+  const rates = RATE_CARD.deepSeekOffPeakRmbPerMillion;
+  const output = rates.output * u.outputTokens;
+  const upper =
+    output + cached * rates.read + (u.inputTokens - cached) * rates.input;
+  const lower = cachedKnown ? upper : output + u.inputTokens * rates.read;
   return {
     knownRmb: (lower * multiplier) / million,
     upperRmb: (upper * multiplier) / million,
@@ -140,12 +148,14 @@ function openaiPrice(
     write30 === undefined && (write12 !== undefined || ttl !== "12h");
   const longPossible =
     write12 === undefined && (write30 !== undefined || ttl !== "30m");
-  const minWrite = miss * (shortPossible ? 1.25 : 2.5);
-  const maxWrite = miss * (longPossible ? 2.5 : 1.25);
+  const w30 = RATE_CARD.openaiWrite30mMultiplier,
+    w12 = RATE_CARD.openaiWrite12hMultiplier;
+  const minWrite = miss * (shortPossible ? w30 : w12);
+  const maxWrite = miss * (longPossible ? w12 : w30);
   const fixed =
     cached * hit +
-    (write30 ?? 0) * miss * 1.25 +
-    (write12 ?? 0) * miss * 2.5 +
+    (write30 ?? 0) * miss * w30 +
+    (write12 ?? 0) * miss * w12 +
     u.outputTokens * rates.output * (long ? 1.5 : 1);
   const low =
     fixed +
