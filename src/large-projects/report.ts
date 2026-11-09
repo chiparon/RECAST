@@ -8,6 +8,12 @@ import {
   type ProjectModel,
 } from "../project-bench/providers.ts";
 import { RATE_CARD, priceRequests } from "./billing.ts";
+import {
+  costTotal,
+  loadPilot,
+  loadSetup,
+  type CostRun,
+} from "./report-costs.ts";
 import { arms, batchName, type Arm } from "./protocol.ts";
 import type { MeterCall } from "./meter.ts";
 
@@ -63,6 +69,11 @@ interface Bundle {
   protocol: { implementationHash: string; productRevision: string };
   controls: Control[];
   rows: Row[];
+  wallets?: {
+    cells: string[];
+    closing: NonNullable<Row["balanceChange"]>;
+    after30s: NonNullable<Row["balanceChange"]>;
+  }[];
 }
 type Table = { headers: string[]; rows: string[][] };
 interface Section {
@@ -92,9 +103,7 @@ const num = (n: number, d = 0) =>
   });
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 const fmtMoney = (n: number) =>
-  Math.abs(n) > 0 && Math.abs(n) < 0.00005
-    ? (n < 0 ? "−" : "+") + "<0.0001"
-    : num(n, 4);
+  Math.abs(n) > 0 && Math.abs(n) < 0.00005 ? n.toPrecision(2) : num(n, 4);
 const money = (lo: number, hi: number | null) =>
   hi === null
     ? "≥" + fmtMoney(lo)
@@ -238,9 +247,13 @@ const batch = values.batch!;
 assert(/^[\w-]+$/.test(batch));
 const prefix = resolve("results", batch),
   evidence = prefix + "-evidence.json.gz";
-const { rows, controls, protocol, ...meta }: Bundle = JSON.parse(
-  gunzipSync(await readFile(evidence)).toString("utf8"),
-);
+const {
+  rows,
+  controls,
+  protocol,
+  wallets = [],
+  ...meta
+}: Bundle = JSON.parse(gunzipSync(await readFile(evidence)).toString("utf8"));
 assert.equal(meta.batch, batch);
 const keys = controls.flatMap((c) =>
   PROJECT_MODELS.flatMap((m) => arms.map((a) => [c.taskId, m, a].join("_"))),
@@ -274,6 +287,12 @@ const currencyMethod =
 const allDeep = rows.filter((r) => r.model === "deepseek-flash");
 const realWindows = allDeep.filter((r) => r.balanceChange?.totalRmb != null);
 const deepSum = summarize(allDeep);
+if (batch === "large-v3")
+  assert.deepEqual(
+    wallets.flatMap((w) => w.cells).sort(),
+    allDeep.map((r) => r.id).sort(),
+    "DeepSeek batch wallet coverage mismatch",
+  );
 const intervals = realWindows
   .map((r) => r.balanceChange!)
   .sort((a, b) => a.from.localeCompare(b.from));
@@ -395,6 +414,7 @@ const sections: Section[] = [
           : "有记录的窗口互不重叠。") +
         " 同账户其他流量、充值或延迟入账都可能影响差额。",
       "OpenAI 组织 Costs API 对现有项目密钥返回 HTTP 403。OpenAI 的逐任务费用来自公开价重算。缓存分项缺失时按可行单价给出上下界，若某次请求缺少总用量则只给出下界。表格显示到 4 位小数。",
+      "DeepSeek 的整段账户窗口从同一份期初余额分别计算运行结束时和约 30 秒后的累计净扣减。任务即时窗口与这两个累计读数覆盖相同活动，各自单列比较。延后读数也可能包含共享账户的其他交易。",
     ],
     tables: [
       {
@@ -429,6 +449,47 @@ const sections: Section[] = [
           ];
         }),
       },
+      ...(wallets.length
+        ? [
+            {
+              headers: [
+                "整段窗口（UTC）",
+                "所含任务",
+                "这些任务的公开价 ¥",
+                "任务即时窗口净扣减合计 ¥",
+                "截至结束净扣减 ¥",
+                "延后 30 秒净扣减 ¥",
+                "延后充值/赠送扣减 ¥",
+                "余额查询",
+              ],
+              rows: wallets.map((w) => {
+                const selected = allDeep.filter((r) => w.cells.includes(r.id)),
+                  stats = summarize(selected);
+                const display = (v: number | null) =>
+                  v === null ? "—" : fmtMoney(v);
+                return [
+                  w.closing.from + " ～ " + w.closing.to,
+                  String(selected.length),
+                  money(stats.lowerRmb, stats.upperRmb),
+                  display(stats.accountNetDebitRmb) +
+                    " (" +
+                    stats.balanceWindows +
+                    "/" +
+                    selected.length +
+                    ")",
+                  display(w.closing.totalRmb),
+                  display(w.after30s.totalRmb),
+                  display(w.after30s.toppedUpRmb) +
+                    " / " +
+                    display(w.after30s.grantedRmb),
+                  [w.closing.error, w.after30s.error]
+                    .filter(Boolean)
+                    .join("。") || "两次均返回",
+                ];
+              }),
+            },
+          ]
+        : []),
     ],
   },
   {
@@ -507,6 +568,108 @@ const sections: Section[] = [
     })),
   },
 ];
+if (batch === "large-v3") {
+  const [pilot, network, setup] = await Promise.all([
+    loadPilot(),
+    loadPilot("large-v2"),
+    loadSetup(),
+  ]);
+  const phases: { name: string; runs: CostRun[] }[] = [
+    { name: "正式评测 " + batch, runs: rows },
+  ];
+  if (pilot) phases.push({ name: "宿主故障先导 large-v1", runs: pilot.runs });
+  if (network)
+    phases.push({ name: "网络异常批次 large-v2", runs: network.runs });
+  if (setup) phases.push({ name: "接入与工具预检", runs: setup.runs });
+  const all = costTotal(phases.flatMap((phase) => phase.runs));
+  sections.splice(
+    sections.findIndex((s) => s.id === "inputs"),
+    0,
+    {
+      id: "extra-costs",
+      title: "本次搭建与测量支出",
+      paragraphs: [
+        "正式结果的通过率、用时和 ¥/任务仅采用 " +
+          batch +
+          "。large-v1 在 Windows 文件替换报错后停止派发。large-v2 在两家模型接口出现连接故障后停止派发。两个批次均保留当时已启动任务的最终记录。预检包括接入连通性和 Codex 工具调用。" +
+          (!pilot ? " 先导账本未提供。" : "") +
+          (!network ? " 网络批次账本未提供。" : "") +
+          (!setup ? " 接入账本未提供。" : ""),
+        ...(network
+          ? [
+              "网络异常批次共 " +
+                network.runs.length +
+                " 次终态尝试，其中 " +
+                network.runs.filter((r) => r.passed === true).length +
+                " 次通过，" +
+                network.runs.filter(
+                  (r) => r.failureReason === "provider transport",
+                ).length +
+                " 次记录了传输终止原因。" +
+                network.runs.filter(
+                  (r) => !r.calls.some((c) => Boolean(c.usage)),
+                ).length +
+                " 次尝试没有任何用量回传，" +
+                network.runs.filter(
+                  (r) =>
+                    r.calls.some((c) => c.usage) &&
+                    r.calls.some((c) => !c.usage),
+                ).length +
+                " 次尝试只收到了部分请求的用量。",
+            ]
+          : []),
+        ...(network?.wallets?.map(
+          (w) =>
+            "large-v2 的整段 DeepSeek 账户观察覆盖 " +
+            w.cells.length +
+            " 个任务。运行结束时净扣减 " +
+            (w.closing.totalRmb == null
+              ? "缺测"
+              : "¥" + fmtMoney(w.closing.totalRmb)) +
+            "，延后 30 秒为 " +
+            (w.after30s.totalRmb == null
+              ? "缺测"
+              : "¥" + fmtMoney(w.after30s.totalRmb)) +
+            "。",
+        ) ?? []),
+        "上述各阶段已记录费用对应 " +
+          num(all.requests) +
+          " 次请求和 " +
+          num(all.tokens) +
+          " 个已报告 Token，公开价总计 ¥" +
+          money(all.lowerRmb, all.upperRmb) +
+          "。账户栏仅汇总有开始和结束快照的 DeepSeek 窗口。",
+      ],
+      tables: [
+        {
+          headers: [
+            "阶段",
+            "已记录运行",
+            "HTTP 尝试",
+            "无用量回传",
+            "已报告 tokens",
+            "公开价合计 ¥",
+            "余额窗口数",
+            "窗口净扣减合计 ¥",
+          ],
+          rows: phases.map((phase) => {
+            const s = costTotal(phase.runs);
+            return [
+              phase.name,
+              num(s.runs),
+              num(s.requests),
+              num(s.missingUsage),
+              (s.missingUsage ? "≥" : "") + num(s.tokens),
+              money(s.lowerRmb, s.upperRmb),
+              num(s.balanceWindows),
+              s.walletRmb == null ? "—" : fmtMoney(s.walletRmb),
+            ];
+          }),
+        },
+      ],
+    },
+  );
+}
 const links = [
   [
     "固定上游版本",

@@ -8,6 +8,7 @@ import {
 } from "../project-bench/providers.ts";
 import { replyDetails, type MeterCall } from "./meter.ts";
 import { allowedTools, projectTools } from "./codex-tools.ts";
+import { waitForProvider } from "./transport.ts";
 
 async function secret(model: ProjectModel) {
   const path = process.env[modelKeyEnvironment(model)];
@@ -75,6 +76,7 @@ export async function openCodexProvider(
   const server = createServer(async (req, res) => {
     let charged: MeterCall | undefined,
       started = performance.now();
+    let noResponse = false;
     let code = 400,
       contentType = "application/json",
       output = "";
@@ -156,7 +158,10 @@ export async function openCodexProvider(
           signal,
           redirect: "error",
         },
-      );
+      ).catch((error) => {
+        noResponse = !signal.aborted;
+        throw error;
+      });
       charged.httpStatus = response.status;
       const body = await response.text(),
         type = response.headers.get("content-type") ?? "application/json";
@@ -239,9 +244,23 @@ export async function openCodexProvider(
         try {
           await onCall(charged);
         } catch {
-          code = 500;
+          // The request may already have been billed. An unrecorded attempt must
+          // stop the turn instead of inviting an automatic duplicate.
+          noResponse = false;
+          code = 400;
           contentType = "application/json";
           output = '{"error":{"message":"Provider usage ledger write failed"}}';
+        }
+      }
+      if (noResponse) {
+        try {
+          // Codex retries this Responses request on 503; no workspace operation
+          // has been dispatched from a response that never reached the CLI.
+          await waitForProvider(model, signal);
+          code = 503;
+        } catch (error) {
+          code = 400;
+          output = JSON.stringify({ error: { message: String(error) } });
         }
       }
       if (!res.writableEnded)

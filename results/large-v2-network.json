@@ -1,0 +1,4212 @@
+{
+  "batch": "large-v2",
+  "note": "两家供应商的连接同时出现故障后停止派发，保留已启动的试验及已知费用下界。",
+  "runs": [
+    {
+      "id": "django-admin-autocomplete_deepseek-flash_codex",
+      "model": "deepseek-flash",
+      "arm": "codex",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:15:20.707Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 4765.194099999997,
+          "tools": [],
+          "startedAt": "2026-11-09T14:15:24.656Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": {
+        "from": "2026-11-09T14:15:05.703Z",
+        "to": "2026-11-09T14:15:45.110Z",
+        "totalRmb": null,
+        "toppedUpRmb": null,
+        "grantedRmb": null,
+        "error": "DeepSeek balance endpoint or credential unavailable"
+      },
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 1,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_deepseek-flash_rawagent",
+      "model": "deepseek-flash",
+      "arm": "rawagent",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:10:59.034Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "84319df1-12ca-4e79-a5bc-beb4a2c815c7",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1444.6131999999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:03.443Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 4138,
+            "outputTokens": 93,
+            "totalTokens": 4231,
+            "cachedInputTokens": 3968,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "038e72e6-489a-4996-8b42-9fc235f1b724",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1321.3087999999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:04.898Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 9635,
+            "outputTokens": 93,
+            "totalTokens": 9728,
+            "cachedInputTokens": 4224,
+            "cacheReadReported": true,
+            "reasoningTokens": 12
+          }
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "08985852-19f0-4865-aa92-ae5143fd73fd",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1112.5948000000008,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:06.229Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12111,
+            "outputTokens": 105,
+            "totalTokens": 12216,
+            "cachedInputTokens": 9728,
+            "cacheReadReported": true,
+            "reasoningTokens": 30
+          }
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "39d3f90a-c686-4dda-bb1f-672694891bbe",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 28257.057099999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:07.346Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 13292,
+            "outputTokens": 5611,
+            "totalTokens": 18903,
+            "cachedInputTokens": 12160,
+            "cacheReadReported": true,
+            "reasoningTokens": 5147
+          }
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "d8a5889f-1751-4e39-9156-696056b57697",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3530.183799999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:35.609Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 18966,
+            "outputTokens": 554,
+            "totalTokens": 19520,
+            "cachedInputTokens": 18816,
+            "cacheReadReported": true,
+            "reasoningTokens": 129
+          }
+        },
+        {
+          "turn": 6,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "f96a41a7-e941-4d1f-9432-52fec62d0842",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4077.9303,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:39.143Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 19582,
+            "outputTokens": 610,
+            "totalTokens": 20192,
+            "cachedInputTokens": 19328,
+            "cacheReadReported": true,
+            "reasoningTokens": 565
+          }
+        },
+        {
+          "turn": 7,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "1aa14158-0b8a-43f6-a530-638dc251c4b7",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 9276.8358,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:43.224Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 25831,
+            "outputTokens": 1688,
+            "totalTokens": 27519,
+            "cachedInputTokens": 20096,
+            "cacheReadReported": true,
+            "reasoningTokens": 754
+          }
+        },
+        {
+          "turn": 8,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "a513c053-4b7a-4172-9ef7-b17b13035457",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2340.5731000000014,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:52.506Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 27585,
+            "outputTokens": 330,
+            "totalTokens": 27915,
+            "cachedInputTokens": 27392,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 9,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "18cca593-6547-47d6-8daf-842bf68ba969",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1528.847099999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:54.853Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 27982,
+            "outputTokens": 21,
+            "totalTokens": 28003,
+            "cachedInputTokens": 27776,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 10,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "b8ff4b02-fe68-4a2e-ace0-a7165a92c454",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2153.987399999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:03.597Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 28153,
+            "outputTokens": 69,
+            "totalTokens": 28222,
+            "cachedInputTokens": 27904,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 11,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "6d6cd8f6-3874-4098-b28c-1792f81c98d9",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4701.7590000000055,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:17.912Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 28649,
+            "outputTokens": 669,
+            "totalTokens": 29318,
+            "cachedInputTokens": 28160,
+            "cacheReadReported": true,
+            "reasoningTokens": 418
+          }
+        },
+        {
+          "turn": 12,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "666bcd0e-1266-4c62-bcbb-a611c5ccadea",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1374.962400000004,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:22.620Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 29376,
+            "outputTokens": 39,
+            "totalTokens": 29415,
+            "cachedInputTokens": 29184,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 13,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 26415.056299999997,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:29.383Z",
+          "usage": null
+        },
+        {
+          "turn": 13,
+          "attempt": 2,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 24796.157799999986,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:56.808Z",
+          "usage": null
+        },
+        {
+          "turn": 13,
+          "attempt": 3,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 77813.20730000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:13:23.621Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": {
+        "from": "2026-11-09T14:10:58.716Z",
+        "to": "2026-11-09T14:14:54.043Z",
+        "totalRmb": null,
+        "toppedUpRmb": null,
+        "grantedRmb": null,
+        "error": "DeepSeek balance endpoint or credential unavailable"
+      },
+      "price": {
+        "knownRmb": 0.06066672000000001,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0.0006213600000000001,
+            "upperRmb": 0.0006213600000000001,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00586748,
+            "upperRmb": 0.00586748,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00299756,
+            "upperRmb": 0.00299756,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.023819200000000002,
+            "upperRmb": 0.023819200000000002,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0027423200000000003,
+            "upperRmb": 0.0027423200000000003,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00308056,
+            "upperRmb": 0.00308056,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.01288892,
+            "upperRmb": 0.01288892,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00206084,
+            "upperRmb": 0.00206084,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00084552,
+            "upperRmb": 0.00084552,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00108308,
+            "upperRmb": 0.00108308,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0037281999999999997,
+            "upperRmb": 0.0037281999999999997,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00093168,
+            "upperRmb": 0.00093168,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_deepseek-flash_recast",
+      "model": "deepseek-flash",
+      "arm": "recast",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:15:57.323Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "b91eb6ad-b92e-4b7c-9846-44053a8ea9c6",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 27810.014400000004,
+          "tools": [],
+          "startedAt": "2026-11-09T14:16:04.191Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5107,
+            "outputTokens": 96,
+            "totalTokens": 5203,
+            "cachedInputTokens": 896,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 30702.099799999996,
+          "tools": [],
+          "startedAt": "2026-11-09T14:16:32.012Z",
+          "usage": null
+        },
+        {
+          "turn": 2,
+          "attempt": 2,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10146.437999999995,
+          "tools": [],
+          "startedAt": "2026-11-09T14:17:03.729Z",
+          "usage": null
+        },
+        {
+          "turn": 2,
+          "attempt": 3,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10669.847599999994,
+          "tools": [],
+          "startedAt": "2026-11-09T14:17:15.881Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": {
+        "from": "2026-11-09T14:15:54.995Z",
+        "to": "2026-11-09T14:17:35.877Z",
+        "totalRmb": 0,
+        "toppedUpRmb": 0,
+        "grantedRmb": 0,
+        "error": null
+      },
+      "price": {
+        "knownRmb": 0.00461292,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0.00461292,
+            "upperRmb": 0.00461292,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_deepseek-flash_sag2sql",
+      "model": "deepseek-flash",
+      "arm": "sag2sql",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:17:43.490Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 44897.1415,
+          "tools": [],
+          "startedAt": "2026-11-09T14:18:01.486Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 2,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 31609.32130000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:18:47.387Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 3,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10193.256500000003,
+          "tools": [],
+          "startedAt": "2026-11-09T14:19:21.012Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": {
+        "from": "2026-11-09T14:17:40.963Z",
+        "to": "2026-11-09T14:19:41.140Z",
+        "totalRmb": 0,
+        "toppedUpRmb": 0,
+        "grantedRmb": 0,
+        "error": null
+      },
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6-luna_codex",
+      "model": "gpt-6-luna",
+      "arm": "codex",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:17:56.181Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10700.1744,
+          "tools": [],
+          "startedAt": "2026-11-09T14:18:00.831Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 1,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6-luna_rawagent",
+      "model": "gpt-6-luna",
+      "arm": "rawagent",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:17:06.927Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10674.668000000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:17:10.357Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 2,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10669.855699999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:17:22.034Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 3,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 8164.836599999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:17:34.712Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6-luna_recast",
+      "model": "gpt-6-luna",
+      "arm": "recast",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:10:58.716Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_0dddb1b3cbd05e85016af1d48de87887d1b111a1cb4fedda11",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 9530.1989,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:07.210Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 3906,
+            "outputTokens": 75,
+            "totalTokens": 3981,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 3903
+          }
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_0dddb1b3cbd05e85016af1d491a3c887d1b1e3116dffe8e902",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 7264.914499999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:16.755Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 24921,
+            "outputTokens": 424,
+            "totalTokens": 25345,
+            "cachedInputTokens": 3903,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 21015
+          }
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d497abe887d197a0bd6dc24f9f18",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1673.9937000000027,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:24.029Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 4508,
+            "outputTokens": 23,
+            "totalTokens": 4531,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 4505
+          }
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d49959a487d1bc4af9393e2472aa",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3375.3408999999992,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:25.712Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 9437,
+            "outputTokens": 331,
+            "totalTokens": 9768,
+            "cachedInputTokens": 4505,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 4929
+          }
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d49cbe4887d195bb00578be2bd9f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4923.395099999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:29.101Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 9832,
+            "outputTokens": 291,
+            "totalTokens": 10123,
+            "cachedInputTokens": 9434,
+            "cacheReadReported": true,
+            "reasoningTokens": 187,
+            "cacheWriteTokens": 395
+          }
+        },
+        {
+          "turn": 6,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4a2f3a087d1915e43dbb14a0e86",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4061.295100000003,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:34.036Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10148,
+            "outputTokens": 23,
+            "totalTokens": 10171,
+            "cachedInputTokens": 9829,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 316
+          }
+        },
+        {
+          "turn": 7,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4a5fb0887d1beb481ca02cb3b75",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2887.4348000000027,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:38.107Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 15281,
+            "outputTokens": 102,
+            "totalTokens": 15383,
+            "cachedInputTokens": 10145,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 5133
+          }
+        },
+        {
+          "turn": 8,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4a8f97c87d18f6ce9580559599a",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1683.2329000000027,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:41.008Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 15441,
+            "outputTokens": 23,
+            "totalTokens": 15464,
+            "cachedInputTokens": 15278,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 160
+          }
+        },
+        {
+          "turn": 9,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4aa89c887d1968db62ae0e71b57",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1647.2857000000004,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:42.701Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 15486,
+            "outputTokens": 13,
+            "totalTokens": 15499,
+            "cachedInputTokens": 15438,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 45
+          }
+        },
+        {
+          "turn": 10,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4b24ecc87d1adfd0fa639de8cab",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1616.4599999999991,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:50.361Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 15647,
+            "outputTokens": 14,
+            "totalTokens": 15661,
+            "cachedInputTokens": 15483,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 161
+          }
+        },
+        {
+          "turn": 11,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4ba05c087d1877432edcaa9e6b7",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2736.498799999994,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:57.996Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 16203,
+            "outputTokens": 164,
+            "totalTokens": 16367,
+            "cachedInputTokens": 15644,
+            "cacheReadReported": true,
+            "reasoningTokens": 25,
+            "cacheWriteTokens": 556
+          }
+        },
+        {
+          "turn": 12,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4bd90f487d1a7bfa081d8c1264b",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3175.4890000000014,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:00.744Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 16392,
+            "outputTokens": 23,
+            "totalTokens": 16415,
+            "cachedInputTokens": 16200,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 189
+          }
+        },
+        {
+          "turn": 13,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4c10f1487d1bf2c00499766e88d",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3526.6918999999907,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:03.929Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 21519,
+            "outputTokens": 137,
+            "totalTokens": 21656,
+            "cachedInputTokens": 16389,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 5127
+          }
+        },
+        {
+          "turn": 14,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4c3cc7887d1b93b90505097d9a4",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2501.529999999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:07.470Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 21717,
+            "outputTokens": 13,
+            "totalTokens": 21730,
+            "cachedInputTokens": 21516,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 198
+          }
+        },
+        {
+          "turn": 15,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4cc5f8487d1bc58ea4a8bc155c3",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1453.995299999995,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:16.495Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 21878,
+            "outputTokens": 14,
+            "totalTokens": 21892,
+            "cachedInputTokens": 21714,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 161
+          }
+        },
+        {
+          "turn": 16,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4d37ec487d19a46f1a6269a4946",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2160.4565999999904,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:23.466Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 22435,
+            "outputTokens": 57,
+            "totalTokens": 22492,
+            "cachedInputTokens": 21875,
+            "cacheReadReported": true,
+            "reasoningTokens": 32,
+            "cacheWriteTokens": 557
+          }
+        },
+        {
+          "turn": 17,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_030bbc20b22220b1016af1d4d690e087d1a2197470b8d9c060",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 13943.4133,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:25.650Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 27600,
+            "outputTokens": 143,
+            "totalTokens": 27743,
+            "cachedInputTokens": 22432,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 5165
+          }
+        },
+        {
+          "turn": 18,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 90000.5007,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:39.607Z",
+          "usage": null
+        },
+        {
+          "turn": 18,
+          "attempt": 2,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 14058.958000000013,
+          "tools": [],
+          "startedAt": "2026-11-09T14:14:10.609Z",
+          "usage": null
+        },
+        {
+          "turn": 18,
+          "attempt": 3,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 7971.112599999993,
+          "tools": [],
+          "startedAt": "2026-11-09T14:14:26.670Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0.06518798121,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0.00353190519,
+            "upperRmb": 0.00353190519,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.019338083754000004,
+            "upperRmb": 0.019338083754000004,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0038628060899999995,
+            "upperRmb": 0.0038628060899999995,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.005556279629999999,
+            "upperRmb": 0.005556279629999999,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0019451933820000002,
+            "upperRmb": 0.0019451933820000002,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0010050652920000002,
+            "upperRmb": 0.0010050652920000002,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00533724675,
+            "upperRmb": 0.00533724675,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.001240156104,
+            "upperRmb": 0.001240156104,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.001120729434,
+            "upperRmb": 0.001120729434,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0012245348940000001,
+            "upperRmb": 0.0012245348940000001,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.002071002912,
+            "upperRmb": 0.002071002912,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00132645909,
+            "upperRmb": 0.00132645909,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.005869308522,
+            "upperRmb": 0.005869308522,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.001657595148,
+            "upperRmb": 0.001657595148,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0016431833220000001,
+            "upperRmb": 0.0016431833220000001,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00213103539,
+            "upperRmb": 0.00213103539,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0063273963059999995,
+            "upperRmb": 0.0063273963059999995,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6-luna_sag2sql",
+      "model": "gpt-6-luna",
+      "arm": "sag2sql",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:14:44.978Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10737.4257,
+          "tools": [],
+          "startedAt": "2026-11-09T14:15:02.965Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 2,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10685.037399999997,
+          "tools": [],
+          "startedAt": "2026-11-09T14:15:14.706Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 3,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 90007.17259999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:15:27.398Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6.1-sol_codex",
+      "model": "gpt-6.1-sol",
+      "arm": "codex",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:16:28.717Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 267945.5067,
+          "tools": [],
+          "startedAt": "2026-11-09T14:16:32.660Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 1,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6.1-sol_rawagent",
+      "model": "gpt-6.1-sol",
+      "arm": "rawagent",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:15:05.518Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "widget-attributes",
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10757.061000000002,
+          "tools": [],
+          "startedAt": "2026-11-09T14:15:09.054Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 2,
+          "model": "gpt-6.1-sol",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10700.666899999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:15:20.815Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 3,
+          "model": "gpt-6.1-sol",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 43592.7365,
+          "tools": [],
+          "startedAt": "2026-11-09T14:15:33.517Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6.1-sol_recast",
+      "model": "gpt-6.1-sol",
+      "arm": "recast",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:21:12.806Z",
+      "passed": true,
+      "hadCommit": true,
+      "failedChecks": [],
+      "failureReason": null,
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_026dd9891cf3e6b2016af1d6ee370087d1be07ab2556eb5589",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4529.1612000000005,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:20.657Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 3900,
+            "outputTokens": 118,
+            "totalTokens": 4018,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 3897
+          }
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_026dd9891cf3e6b2016af1d6f15e0487d182e002598bba505f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 14316.833499999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:25.207Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 21731,
+            "outputTokens": 700,
+            "totalTokens": 22431,
+            "cachedInputTokens": 3897,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 17831
+          }
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0b1712e6d1545597016af1d6ff224087d19f6b9eb3847758b9",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3449.1692999999977,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:39.533Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 4778,
+            "outputTokens": 23,
+            "totalTokens": 4801,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 4775
+          }
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0b1712e6d1545597016af1d702a64887d186af494dc98f09d0",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4375.1567,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:42.991Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 9707,
+            "outputTokens": 289,
+            "totalTokens": 9996,
+            "cachedInputTokens": 4775,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 4929
+          }
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0b1712e6d1545597016af1d70700e087d18294983468c84a95",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3309.5118,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:47.383Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10055,
+            "outputTokens": 22,
+            "totalTokens": 10077,
+            "cachedInputTokens": 9704,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 348
+          }
+        },
+        {
+          "turn": 6,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0b1712e6d1545597016af1d70a442c87d1b1462b21d8d7626b",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2926.338300000003,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:50.701Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10098,
+            "outputTokens": 13,
+            "totalTokens": 10111,
+            "cachedInputTokens": 10052,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 43
+          }
+        },
+        {
+          "turn": 7,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0b1712e6d1545597016af1d7137bc487d1bdad15d02cf28c03",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 6471.653400000003,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:59.947Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10259,
+            "outputTokens": 14,
+            "totalTokens": 10273,
+            "cachedInputTokens": 10095,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 161
+          }
+        },
+        {
+          "turn": 8,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0b1712e6d1545597016af1d7207abc87d1bf4cab6b036a7c20",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2238.515100000004,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:12.790Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10422,
+            "outputTokens": 20,
+            "totalTokens": 10442,
+            "cachedInputTokens": 10256,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 163
+          }
+        },
+        {
+          "turn": 9,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0b1712e6d1545597016af1d722a62c87d1a01c335387abc6c2",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2357.0717000000004,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:15.038Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10466,
+            "outputTokens": 13,
+            "totalTokens": 10479,
+            "cachedInputTokens": 10419,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 44
+          }
+        },
+        {
+          "turn": 10,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0d0495fedb1f2cc4016af1d7264f8087d18c0458ce5412b6ea",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2634.3886000000057,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:18.785Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 3935,
+            "outputTokens": 120,
+            "totalTokens": 4055,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 3932
+          }
+        },
+        {
+          "turn": 11,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0d0495fedb1f2cc4016af1d729238887d197335b67406632f1",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 13465.537800000006,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:21.441Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 14335,
+            "outputTokens": 698,
+            "totalTokens": 15033,
+            "cachedInputTokens": 3932,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 10400
+          }
+        },
+        {
+          "turn": 12,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d7367c7087d1971d1af25482cee7",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3645.9818000000087,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:34.915Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 4811,
+            "outputTokens": 27,
+            "totalTokens": 4838,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 4808
+          }
+        },
+        {
+          "turn": 13,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d73a213487d1b5ae13ca510752ba",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3937.654800000004,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:38.568Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 4924,
+            "outputTokens": 222,
+            "totalTokens": 5146,
+            "cachedInputTokens": 4808,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 113
+          }
+        },
+        {
+          "turn": 14,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d73e0e5487d1a37b42d3144ae1c4",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3515.414899999989,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:42.520Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5210,
+            "outputTokens": 20,
+            "totalTokens": 5230,
+            "cachedInputTokens": 4921,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 286
+          }
+        },
+        {
+          "turn": 15,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d741908887d1889bc3856f38de1f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4601.971300000005,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:46.044Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5249,
+            "outputTokens": 165,
+            "totalTokens": 5414,
+            "cachedInputTokens": 5207,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 39
+          }
+        },
+        {
+          "turn": 16,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d74638a087d18ff484d88bdb5b1e",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4588.4277,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:50.655Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5439,
+            "outputTokens": 27,
+            "totalTokens": 5466,
+            "cachedInputTokens": 5246,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 190
+          }
+        },
+        {
+          "turn": 17,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d74acbe887d19fdc2af4c95923e7",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3774.1266999999934,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:55.252Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5683,
+            "outputTokens": 165,
+            "totalTokens": 5848,
+            "cachedInputTokens": 5436,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 244
+          }
+        },
+        {
+          "turn": 18,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d74ea29087d1a76279bcc23dbb72",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 5494.309899999993,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:59.040Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5914,
+            "outputTokens": 21,
+            "totalTokens": 5935,
+            "cachedInputTokens": 5680,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 231
+          }
+        },
+        {
+          "turn": 19,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d7541d7887d1939c3a3e317f4e74",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3669.8079,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:04.545Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5962,
+            "outputTokens": 36,
+            "totalTokens": 5998,
+            "cachedInputTokens": 5911,
+            "cacheReadReported": true,
+            "reasoningTokens": 14,
+            "cacheWriteTokens": 48
+          }
+        },
+        {
+          "turn": 20,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d757cc0487d1a086d10a5533ba62",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3913.7744999999995,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:08.223Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 6017,
+            "outputTokens": 21,
+            "totalTokens": 6038,
+            "cachedInputTokens": 5959,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 55
+          }
+        },
+        {
+          "turn": 21,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d75bac6087d1906dd7d5669d798f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2795.953899999993,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:12.145Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 6061,
+            "outputTokens": 13,
+            "totalTokens": 6074,
+            "cachedInputTokens": 6014,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 44
+          }
+        },
+        {
+          "turn": 22,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d765893c87d1a38994ccb514913b",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2023.680800000002,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:21.825Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 6222,
+            "outputTokens": 14,
+            "totalTokens": 6236,
+            "cachedInputTokens": 6058,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 161
+          }
+        },
+        {
+          "turn": 23,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d76e2b6c87d18e23633792177d5f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2551.0754000000015,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:30.508Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 6385,
+            "outputTokens": 19,
+            "totalTokens": 6404,
+            "cachedInputTokens": 6219,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 163
+          }
+        },
+        {
+          "turn": 24,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_02e5f90a78ced32f016af1d770995487d1b53da468e85a9bc3",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1545.90830000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:33.067Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 6429,
+            "outputTokens": 13,
+            "totalTokens": 6442,
+            "cachedInputTokens": 6382,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 44
+          }
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 1.1660047396799997,
+        "upperRmb": 1.1660047396799997,
+        "complete": true,
+        "estimatedCalls": 0,
+        "unpricedCalls": 0,
+        "requests": [
+          {
+            "knownRmb": 0.0734264058,
+            "upperRmb": 0.0734264058,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.34919753616,
+            "upperRmb": 0.34919753616,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0817913118,
+            "upperRmb": 0.0817913118,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.1054582848,
+            "upperRmb": 0.1054582848,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.01388372832,
+            "upperRmb": 0.01388372832,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00838976556,
+            "upperRmb": 0.00838976556,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0104678904,
+            "upperRmb": 0.0104678904,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.01101278508,
+            "upperRmb": 0.01101278508,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00865314252,
+            "upperRmb": 0.00865314252,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0741486768,
+            "upperRmb": 0.0741486768,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.22426816896,
+            "upperRmb": 0.22426816896,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.08261436479999999,
+            "upperRmb": 0.08261436479999999,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.02008450884,
+            "upperRmb": 0.02008450884,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00949433628,
+            "upperRmb": 0.00949433628,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.015279894959999998,
+            "upperRmb": 0.015279894959999998,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00857050128,
+            "upperRmb": 0.00857050128,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.01887714048,
+            "upperRmb": 0.01887714048,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0091476462,
+            "upperRmb": 0.0091476462,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.007236819479999999,
+            "upperRmb": 0.007236819479999999,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00637882872,
+            "upperRmb": 0.00637882872,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00569351112,
+            "upperRmb": 0.00569351112,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.007755510840000001,
+            "upperRmb": 0.007755510840000001,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00823321752,
+            "upperRmb": 0.00823321752,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00594076296,
+            "upperRmb": 0.00594076296,
+            "tariff": "default/short",
+            "note": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-autocomplete_gpt-6.1-sol_sag2sql",
+      "model": "gpt-6.1-sol",
+      "arm": "sag2sql",
+      "task": "django-admin-autocomplete",
+      "inputHash": "4e9c88332b4edf5614f909a13a6e64884a0837f8548212153dc583eaaa5953cd",
+      "startedAt": "2026-11-09T14:10:58.715Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "dynamic-inline",
+        "relational-pagination",
+        "empty-result",
+        "permission-boundary"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0eff9a0a0206f690016af1d497f0f087d19b4a2758ff3848ab",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 10341.860499999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:16.314Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 6401,
+            "outputTokens": 95,
+            "totalTokens": 6496,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 6398
+          }
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0eff9a0a0206f690016af1d49aee0487d1afa4cfa047216e29",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 15078.533000000003,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:26.686Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 24125,
+            "outputTokens": 802,
+            "totalTokens": 24927,
+            "cachedInputTokens": 6398,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 17724
+          }
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0a36a5fa0d3883ef016af1d4a9744087d1bd739a457bcbc390",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2010.5755000000063,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:41.774Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 7381,
+            "outputTokens": 23,
+            "totalTokens": 7404,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 7378
+          }
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0a36a5fa0d3883ef016af1d4ab82fc87d1876f34838730c0ce",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3982.586900000002,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:43.793Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12310,
+            "outputTokens": 289,
+            "totalTokens": 12599,
+            "cachedInputTokens": 7378,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 4929
+          }
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0a36a5fa0d3883ef016af1d4afa3f887d18f132758b968e643",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2528.9994000000006,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:47.791Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12658,
+            "outputTokens": 22,
+            "totalTokens": 12680,
+            "cachedInputTokens": 12307,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 348
+          }
+        },
+        {
+          "turn": 6,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0a36a5fa0d3883ef016af1d4b23dd887d18fd99f1d742e56c8",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1877.0441999999966,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:50.329Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12701,
+            "outputTokens": 13,
+            "totalTokens": 12714,
+            "cachedInputTokens": 12655,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 43
+          }
+        },
+        {
+          "turn": 7,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0a36a5fa0d3883ef016af1d4baded887d1955fdb13dce72481",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2414.742600000005,
+          "tools": [],
+          "startedAt": "2026-11-09T14:11:58.527Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12862,
+            "outputTokens": 14,
+            "totalTokens": 12876,
+            "cachedInputTokens": 12698,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 161
+          }
+        },
+        {
+          "turn": 8,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0a36a5fa0d3883ef016af1d4c2fd4887d1b60006258d2fb376",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3031.028600000005,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:07.051Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 13025,
+            "outputTokens": 20,
+            "totalTokens": 13045,
+            "cachedInputTokens": 12859,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 163
+          }
+        },
+        {
+          "turn": 9,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0a36a5fa0d3883ef016af1d4c673e887d1ba08bce4de160242",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3003.3496000000014,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:10.091Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 13069,
+            "outputTokens": 13,
+            "totalTokens": 13082,
+            "cachedInputTokens": 13022,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 44
+          }
+        },
+        {
+          "turn": 10,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0c82f415a099a222016af1d4cae37487d1a1baa2a6a7ce0e5d",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2753.8441999999923,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:14.929Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 7419,
+            "outputTokens": 120,
+            "totalTokens": 7539,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 7416
+          }
+        },
+        {
+          "turn": 11,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "servedModel": "gpt-6.1-sol",
+          "responseId": "resp_0c82f415a099a222016af1d4cdb72c87d1b68004ca0ea28684",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 17143.655500000008,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:17.704Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 17819,
+            "outputTokens": 845,
+            "totalTokens": 18664,
+            "cachedInputTokens": 7416,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 10400
+          }
+        },
+        {
+          "turn": 12,
+          "attempt": 1,
+          "model": "gpt-6.1-sol",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 39125.66599999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:12:34.857Z",
+          "usage": null
+        },
+        {
+          "turn": 12,
+          "attempt": 2,
+          "model": "gpt-6.1-sol",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 90008.45490000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:13:14.988Z",
+          "usage": null
+        },
+        {
+          "turn": 12,
+          "attempt": 3,
+          "model": "gpt-6.1-sol",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 5764.0657000000065,
+          "tools": [],
+          "startedAt": "2026-11-09T14:14:47.004Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 1.1328521648399998,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0.1138903788,
+            "upperRmb": 0.1138903788,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.35593380504,
+            "upperRmb": 0.35593380504,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.1255139028,
+            "upperRmb": 0.1255139028,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.10720718843999999,
+            "upperRmb": 0.10720718843999999,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.015632631959999997,
+            "upperRmb": 0.015632631959999997,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0101386692,
+            "upperRmb": 0.0101386692,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.012216794040000001,
+            "upperRmb": 0.012216794040000001,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.01276168872,
+            "upperRmb": 0.01276168872,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.010402046160000001,
+            "upperRmb": 0.010402046160000001,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.1326694248,
+            "upperRmb": 0.1326694248,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.23648563488,
+            "upperRmb": 0.23648563488,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-prepopulate_deepseek-flash_codex",
+      "model": "deepseek-flash",
+      "arm": "codex",
+      "task": "django-admin-prepopulate",
+      "inputHash": "a8997a2cca07c98ceb17593699f2a89b85f244deba99eece5f4f4a433da97525",
+      "startedAt": "2026-11-09T14:20:06.327Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "inline-metadata",
+        "slug-events-and-overrides",
+        "inline-registration",
+        "rendered-inline-unicode",
+        "existing-slug"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10731.478000000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:20:10.412Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": {
+        "from": "2026-11-09T14:19:55.578Z",
+        "to": "2026-11-09T14:21:04.409Z",
+        "totalRmb": null,
+        "toppedUpRmb": null,
+        "grantedRmb": null,
+        "error": "DeepSeek balance endpoint or credential unavailable"
+      },
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 1,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-prepopulate_deepseek-flash_recast",
+      "model": "deepseek-flash",
+      "arm": "recast",
+      "task": "django-admin-prepopulate",
+      "inputHash": "a8997a2cca07c98ceb17593699f2a89b85f244deba99eece5f4f4a433da97525",
+      "startedAt": "2026-11-09T14:21:15.345Z",
+      "passed": true,
+      "hadCommit": true,
+      "failedChecks": [],
+      "failureReason": null,
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "e69f9370-f2ec-4aee-8261-c8c8767aff3f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1144.5252999999993,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:23.111Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5355,
+            "outputTokens": 105,
+            "totalTokens": 5460,
+            "cachedInputTokens": 896,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "e2d209c1-cc7f-4b11-a2e5-c510d6428f77",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1047.4202999999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:24.265Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 6666,
+            "outputTokens": 75,
+            "totalTokens": 6741,
+            "cachedInputTokens": 5376,
+            "cacheReadReported": true,
+            "reasoningTokens": 32
+          }
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "3d4cde88-c1ed-4f16-908e-0a90bfd8b9f8",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 6662.063600000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:25.321Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 8074,
+            "outputTokens": 1026,
+            "totalTokens": 9100,
+            "cachedInputTokens": 6656,
+            "cacheReadReported": true,
+            "reasoningTokens": 949
+          }
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "b15c2a2a-7b96-4f80-8f2d-39a87f39557a",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2706.6077000000005,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:31.996Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10072,
+            "outputTokens": 188,
+            "totalTokens": 10260,
+            "cachedInputTokens": 9088,
+            "cacheReadReported": true,
+            "reasoningTokens": 143
+          }
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "f031220c-129e-46be-8a17-0ee5bf5f7d2a",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 12944.4456,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:34.711Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 14985,
+            "outputTokens": 2378,
+            "totalTokens": 17363,
+            "cachedInputTokens": 10240,
+            "cacheReadReported": true,
+            "reasoningTokens": 33
+          }
+        },
+        {
+          "turn": 6,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "4ee68aed-1581-4043-b4ff-07832d727925",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1415.6262999999963,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:47.666Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 7668,
+            "outputTokens": 105,
+            "totalTokens": 7773,
+            "cachedInputTokens": 1152,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 7,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "4c95d261-106b-4897-9ea5-d91ee4781ab7",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1381.2040000000052,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:49.094Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 8979,
+            "outputTokens": 89,
+            "totalTokens": 9068,
+            "cachedInputTokens": 7680,
+            "cacheReadReported": true,
+            "reasoningTokens": 11
+          }
+        },
+        {
+          "turn": 8,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "cfe62051-2b72-4df2-aad9-d1f20be7e109",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 5226.755799999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:50.487Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 15122,
+            "outputTokens": 1063,
+            "totalTokens": 16185,
+            "cachedInputTokens": 8960,
+            "cacheReadReported": true,
+            "reasoningTokens": 500
+          }
+        },
+        {
+          "turn": 9,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "1eb5f809-a649-44c7-b854-b73101baf802",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 806.8279999999941,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:55.729Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 16251,
+            "outputTokens": 21,
+            "totalTokens": 16272,
+            "cachedInputTokens": 16000,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 10,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "33778349-f5db-428b-b53b-57a00fbcea75",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1261.4023000000016,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:02.477Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 16429,
+            "outputTokens": 23,
+            "totalTokens": 16452,
+            "cachedInputTokens": 16256,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 11,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "4ab31c23-37ee-4ead-a757-f59815c1a4be",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1276.9760999999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:09.466Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 16609,
+            "outputTokens": 72,
+            "totalTokens": 16681,
+            "cachedInputTokens": 16384,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 12,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "29980e27-dfd3-4025-860f-42f30bf4f2cd",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1083.8078999999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:10.757Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 16723,
+            "outputTokens": 22,
+            "totalTokens": 16745,
+            "cachedInputTokens": 16512,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 13,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "be7398de-ace6-4093-8f1b-07aa649afeb1",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1457.2298999999985,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:13.300Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5342,
+            "outputTokens": 177,
+            "totalTokens": 5519,
+            "cachedInputTokens": 896,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 14,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "b15ca95b-23c5-4b4b-b271-084248a01896",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1990.1622000000061,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:14.776Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 10809,
+            "outputTokens": 93,
+            "totalTokens": 10902,
+            "cachedInputTokens": 5504,
+            "cacheReadReported": true,
+            "reasoningTokens": 18
+          }
+        },
+        {
+          "turn": 15,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "50f18648-3b9f-40c1-b8b9-bdff85b783eb",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 10871.2347,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:16.780Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 11978,
+            "outputTokens": 2032,
+            "totalTokens": 14010,
+            "cachedInputTokens": 10880,
+            "cacheReadReported": true,
+            "reasoningTokens": 1941
+          }
+        },
+        {
+          "turn": 16,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "e41c7090-fe67-4740-acdf-bcec76c7124b",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 46410.1456,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:27.662Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 18222,
+            "outputTokens": 8113,
+            "totalTokens": 26335,
+            "cachedInputTokens": 13952,
+            "cacheReadReported": true,
+            "reasoningTokens": 5851
+          }
+        },
+        {
+          "turn": 17,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "8375a5a4-ffb9-49cf-b6da-7a48f98498fd",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1261.3899999999994,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:14.084Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 7649,
+            "outputTokens": 104,
+            "totalTokens": 7753,
+            "cachedInputTokens": 1152,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 18,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "9541e62a-5ef2-4524-869b-81d32874df30",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1440.5419999999867,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:15.373Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 11626,
+            "outputTokens": 96,
+            "totalTokens": 11722,
+            "cachedInputTokens": 7680,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 19,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "67de5791-a5b5-4aaf-a45d-3006c667759a",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1172.3484000000026,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:16.826Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 17131,
+            "outputTokens": 104,
+            "totalTokens": 17235,
+            "cachedInputTokens": 11648,
+            "cacheReadReported": true,
+            "reasoningTokens": 29
+          }
+        },
+        {
+          "turn": 20,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "04dbd9b9-2ad6-4658-989a-c87ac204956e",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 15349.852700000003,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:18.011Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 18311,
+            "outputTokens": 2551,
+            "totalTokens": 20862,
+            "cachedInputTokens": 17152,
+            "cacheReadReported": true,
+            "reasoningTokens": 1732
+          }
+        },
+        {
+          "turn": 21,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "006629aa-306f-4f7c-8c4e-9be11cb08f67",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3409.087200000009,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:33.375Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 20932,
+            "outputTokens": 561,
+            "totalTokens": 21493,
+            "cachedInputTokens": 20736,
+            "cacheReadReported": true,
+            "reasoningTokens": 186
+          }
+        },
+        {
+          "turn": 22,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "bd213ad3-d065-4a0a-bfbd-fbd5fea2935f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1074.099199999997,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:36.794Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 21518,
+            "outputTokens": 67,
+            "totalTokens": 21585,
+            "cachedInputTokens": 21376,
+            "cacheReadReported": true,
+            "reasoningTokens": 17
+          }
+        },
+        {
+          "turn": 23,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "f134a9d1-12c5-46f2-8689-5fc4c5454744",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1931.911999999982,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:37.878Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 22435,
+            "outputTokens": 366,
+            "totalTokens": 22801,
+            "cachedInputTokens": 21504,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 24,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "57139b80-6f02-455d-a9c2-d1aeb2c6309c",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3140.040399999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:39.828Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 22874,
+            "outputTokens": 276,
+            "totalTokens": 23150,
+            "cachedInputTokens": 22656,
+            "cacheReadReported": true,
+            "reasoningTokens": 251
+          }
+        },
+        {
+          "turn": 25,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "2c634919-ea58-4351-9229-71e4505735be",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1408.2329000000027,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:49.173Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 23307,
+            "outputTokens": 68,
+            "totalTokens": 23375,
+            "cachedInputTokens": 23040,
+            "cacheReadReported": true,
+            "reasoningTokens": 45
+          }
+        },
+        {
+          "turn": 26,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "151373ad-62d8-4d84-8499-ee8e02012027",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1680.3225000000093,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:57.168Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 23532,
+            "outputTokens": 128,
+            "totalTokens": 23660,
+            "cachedInputTokens": 23296,
+            "cacheReadReported": true,
+            "reasoningTokens": 89
+          }
+        },
+        {
+          "turn": 27,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "d60a1c75-944f-457e-842b-e46e45905d0a",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1014.7576999999874,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:58.858Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 23679,
+            "outputTokens": 23,
+            "totalTokens": 23702,
+            "cachedInputTokens": 23424,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 28,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "e6ab9c8d-57f5-452c-9fcf-0d02a2598c43",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1761.8344000000216,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:59.880Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 24461,
+            "outputTokens": 98,
+            "totalTokens": 24559,
+            "cachedInputTokens": 23680,
+            "cacheReadReported": true,
+            "reasoningTokens": 76
+          }
+        },
+        {
+          "turn": 29,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "043e2741-ba2a-4359-91ba-657b8cba8014",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1344.9337999999989,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:03.081Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 5363,
+            "outputTokens": 217,
+            "totalTokens": 5580,
+            "cachedInputTokens": 896,
+            "cacheReadReported": true,
+            "reasoningTokens": 43
+          }
+        },
+        {
+          "turn": 30,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "f7aeaf1c-a649-4351-ab8f-77f2cf24ae2b",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1193.1823999999906,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:04.465Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 8014,
+            "outputTokens": 108,
+            "totalTokens": 8122,
+            "cachedInputTokens": 5504,
+            "cacheReadReported": true,
+            "reasoningTokens": 26
+          }
+        },
+        {
+          "turn": 31,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "c53e84ad-3058-48ae-8c38-841e8939f229",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3715.466000000015,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:05.689Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 13531,
+            "outputTokens": 526,
+            "totalTokens": 14057,
+            "cachedInputTokens": 8064,
+            "cacheReadReported": true,
+            "reasoningTokens": 451
+          }
+        },
+        {
+          "turn": 32,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "242c36c0-3837-4bf6-a877-7cfca0eef11a",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 16423.6722,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:09.415Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 15133,
+            "outputTokens": 2749,
+            "totalTokens": 17882,
+            "cachedInputTokens": 13952,
+            "cacheReadReported": true,
+            "reasoningTokens": 705
+          }
+        },
+        {
+          "turn": 33,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "e5b87938-39ee-407f-a6ae-81b192da5eab",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 7953.347999999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:25.861Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 17910,
+            "outputTokens": 2062,
+            "totalTokens": 19972,
+            "cachedInputTokens": 17664,
+            "cacheReadReported": true,
+            "reasoningTokens": 32
+          }
+        },
+        {
+          "turn": 34,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "fe3383b2-2ac6-42f9-b6f4-9d485f21f435",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 8359.438300000009,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:33.823Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 20000,
+            "outputTokens": 2040,
+            "totalTokens": 22040,
+            "cachedInputTokens": 19840,
+            "cacheReadReported": true,
+            "reasoningTokens": 28
+          }
+        },
+        {
+          "turn": 35,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "d7a7ddac-d5a7-4941-9847-f8c02b197894",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 8229.048099999985,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:42.192Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 22064,
+            "outputTokens": 2092,
+            "totalTokens": 24156,
+            "cachedInputTokens": 21888,
+            "cacheReadReported": true,
+            "reasoningTokens": 47
+          }
+        },
+        {
+          "turn": 36,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "13c01e3d-bfbd-420d-80c5-96fb7091833e",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1439.2396000000008,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:50.430Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 7469,
+            "outputTokens": 141,
+            "totalTokens": 7610,
+            "cachedInputTokens": 1152,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 37,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "175d3144-45e1-4a09-9148-f8a062ca0026",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3250.276499999978,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:51.886Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 9804,
+            "outputTokens": 440,
+            "totalTokens": 10244,
+            "cachedInputTokens": 7552,
+            "cacheReadReported": true,
+            "reasoningTokens": 347
+          }
+        },
+        {
+          "turn": 38,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "ee527162-8699-4840-8ff0-cec1b5c26951",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2538.2091000000073,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:55.147Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 11817,
+            "outputTokens": 361,
+            "totalTokens": 12178,
+            "cachedInputTokens": 10240,
+            "cacheReadReported": true,
+            "reasoningTokens": 98
+          }
+        },
+        {
+          "turn": 39,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "379df093-6ce6-486b-ab8d-8df59aacd71f",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 836.8190999999933,
+          "tools": [],
+          "startedAt": "2026-11-09T14:24:57.699Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12246,
+            "outputTokens": 52,
+            "totalTokens": 12298,
+            "cachedInputTokens": 12032,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 40,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "b5885f6e-b286-401e-ab4c-6f17ef59b58c",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1078.482400000008,
+          "tools": [],
+          "startedAt": "2026-11-09T14:25:04.064Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12472,
+            "outputTokens": 62,
+            "totalTokens": 12534,
+            "cachedInputTokens": 12288,
+            "cacheReadReported": true,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "turn": 41,
+          "attempt": 1,
+          "model": "deepseek-flash",
+          "servedModel": "deepseek-flash",
+          "responseId": "17940160-c3bd-4de8-8fb4-8b0a428715de",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 2191.098499999993,
+          "tools": [],
+          "startedAt": "2026-11-09T14:25:10.913Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 12712,
+            "outputTokens": 62,
+            "totalTokens": 12774,
+            "cachedInputTokens": 12416,
+            "cacheReadReported": true,
+            "reasoningTokens": 40
+          }
+        }
+      ],
+      "balanceChange": {
+        "from": "2026-11-09T14:21:10.295Z",
+        "to": "2026-11-09T14:25:39.292Z",
+        "totalRmb": null,
+        "toppedUpRmb": null,
+        "grantedRmb": null,
+        "error": "DeepSeek balance endpoint or credential unavailable"
+      },
+      "price": {
+        "knownRmb": 0.2218992800000001,
+        "upperRmb": 0.2218992800000001,
+        "complete": true,
+        "estimatedCalls": 0,
+        "unpricedCalls": 0,
+        "requests": [
+          {
+            "knownRmb": 0.00489692,
+            "upperRmb": 0.00489692,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0016975199999999999,
+            "upperRmb": 0.0016975199999999999,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00565512,
+            "upperRmb": 0.00565512,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00191776,
+            "upperRmb": 0.00191776,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.014461799999999999,
+            "upperRmb": 0.014461799999999999,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00695904,
+            "upperRmb": 0.00695904,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0018085999999999998,
+            "upperRmb": 0.0018085999999999998,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0105932,
+            "upperRmb": 0.0105932,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.000655,
+            "upperRmb": 0.000655,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00059012,
+            "upperRmb": 0.00059012,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0008406800000000001,
+            "upperRmb": 0.0008406800000000001,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00062924,
+            "upperRmb": 0.00062924,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00517192,
+            "upperRmb": 0.00517192,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00578708,
+            "upperRmb": 0.00578708,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0094436,
+            "upperRmb": 0.0094436,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.03700104,
+            "upperRmb": 0.03700104,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00693604,
+            "upperRmb": 0.00693604,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.004483600000000001,
+            "upperRmb": 0.004483600000000001,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00613196,
+            "upperRmb": 0.00613196,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.011706040000000001,
+            "upperRmb": 0.011706040000000001,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0028547200000000003,
+            "upperRmb": 0.0028547200000000003,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00083752,
+            "upperRmb": 0.00083752,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0028250799999999998,
+            "upperRmb": 0.0028250799999999998,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0017751199999999998,
+            "upperRmb": 0.0017751199999999998,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0009998,
+            "upperRmb": 0.0009998,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00121392,
+            "upperRmb": 0.00121392,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00081548,
+            "upperRmb": 0.00081548,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0016466,
+            "upperRmb": 0.0016466,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00535292,
+            "upperRmb": 0.00535292,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00305208,
+            "upperRmb": 0.00305208,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00773228,
+            "upperRmb": 0.00773228,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.012456040000000002,
+            "upperRmb": 0.012456040000000002,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00884728,
+            "upperRmb": 0.00884728,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.008716799999999999,
+            "upperRmb": 0.008716799999999999,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00898176,
+            "upperRmb": 0.00898176,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00690404,
+            "upperRmb": 0.00690404,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00416304,
+            "upperRmb": 0.00416304,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0032258,
+            "upperRmb": 0.0032258,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00066264,
+            "upperRmb": 0.00066264,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.00067776,
+            "upperRmb": 0.00067776,
+            "tariff": "off-peak",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0007923199999999999,
+            "upperRmb": 0.0007923199999999999,
+            "tariff": "off-peak",
+            "note": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-prepopulate_gpt-6-luna_rawagent",
+      "model": "gpt-6-luna",
+      "arm": "rawagent",
+      "task": "django-admin-prepopulate",
+      "inputHash": "a8997a2cca07c98ceb17593699f2a89b85f244deba99eece5f4f4a433da97525",
+      "startedAt": "2026-11-09T14:19:40.166Z",
+      "passed": false,
+      "hadCommit": true,
+      "failedChecks": [
+        "inline-registration",
+        "rendered-inline-unicode"
+      ],
+      "failureReason": "external acceptance",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 90009.0417,
+          "tools": [],
+          "startedAt": "2026-11-09T14:19:43.856Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 2,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 63605.13639999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:21:14.869Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 3,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_051fcda8b4296a38016af1d729915087d195e4da928dcd94c1",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3785.001799999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:20.485Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 3219,
+            "outputTokens": 147,
+            "totalTokens": 3366,
+            "cachedInputTokens": 0,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 3216
+          }
+        },
+        {
+          "turn": 2,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_051fcda8b4296a38016af1d72be7cc87d189047571284b2fe4",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1917.1192000000156,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:24.285Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 11327,
+            "outputTokens": 99,
+            "totalTokens": 11426,
+            "cachedInputTokens": 3216,
+            "cacheReadReported": true,
+            "reasoningTokens": 13,
+            "cacheWriteTokens": 8108
+          }
+        },
+        {
+          "turn": 3,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_051fcda8b4296a38016af1d72de9cc87d1a0bdbae34fd5c8b9",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 10095.27409999998,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:26.222Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 20096,
+            "outputTokens": 1309,
+            "totalTokens": 21405,
+            "cachedInputTokens": 11324,
+            "cacheReadReported": true,
+            "reasoningTokens": 62,
+            "cacheWriteTokens": 8769
+          }
+        },
+        {
+          "turn": 4,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_051fcda8b4296a38016af1d738723087d18dab8aa6f5aef1e7",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3730.030700000003,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:36.323Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 21474,
+            "outputTokens": 300,
+            "totalTokens": 21774,
+            "cachedInputTokens": 20093,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 1378
+          }
+        },
+        {
+          "turn": 5,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_051fcda8b4296a38016af1d73bdb4087d19f00c92a14c303fc",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 3508.841400000005,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:40.059Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 21836,
+            "outputTokens": 293,
+            "totalTokens": 22129,
+            "cachedInputTokens": 21471,
+            "cacheReadReported": true,
+            "reasoningTokens": 0,
+            "cacheWriteTokens": 362
+          }
+        },
+        {
+          "turn": 6,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_051fcda8b4296a38016af1d73f5c9887d1ab4554e4fd4ec67d",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 1945.0252000000037,
+          "tools": [],
+          "startedAt": "2026-11-09T14:22:43.573Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 22192,
+            "outputTokens": 71,
+            "totalTokens": 22263,
+            "cachedInputTokens": 21833,
+            "cacheReadReported": true,
+            "reasoningTokens": 7,
+            "cacheWriteTokens": 356
+          }
+        },
+        {
+          "turn": 7,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "servedModel": "gpt-6-luna",
+          "responseId": "resp_051fcda8b4296a38016af1d753396087d183b97cd09d8f48b6",
+          "httpStatus": 200,
+          "status": "ok",
+          "elapsedMs": 4638.604800000001,
+          "tools": [],
+          "startedAt": "2026-11-09T14:23:03.513Z",
+          "serviceTier": "default",
+          "usage": {
+            "inputTokens": 22691,
+            "outputTokens": 269,
+            "totalTokens": 22960,
+            "cachedInputTokens": 22189,
+            "cacheReadReported": true,
+            "reasoningTokens": 224,
+            "cacheWriteTokens": 499
+          }
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0.034154079168,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 2,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0.00319680504,
+            "upperRmb": 0.00319680504,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.007360176648,
+            "upperRmb": 0.007360176648,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.012524951801999999,
+            "upperRmb": 0.012524951801999999,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.003517157424,
+            "upperRmb": 0.003517157424,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0027329390880000003,
+            "upperRmb": 0.0027329390880000003,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.0020064352440000003,
+            "upperRmb": 0.0020064352440000003,
+            "tariff": "default/short",
+            "note": null
+          },
+          {
+            "knownRmb": 0.002815613922,
+            "upperRmb": 0.002815613922,
+            "tariff": "default/short",
+            "note": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "django-admin-prepopulate_gpt-6-luna_sag2sql",
+      "model": "gpt-6-luna",
+      "arm": "sag2sql",
+      "task": "django-admin-prepopulate",
+      "inputHash": "a8997a2cca07c98ceb17593699f2a89b85f244deba99eece5f4f4a433da97525",
+      "startedAt": "2026-11-09T14:18:37.978Z",
+      "passed": false,
+      "hadCommit": false,
+      "failedChecks": [
+        "inline-metadata",
+        "slug-events-and-overrides",
+        "inline-registration",
+        "rendered-inline-unicode",
+        "existing-slug"
+      ],
+      "failureReason": "provider transport",
+      "calls": [
+        {
+          "turn": 1,
+          "attempt": 1,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10733.023099999999,
+          "tools": [],
+          "startedAt": "2026-11-09T14:18:54.244Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 2,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10732.4011,
+          "tools": [],
+          "startedAt": "2026-11-09T14:19:05.980Z",
+          "usage": null
+        },
+        {
+          "turn": 1,
+          "attempt": 3,
+          "model": "gpt-6-luna",
+          "status": "error",
+          "error": "Transport failed before response",
+          "elapsedMs": 10715.5112,
+          "tools": [],
+          "startedAt": "2026-11-09T14:19:18.728Z",
+          "usage": null
+        }
+      ],
+      "balanceChange": null,
+      "price": {
+        "knownRmb": 0,
+        "upperRmb": null,
+        "complete": false,
+        "estimatedCalls": 0,
+        "unpricedCalls": 3,
+        "requests": [
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          },
+          {
+            "knownRmb": 0,
+            "upperRmb": null,
+            "tariff": "unpriced",
+            "note": "HTTP attempt has no provider usage"
+          }
+        ]
+      }
+    }
+  ],
+  "wallets": [
+    {
+      "cells": [
+        "django-admin-autocomplete_deepseek-flash_rawagent",
+        "django-admin-autocomplete_deepseek-flash_codex",
+        "django-admin-autocomplete_deepseek-flash_recast",
+        "django-admin-autocomplete_deepseek-flash_sag2sql",
+        "django-admin-prepopulate_deepseek-flash_codex",
+        "django-admin-prepopulate_deepseek-flash_recast",
+        "django-admin-prepopulate_deepseek-flash_sag2sql"
+      ],
+      "closing": {
+        "source": "DeepSeek account balance change",
+        "currency": "CNY",
+        "from": "2026-11-09T14:10:57.244Z",
+        "to": "2026-11-09T14:25:40.328Z",
+        "totalRmb": 0.13,
+        "toppedUpRmb": 0.13,
+        "grantedRmb": 0,
+        "error": null
+      },
+      "after30s": {
+        "source": "DeepSeek account balance change",
+        "currency": "CNY",
+        "from": "2026-11-09T14:10:57.244Z",
+        "to": "2026-11-09T14:26:10.673Z",
+        "totalRmb": 0.21,
+        "toppedUpRmb": 0.21,
+        "grantedRmb": 0,
+        "error": null
+      }
+    }
+  ]
+}

@@ -4,13 +4,15 @@
 
 ## 十万行 Django 四种 harness 对照
 
-[HTML 报告](results/large-v2.html) · [逐次数据](results/large-v2-trials.csv) · [分组汇总](results/large-v2-summary.csv) · [独立回放归档](results/large-v2-evidence.json.gz) · [人民币计费依据](src/large-projects/BILLING.md)
+[HTML 报告](results/large-v3.html) · [逐次数据](results/large-v3-trials.csv) · [分组汇总](results/large-v3-summary.csv) · [独立回放归档](results/large-v3-evidence.json.gz) · [人民币计费依据](src/large-projects/BILLING.md)
 
-`large-v2` 在同一固定版本的 Django 生产源码上设置三个独立任务：管理后台关联字段自动补全、预填 slug、设置或禁用密码。每个任务跨 Python 与 JavaScript，在原生 Django、SQLite 和浏览器 DOM 环境中验收。仓库源码和 agent 可读取的源码分别统计。RECAST 的单模块清单最多容纳 256 个文件，四组共享这份清单。它首先包含必需的目标、参考和公开检查，再按路径邻近程度选取 20 个文件，并按生产源码行数填满余下位置。每题冻结树与实际可读生产源码均须超过十万行。
+`large-v3` 在同一固定版本的 Django 生产源码上设置三个独立任务：管理后台关联字段自动补全、预填 slug、设置或禁用密码。每个任务跨 Python 与 JavaScript，在原生 Django、SQLite 和浏览器 DOM 环境中验收。仓库源码和 agent 可读取的源码分别统计。RECAST 的单模块清单最多容纳 256 个文件，四组共享这份清单。它首先包含必需的目标、参考和公开检查，再按路径邻近程度选取 20 个文件，并按生产源码行数填满余下位置。每题冻结树与实际可读生产源码均须超过十万行。
 
 四组使用同一模型来源、`low` 推理设置、公开模块接口和编辑权限。RECAST 与 SAG2-SQLite 运行产品的项目流水线，后者为每次交付重新建索引。rawagent 使用单会话工具循环。Codex 组使用真正的 Codex CLI app-server、独立工作目录和六种项目工具。Codex 原生模型循环可以决定何时检查、修改或结束，代理层只将获准的读、改、编译和测试接口提供给模型。各组的模型请求不设任务 Token 预算。每一任务、模型、方法组合采样一次，共 36 次；失败也计入交付率、平均耗时、tokens/task 和人民币费用。
 
 运行前沿用 Windows bench 空间的 `.env.local` 密钥设置，并准备 Docker 和支持 app-server 动态工具的 `codex.exe`；可用 `RECAST_CODEX_BIN` 指定可执行文件。首次需下载固定的 Django、浏览器运行依赖与容器镜像。
+
+十万行先导批次 `large-v1` 在运行记录的原子替换中遇到 Windows 文件共享冲突，留下五个终态尝试。修订后的产品提交 `5ba062a4` 在这种冲突下重试原子写入。第二批 `large-v2` 遇到两家供应商同时连接超时，在停止派发前留下 16 个终态。正式批次 `large-v3` 使用已验证的进程级 HTTPS 代理，并在连接可用后从头运行全部 36 个组合。两个先导批次与接入预检均保留用量，单独计费。[先导用量](results/large-v1-pilot.json) · [连接异常批次用量](results/large-v2-network.json) · [接入预检用量](results/large-setup.json)
 
 ```powershell
 npm run bench:large -- --controls

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { waitForProvider } from "./transport.ts";
 import {
   createProjectClient,
   type ProjectModel,
@@ -76,7 +77,10 @@ export function meterExisting(
   onCall: (call: MeterCall) => void,
 ) {
   const nativeFetch = globalThis.fetch;
-  type Observed = { reply?: ReturnType<typeof replyDetails> };
+  type Observed = {
+    reply?: ReturnType<typeof replyDetails>;
+    signal?: AbortSignal;
+  };
   const context = new AsyncLocalStorage<Observed>();
   const endpoints = new Set([
     "https://api.openai.com/v1/responses",
@@ -98,10 +102,18 @@ export function meterExisting(
   };
   const client = createProjectClient(model, {
     uncapped: true,
-    onCall: (row) => {
+    onCall: async (row) => {
       const observed = context.getStore()?.reply;
       if (!observed) throw Error("Provider attempt was not observed");
       onCall({ ...row, ...observed, usage: observed.usage ?? row.usage });
+      if (
+        row.status === "error" &&
+        row.httpStatus === undefined &&
+        row.attempt < 3
+      ) {
+        const signal = context.getStore()?.signal;
+        if (!signal?.aborted) await waitForProvider(model, signal);
+      }
       if (row.status === "ok" && observed.servedModel !== model)
         throw Error("Provider did not attest requested model: " + model);
     },
@@ -109,7 +121,7 @@ export function meterExisting(
   return {
     client: {
       complete: (...args: Parameters<typeof client.complete>) =>
-        context.run({}, () => client.complete(...args)),
+        context.run({ signal: args[2] }, () => client.complete(...args)),
     },
     close() {
       globalThis.fetch = nativeFetch;

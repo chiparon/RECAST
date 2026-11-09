@@ -6,7 +6,7 @@ import { sha } from "../real-projects/inputs.ts";
 
 export const arms = ["recast", "sag2sql", "rawagent", "codex"] as const;
 export type Arm = (typeof arms)[number];
-export const batchName = "large-v2";
+export const batchName = "large-v3";
 export const resultsRoot = (batch: string) =>
   resolve("results/large-project-bench", batch);
 export const workRoot = resolve("work/lb");

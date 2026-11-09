@@ -9,6 +9,7 @@ import { meterExisting, sumUsage, type MeterCall } from "./meter.ts";
 import { json, workRoot, resultsRoot, type Arm } from "./protocol.ts";
 import { captureDeepSeekBalance, deepSeekBalanceChange } from "./billing.ts";
 import { fixtures } from "./case.ts";
+import { waitForProvider } from "./transport.ts";
 
 const [batch, recipe, modelName, armName] = process.argv.slice(2);
 if (existsSync(join(resultsRoot(batch), "drain.json"))) {
@@ -33,6 +34,7 @@ const balance = async () =>
   model === "deepseek-flash"
     ? await captureDeepSeekBalance().catch(() => null)
     : null;
+const readiness = await waitForProvider(model);
 const before = await balance();
 const startedAt = new Date().toISOString(),
   start = performance.now();
@@ -89,6 +91,7 @@ await json(join(resultsRoot(batch), id + ".trial.json"), {
   arm,
   ...identity,
   startedAt,
+  readiness,
   work,
   outputRoot,
   commit,
