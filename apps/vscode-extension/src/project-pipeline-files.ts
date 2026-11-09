@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { ProjectPipelineCheckpoint, ProjectPipelineRun } from './project-pipeline-types';
 import { projectPipelineMarkdown } from './project-pipeline';
@@ -12,6 +13,7 @@ import type { RetainedTestSuite } from '@forexplore/translation-verifier-service
 const execute = promisify(execFile);
 const ignored = new Set(['.git', '.forexpore', '.agent-tmp', '.translation-verifier-tests', '.translation-verifier-coverage', '.recast-tests-delivery', '.recast-build', '.forexplore', '.vs', '.idea', '.gradle', '.pytest_cache', 'node_modules', 'bin', 'obj', 'dist', 'build', 'out', 'target', 'coverage', '__pycache__']);
 const safeId = /^[a-f0-9-]{36}$/;
+const renameRetryMs = [10, 25, 50, 100, 200];
 async function git(root: string, args: string[]): Promise<string> {
   return (await execute('git', ['-C', root, ...args], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 })).stdout;
 }
@@ -152,8 +154,22 @@ export class ProjectPipelineFiles {
   async save(run: ProjectPipelineRun): Promise<void> {
     const directory = this.directory(run.id); await mkdir(directory, { recursive: true });
     for (const [name, content] of [['run.json', JSON.stringify(run, null, 2)], ['acceptance-report.md', projectPipelineMarkdown(run)]] as const) {
-      const destination = path.join(directory, name), temporary = `${destination}.tmp`;
-      await writeFile(temporary, content, 'utf8'); await rename(temporary, destination);
+      const destination = path.join(directory, name), temporary = `${destination}.${randomUUID()}.tmp`;
+      await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' });
+      try {
+        for (let retry = 0; ; retry++) {
+          try { await rename(temporary, destination); break; }
+          catch (error) {
+            const code = (error as NodeJS.ErrnoException).code, wait = renameRetryMs[retry];
+            if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY') || wait === undefined) throw error;
+            // Windows readers can briefly prevent atomic replacement of the previous snapshot.
+            await delay(wait);
+          }
+        }
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      }
     }
   }
   async read(id: string): Promise<ProjectPipelineRun> {
