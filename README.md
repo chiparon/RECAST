@@ -1,18 +1,54 @@
-# RECAST 检索与开发速度 benchmark
+# RECAST Benchmark 索引
 
-[端到端项目交付实验](PROJECT-BENCH.md) 比较 RECAST、SAG2 SQLite 工作流和原生 Agent 在相同完整项目上的验收通过率、用时与 Tokens/task。
+## 哪些属于 weichai，哪些属于 bench
 
-此分支包含 benchmark 源码、实测报告和汇总数据。主程序与 benchmark 使用相邻的 Windows 工作区。首次运行可在同一个父目录下检出两个分支：
+| 工作区 | 代码归属 | 入口 |
+|---|---|---|
+| `weichai/` | RECAST 产品。SAG2 检索、JEV、SQLite FTS5 索引、项目流水线、翻译运行时以及 Windows 写入修复 | 产品目录 `services/code-intelligence-service/src/`、`apps/vscode-extension/src/project-pipeline*.ts`、`services/adaptation-service/src/` |
+| `recast-bench/` | 本分支。负责出题、冻结输入、调用产品和模型、运行对照组、外部验收、计时、计费及发布报告 | [实验源码](src/) · [已发布结果](results/) · [端到端协议](PROJECT-BENCH.md) |
+
+例如，SAG2 的 BM25 策略在产品的 `sag2-bm25.ts` 和 `sag2-retrieval.ts`。评测时选哪些公开文件建库、如何比较 SAG2 与 rawagent，写在 bench 的 [索引适配器](src/real-projects/method-index.ts) 和 [执行方法](src/real-projects/methods.ts)。Django、coverage.py、BullMQ 和 Camel 是固定版本的上游输入。
+
+## 五套已运行的评测
+
+| 评测 | 范围和主要指标 | 源码 / 运行命令 | 已发布结果 |
+|---|---|---|---|
+| S01–S10 检索与开发速度 | 10 个构造场景、12 个模块查询、40 次流水线交付。分别测历史模块召回、延迟和开发用时 | [场景](src/scenarios/) · [驱动](src/run-benchmark.ts) · `npm run bench` | [综合报告](results/report.md) · [检索](results/retrieval-summary.csv) · [开发速度](results/velocity-summary.csv) |
+| B01–B09 建库与规模测试 | 比较五种存储配置的全量建库、增量更新和冷暖查询。正式矩阵含 47 次尝试 | [建库与语料脚本](src/index-build/) · `npm run bench:index` | [建库汇总](results/index-build-summary.csv) · [查询规模](results/index-query-scale.csv) |
+| 小型项目交付 `project-delivery` | 订单、索赔、作业队列三个 JS 工程。3 模型 × 3 方法，27 次，保留当时的预算协议 | [题目与 harness](src/project-bench/) · `npm run bench:project` | [报告](results/project-e2e-project-delivery.md) · [逐次结果](results/project-e2e-project-delivery-tasks.csv) |
+| 万行级多语言交付 `real-v2` | Django、coverage.py、BullMQ 三个上游项目，27 次。比较 RECAST、SAG2-SQLite 和 rawagent 的通过率、时间与 tokens/task | [源码与验收](src/real-projects/) · `npm run bench:real` | [报告](results/real-e2e-real-v2.md) · [离线 HTML](results/real-e2e-real-v2.html) · [回放归档](results/real-e2e-real-v2-evidence.json.gz) |
+| 十万行级 Django 交付 `large-v3` | 约 15.64 万行生产源码，三项跨语言需求。3 模型 × 4 方法，共 36 次；加入 Codex CLI 和人民币费用 | [源码与验收](src/large-projects/) · `npm run bench:large` | [报告](results/large-v3.md) · [离线 HTML](results/large-v3.html) · [逐次账单与结果](results/large-v3-trials.csv) · [回放归档](results/large-v3-evidence.json.gz) |
+
+S01–S10 提供构造的历史资产和检索真值。后三套交付评测主要考察在给定骨架里完成指定功能。讨论中的「已有实现部分对应新需求，有资产 / 无资产配对迁移」仍处于设计阶段。
+
+**先导与诊断数据**单独归档：万行级 [Django 交接预跑](results/real-e2e-real-v1.md)，十万行级 [接入预检](results/large-setup.json)、[Windows 文件锁先导](results/large-v1-pilot.json) 和 [网络故障批次](results/large-v2-network.json)。本机的 `results/runs/`、`results/index-build/`、`results/*project-bench/` 保存原始运行记录，`work/` 保存中间产物与交付工作区，`corpora/` 保存下载的语料。
+
+**产品仓还有更早的实验**，可在固定历史版本中查看跨语言模块检索 50 题、企业历史与资产升级、查询扩展、NL2Code 和国创试点。其中企业资产升级材料被 B 系列的语料准备脚本复用。[weichai 历史实验目录](https://github.com/chiparon/RECAST/tree/5ff260547903a81ce77de22d72853031566b8a19/experiments) · [产品历史检索驱动](https://github.com/chiparon/RECAST/blob/5ff260547903a81ce77de22d72853031566b8a19/scripts/benchmark-module-retrieval.mts)
+
+## 检出与版本对应
+
+在同一父目录检出两个工作区。下例选择十万行级正式批次。分支内的 [增量 Git bundle](repro/recast-runtime.bundle) 保存基于已发布产品提交的两次 Windows 文件锁修复，使读者可以检出实测时的精确产品版本。
 
 ```powershell
 git clone --branch feat/sag2-retrieval https://github.com/chiparon/RECAST.git weichai
-git clone --single-branch --branch codex/recast-bench https://github.com/chiparon/RECAST.git recast-bench
+git clone --single-branch --branch feat/bench/sag2 https://github.com/chiparon/RECAST.git recast-bench
+git -C weichai fetch ../recast-bench/repro/recast-runtime.bundle refs/heads/feat/sag2-retrieval
+git -C weichai switch --detach 5ba062a437142a40f15bf886114ae6065a154b25
 cd weichai
-npm run workspace:check
+npm run workspace:check -- --before-install
 npm ci
+npm run workspace:check
 cd ../recast-bench
 npm ci
 ```
+
+| 要复现的批次 | `weichai` 产品提交 |
+|---|---|
+| S01–S10、B01–B09 | `986d21575803fca473d39693042b04adb7d75c26` |
+| `project-delivery`、`real-v2` | `a66af7bf3933b016e1ac2508655a009dcf923e32` |
+| `large-v3` | `5ba062a437142a40f15bf886114ae6065a154b25` |
+
+直接阅读报告无需模型密钥。按上表选择产品版本后，`npm run verify:real -- --replay` 和 `npm run verify:large -- --replay` 可从已发布归档重跑外部验收，使用 Python、Docker 和固定上游依赖。重新调用模型、生成原始记录及其余批次的运行参数见下文和[端到端协议](PROJECT-BENCH.md)。
 
 B08 使用第三个相邻目录。在上述父目录运行 `git clone --no-checkout https://github.com/apache/camel.git recast-smoke-camel` 即可提供固定提交的 Git 对象。在线开发实验从环境变量或本机 `.env.local` 中的 `RECAST_KEY_FILE` 读取密钥文件路径。报告可直接打开 `results/report.html`；运行时的原始轨迹由各实验命令在本地生成。
 
