@@ -101,7 +101,8 @@ Implement the development Spec using the Analyzer plan and immutable module evid
 then implement dependent files in plan order. Read current files before writing; use exact returned hashes.
 Use write_file for complete file contents and complete_step only when the implementation is finished.
 Use edit_file for a targeted change: it replaces exact existing text, so the surrounding code you do not repeat stays
-intact. Its anchors must match exactly once, and a refused edit means the file changed under you — read it again.
+intact. After a hash conflict, edit_file returns the freshly read content and hash. Use that snapshot to adjust
+the anchors and retry the pending edit. For ambiguous, missing or unchanged anchors, correct the replacements.
 When the Context and the plan do not carry the historical implementation of a symbol you must reproduce, call
 query_evidence for one concrete symbol or behaviour; it returns bounded excerpts from the read-only history index in
 this task's scope. An empty result means there is no matching history evidence; do not repeat the same query. Use

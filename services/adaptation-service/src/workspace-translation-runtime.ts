@@ -428,12 +428,23 @@ export class WorkspaceTranslationRuntime {
       expectedHash: unknown,
       produce: (before: string | null) => unknown,
       logLine: (path: string) => string,
-    ): { path: string; hash: string | null } => {
+      refreshOnConflict = false,
+    ) => {
       if (typeof path !== "string" || !run.request.writeFiles.includes(path) ||
         !run.plan?.steps.some((step) => step.files.includes(path))) throw new Error("File is outside the implementation plan.");
-      if (!readHashes.has(path) || expectedHash !== readHashes.get(path)) throw new Error("Read the file before writing and supply its hash.");
+      const matchesRead = readHashes.has(path) && expectedHash === readHashes.get(path);
+      if (!matchesRead && !refreshOnConflict) throw new Error("Read the file before writing and supply its hash.");
       const beforeWrite = this.files.read(path);
-      if (hash(beforeWrite) !== expectedHash) throw new Error(`File changed since read: ${path}`);
+      const currentHash = hash(beforeWrite);
+      if (!matchesRead || currentHash !== expectedHash) {
+        if (!refreshOnConflict) throw new Error(`File changed since read: ${path}`);
+        // A rejected edit also serves as a new read. The next request must
+        // choose its anchors against these bytes and pass this hash.
+        readHashes.set(path, currentHash);
+        log(`edit_file 哈希不匹配，已重新读取：${path}`);
+        return { applied: false, error: "Hash conflict. Review the current content below and retry edit_file using this hash and matching anchors.",
+          path, hash: currentHash, content: beforeWrite };
+      }
       const content = produce(beforeWrite);
       if (typeof content !== "string" || content.length > maxWorkspaceFileChars) throw new Error("Invalid file content.");
       let change = run.changes.find((item) => item.path === path);
@@ -556,7 +567,7 @@ export class WorkspaceTranslationRuntime {
               result = applyWrite(path, args.expectedHash, (before) => {
                 if (before === null) throw new Error(`edit_file needs an existing file: ${path}. Use write_file to create it.`);
                 return applyWorkspaceEdits(before, edits);
-              }, (target) => `Translator 局部修改文件：${target}（${edits.length} 处）`);
+              }, (target) => `Translator 局部修改文件：${target}（${edits.length} 处）`, true);
               break;
             }
             case "complete_step": {

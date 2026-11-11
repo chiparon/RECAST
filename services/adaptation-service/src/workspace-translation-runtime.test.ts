@@ -148,6 +148,7 @@ describe('anchored file edits', () => {
     const ambiguous = '// header\nexport function limit(value) { throw new Error("todo"); }\nexport function other(value) { throw new Error("todo"); }\n';
     const { runtime, root } = await setup(scripted([
       ...editPrefix,
+      call('edit_file', { path: 'target.mjs', expectedHash: hash(ambiguous), edits: [{ oldText: 'throw new Error("todo");', newText: 'return 0;' }] }),
       messages => {
         expect(messages.at(-1)?.content).toContain('anchor matches 2 times');
         return call('edit_file', { path: 'target.mjs', expectedHash: hash(ambiguous), edits: [{ oldText: 'absent text', newText: 'x' }] });
@@ -162,7 +163,7 @@ describe('anchored file edits', () => {
     expect(await readFile(join(root, 'target.mjs'), 'utf8')).toBe(ambiguous);
   });
 
-  it('requires a fresh read after an edit, and rejects files outside the plan', async () => {
+  it('returns a fresh snapshot on stale edits and accepts a corrected retry only inside the plan', async () => {
     const { runtime, root } = await setup(scripted([
       ...editPrefix,
       call('edit_file', {
@@ -175,21 +176,20 @@ describe('anchored file edits', () => {
         edits: [{ oldText: 'export function keep() { return 2; }', newText: 'export function keep() { return 3; }' }],
       }),
       messages => {
-        expect(messages.at(-1)?.content).toContain('Read the file before writing and supply its hash');
-        return call('edit_file', { path: 'verify.mjs', expectedHash: hash('unused'), edits: [{ oldText: 'assert', newText: 'assertion' }] });
-      },
-      messages => {
-        expect(messages.at(-1)?.content).toContain('outside the implementation plan');
-        return call('read_file', { path: 'target.mjs' });
-      },
-      messages => {
-        const content = JSON.parse(messages.at(-1)!.content).content as string;
+        const snapshot = JSON.parse(messages.at(-1)!.content);
+        expect(snapshot).toMatchObject({ applied: false, path: 'target.mjs', content: stub.replace('return 1;', 'return 2;') });
+        expect(snapshot.hash).toBe(hash(snapshot.content));
         return call('edit_file', {
-          path: 'target.mjs', expectedHash: hash(content),
+          path: 'target.mjs', expectedHash: snapshot.hash,
           edits: [{ oldText: 'throw new Error("todo");', newText: 'if (value < 0) throw new Error("negative"); return value + 1;' }],
         });
       },
-      call('complete_step', { stepId: 'implement' }), call('compile'), call('run_tests'), call('finish'),
+      call('edit_file', { path: 'verify.mjs', expectedHash: hash('unused'), edits: [{ oldText: 'assert', newText: 'assertion' }] }),
+      messages => {
+        expect(JSON.parse(messages.at(-1)!.content)).toEqual({ error: 'File is outside the implementation plan.' });
+        return call('complete_step', { stepId: 'implement' });
+      },
+      call('compile'), call('run_tests'), call('finish'),
     ]), true, stub);
     const result = await finished(runtime, runtime.start(request).id);
     expect(result.error).toBeUndefined();
