@@ -8,7 +8,7 @@
     "baseContentUrl": "https://github.com/chiparon/weichai/blob/main/apps/vscode-extension",
     "baseImagesUrl": "https://raw.githubusercontent.com/chiparon/weichai/main/apps/vscode-extension"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "private": true,
   "engines": {
     "vscode": "^1.90.0"

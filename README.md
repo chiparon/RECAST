@@ -254,3 +254,9 @@ npm test
 ## 发布分支与完整归档
 
 `main` 保留产品运行、构建、企业使用说明和必要回归测试。实验数据、第三方源码快照、研究报告、答辩材料及历史日志已完整保存在 [`codex/archive-full-20261025`](https://github.com/chiparon/weichai/tree/codex/archive-full-20261025)。归档对应分离前的版本，后续产品修复以 main 为准。访问与复现实验的方法见[归档说明](docs/archive.md)。
+
+## 许可
+
+本项目自有内容采用 [PolyForm Noncommercial License 1.0.0](LICENSE)（SPDX: `PolyForm-Noncommercial-1.0.0`），属于源码可见的非商业许可，**不是 OSI 标准开源许可证**。允许个人学习研究、非商业用途，以及慈善、教育、公共研究、公共安全/健康、环保或政府机构的非商业使用、修改与分发；禁止商业用途。具体范围与定义以许可正文为准。
+
+第三方依赖、独立许可的测试夹具及历史有效授权保留原有权利；当前许可不会追溯撤销扩展曾声明的 MIT 授权，也不会自动修改另行签订的协议。详见[许可范围与已有声明](THIRD_PARTY_NOTICES.md)。
